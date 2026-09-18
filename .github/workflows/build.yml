@@ -70,8 +70,10 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.label }}
 
+      # 注意：本项目是纯 bin crate（无 lib.rs），测试位于 core/matcher.rs 与 i18n.rs
+      # 的 #[cfg(test)] 模块内，因此不能加 --lib —— 否则会因 “no library targets found” 直接失败。
       - name: 单元测试（matcher / i18n）
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --lib
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       - uses: tauri-apps/tauri-action@v0
         env:
