@@ -74,13 +74,18 @@ pub fn select_profile<'a>(
         }
         let cond = match &p.match_cond {
             Some(c) => c,
-            // 非 DEFAULT 必须声明 ≥1 match 字段，否则跳过
+            // 没有 match 块 → 不参与匹配
             None => continue,
         };
+        let spec = specificity(cond);
+        // 非 `__DEFAULT__` 必须至少声明一个条件。全空的 match 块因所有条件都被
+        // 当作通配而恒真，会以 specificity=0 混进「最具体者胜」的定序里，故直接跳过。
+        if spec == 0 {
+            continue;
+        }
         if !cond_matches(cond, id) {
             continue;
         }
-        let spec = specificity(cond);
         let prio = p.priority;
         match &best {
             Some((_, _, bspec, bprio)) if *bspec > spec || (*bspec == spec && *bprio >= prio) => {}
