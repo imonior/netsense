@@ -60,8 +60,14 @@ fn specificity(cond: &MatchConditions) -> u32 {
 }
 
 /// 选出应应用的 Profile（不含 `__DEFAULT__`）；全不命中返回 `None`。
-pub fn select_profile(cfg: &Config, id: &NetworkIdentity) -> Option<(String, &Profile)> {
-    let mut best: Option<(String, &Profile, u32, i32)> = None;
+///
+/// 返回的 `&Profile` 借自 `cfg`，因此必须显式标注生命周期：
+/// 入参有两个引用（`cfg` / `id`），省略规则无法判断该借谁。
+pub fn select_profile<'a>(
+    cfg: &'a Config,
+    id: &NetworkIdentity,
+) -> Option<(String, &'a Profile)> {
+    let mut best: Option<(String, &'a Profile, u32, i32)> = None;
     for (name, p) in cfg.profiles.iter() {
         if name == "__DEFAULT__" {
             continue;
