@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetSense</title>
+  <style>
+    :root { --bg: #11151c; --panel: #161b24; --line: #232c3a;
+            --fg: #e6e6e6; --muted: #8b97a7; --accent: #2f81f7; }
+    body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+           margin: 0; background: var(--bg); color: var(--fg); padding: 24px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .row { display: flex; gap: 10px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 14px 16px; margin-bottom: 14px; }
+    .kv { display: grid; grid-template-columns: 130px 1fr; row-gap: 6px; font-size: 13px; }
+    .kv span:first-child { color: var(--muted); }
+    pre { background: #0b0e13; border: 1px solid var(--line); border-radius: 8px;
+          padding: 14px; font-size: 12px; line-height: 1.5; overflow: auto; margin: 0; }
+    button, select { background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+             border-radius: 6px; padding: 7px 12px; font-size: 13px; }
+    button { background: var(--accent); border: 0; cursor: pointer; }
+    button:active { transform: translateY(1px); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+             background: #1b2432; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>NetSense <span class="badge" id="langBadge">en</span></h1>
+  <p class="muted">P1 控制台：状态 + i18n 切换 + 强制应用 Profile。（后续移植 editor.html 做完整编辑器）</p>
+
+  <div class="card">
+    <div class="row">
+      <label class="muted" for="lang">Language</label>
+      <select id="lang">
+        <option value="zh">简体中文</option>
+        <option value="en">English</option>
+        <option value="zh-TW">繁體中文</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+      </select>
+      <button onclick="refresh()">刷新状态</button>
+      <button id="applyBtn" onclick="applySelected()">强制应用</button>
+      <select id="profiles"></select>
+    </div>
+    <div class="kv" id="kv"></div>
+  </div>
+
+  <div class="card">
+    <p class="muted" style="margin-top:0">原始后端返回 (get_status)</p>
+    <pre id="out">…</pre>
+  </div>
+
+  <script>
+    // Tauri v2 在 withGlobalTauri=true 时注入 window.__TAURI__；非 Tauri 环境下降级。
+    const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
+
+    async function invoke(cmd, args) {
+      if (!hasTauri()) throw new Error("no Tauri bridge");
+      return await window.__TAURI__.core.invoke(cmd, args);
+    }
+
+    let strings = {};
+    const t = (k, def) => strings[k] || def || k;
+
+    async function loadStrings(lang) {
+      try {
+        strings = await invoke("get_strings");
+        document.getElementById("langBadge").textContent = lang;
+      } catch (e) { /* 非 Tauri 环境忽略 */ }
+    }
+
+    function renderKv(data) {
+      const rows = [
+        [t("status.ssid", "SSID"), data?.status?.ssid ?? "-"],
+        [t("status.gateway", "Gateway"), data?.status?.gateway ?? "-"],
+        ["DNS", data?.status?.dns ?? "-"],
+        ["IPv4", data?.status?.ipv4 ?? "-"],
+        ["IPv6", data?.status?.v6mode ?? "-"],
+        [t("status.current_profile", "Current profile"),
+          data?.current ? data.current : t("status.no_profile", "No profile applied")],
+      ];
+      document.getElementById("kv").innerHTML = rows
+        .map(([k, v]) => `<span>${escapeHtml(k)}</span><span>${escapeHtml(String(v))}</span>`)
+        .join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    async function refresh() {
+      const out = document.getElementById("out");
+      try {
+        const raw = await invoke("get_status");
+        let data = null;
+        try { data = typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_) {}
+        out.textContent = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
+        if (data) {
+          renderKv(data);
+          if (data.language) {
+            document.getElementById("lang").value = data.language;
+            document.getElementById("langBadge").textContent = data.language;
+          }
+          const sel = document.getElementById("profiles");
+          const keep = sel.value;
+          sel.innerHTML = (data.profiles || [])
+            .map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("");
+          if (keep) sel.value = keep;
+        }
+      } catch (e) {
+        out.textContent = "invoke 失败（请用 cargo tauri dev 运行）: " + e;
+      }
+    }
+
+    async function applySelected() {
+      const name = document.getElementById("profiles").value;
+      if (!name) return;
+      try {
+        await invoke("force_apply", { payload: JSON.stringify({ name }) });
+        await refresh();
+      } catch (e) {
+        document.getElementById("out").textContent = "force_apply 失败: " + e;
+      }
+    }
+
+    document.getElementById("lang").addEventListener("change", async (ev) => {
+      try {
+        await invoke("set_language", { code: ev.target.value });
+        await loadStrings(ev.target.value);
+        await refresh();
+      } catch (e) {
+        document.getElementById("out").textContent = "set_language 失败: " + e;
+      }
+    });
+
+    (async () => { await loadStrings(); await refresh(); })();
+  </script>
+</body>
+</html>

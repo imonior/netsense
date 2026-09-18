@@ -1,0 +1,78 @@
+{
+  "__DEFAULT__": {
+    "mode": "dhcp",
+    "dns": "",
+    "v6mode": "automatic"
+  },
+  "HomeWiFi": {
+    "match": {
+      "ssid": "MyHomeWiFi",
+      "gateway_mac": "aa:bb:cc:11:22:33"
+    },
+    "mode": "dhcp",
+    "dns": "127.0.0.1",
+    "v6mode": "off",
+    "priority": 5,
+    "health": {
+      "enabled": true,
+      "fallback": { "enabled": true },
+      "mode": "both",
+      "http_target": "http://cp.cloudflare.com",
+      "icmp_target": "223.5.5.5",
+      "interval": 30,
+      "retries": 3,
+      "timeout": 5
+    },
+    "automation": {
+      "enabled": false,
+      "on_apply": [],
+      "on_revert": []
+    }
+  },
+  "Office_5G": {
+    "match": {
+      "ssid": "Office_5G",
+      "gateway_mac": "aa:bb:cc:dd:ee:ff",
+      "bssid": "00:11:22:33:44:55"
+    },
+    "mode": "manual",
+    "ip": "192.168.1.100",
+    "netmask": "255.255.255.0",
+    "gateway": "192.168.1.1",
+    "dns": "192.168.1.1,8.8.8.8",
+    "v6mode": "off",
+    "priority": 10,
+    "health": {
+      "enabled": true,
+      "fallback": { "enabled": true },
+      "mode": "both",
+      "http_target": "http://cp.cloudflare.com",
+      "icmp_target": "223.5.5.5",
+      "interval": 30,
+      "retries": 3,
+      "timeout": 5
+    },
+    "automation": {
+      "enabled": true,
+      "on_apply": [
+        { "type": "route", "dest": "10.0.0.0/8", "gateway": "192.168.1.1", "metric": 0 },
+        { "type": "launch", "app": "/Applications/Slack.app" },
+        { "type": "run", "path": "scripts/office-vpn.sh", "elevated": false }
+      ],
+      "on_revert": [
+        { "type": "route", "dest": "10.0.0.0/8", "delete": true }
+      ]
+    }
+  },
+  "IdentifyByRouterOnly": {
+    "match": {
+      "gateway_mac": "de:ad:be:ef:00:01"
+    },
+    "mode": "manual",
+    "ip": "192.168.50.20",
+    "netmask": "255.255.255.0",
+    "gateway": "192.168.50.1",
+    "dns": "192.168.50.1",
+    "v6mode": "automatic"
+  }
+}

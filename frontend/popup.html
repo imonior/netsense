@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NetSense</title>
+  <style>
+    :root {
+      --bg: #1c1c1e;
+      --bg-card: #26262a;
+      --line: #34343a;
+      --fg: #ededf0;
+      --muted: #8e8e97;
+      --accent: #2f81f7;
+      --ok: #34c759;
+      --warn: #ff9f0a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg); color: var(--fg);
+      font: 12px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      user-select: none; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 12px 8px; border-bottom: 1px solid var(--line);
+    }
+    header b { font-size: 13px; letter-spacing: .2px; }
+    select {
+      background: var(--bg-card); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 5px; font-size: 11px; padding: 2px 4px;
+    }
+    .card {
+      background: var(--bg-card); border: 1px solid var(--line);
+      border-radius: 8px; margin: 10px 12px 0; padding: 9px 10px;
+    }
+    .row { display: flex; justify-content: space-between; gap: 10px; }
+    .row + .row { margin-top: 4px; }
+    .k { color: var(--muted); }
+    .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62%; }
+    .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+    .dot.on { background: var(--ok); }
+    .ssid { font-size: 13px; font-weight: 600; display: flex; align-items: center; }
+    .badge {
+      display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px;
+      background: #2f3640; color: var(--muted); margin-left: 6px;
+    }
+    .badge.sudoers { background: #1d3a22; color: #6ee08a; }
+    .badge.osascript { background: #3a3018; color: #ffc768; }
+    .section { padding: 12px 12px 0; color: var(--muted); font-size: 10px;
+               text-transform: uppercase; letter-spacing: .8px; }
+    .switches { margin: 6px 12px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+                max-height: 176px; overflow-y: auto; }
+    .sw {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 7px 10px; cursor: pointer; font-size: 12px;
+    }
+    .sw + .sw { border-top: 1px solid var(--line); }
+    .sw:hover { background: #2e2e34; }
+    .sw.current { color: var(--ok); }
+    .sw .go { color: var(--muted); font-size: 11px; }
+    .sw:hover .go { color: var(--accent); }
+    .empty { padding: 10px; color: var(--muted); text-align: center; }
+    footer {
+      margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--line);
+      display: flex; gap: 8px;
+    }
+    button {
+      flex: 1; padding: 7px 0; font-size: 12px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--line); background: var(--bg-card); color: var(--fg);
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:active { transform: translateY(1px); }
+    .toast {
+      position: fixed; left: 50%; bottom: 54px; transform: translateX(-50%);
+      background: rgba(0,0,0,.82); border: 1px solid var(--line); color: #fff;
+      padding: 5px 12px; border-radius: 999px; font-size: 11px; opacity: 0;
+      transition: opacity .18s; pointer-events: none; white-space: nowrap;
+    }
+    .toast.show { opacity: 1; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #45454d; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <b>NetSense</b>
+    <select id="lang" title="Language">
+      <option value="zh">简体中文</option>
+      <option value="en">English</option>
+      <option value="zh-TW">繁體中文</option>
+      <option value="ja">日本語</option>
+      <option value="ko">한국어</option>
+    </select>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <span class="ssid"><span class="dot" id="dot"></span><span id="ssid">—</span><span class="badge" id="priv"></span></span>
+    </div>
+    <div class="row"><span class="k" id="k-profile">Profile</span><span class="v" id="v-profile">—</span></div>
+    <div class="row"><span class="k" id="k-ip">IPv4</span><span class="v" id="v-ip">—</span></div>
+    <div class="row"><span class="k" id="k-gw">Gateway</span><span class="v" id="v-gw">—</span></div>
+    <div class="row"><span class="k" id="k-dns">DNS</span><span class="v" id="v-dns">—</span></div>
+    <div class="row"><span class="k" id="k-signal">Signal</span><span class="v" id="v-signal">—</span></div>
+  </div>
+
+  <div class="section" id="sec-switch">Quick Switch</div>
+  <div class="switches" id="switches"></div>
+
+  <footer>
+    <button id="btn-editor">Open Editor</button>
+    <button id="btn-refresh">Refresh</button>
+    <button class="primary" id="btn-quit">Quit</button>
+  </footer>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
+    const invoke = (cmd, args) => {
+      if (!hasTauri()) return Promise.reject(new Error("no tauri bridge"));
+      return window.__TAURI__.core.invoke(cmd, args);
+    };
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    let strings = {};
+    const t = (k, d) => strings[k] || d || k;
+    let currentProfile = null;
+
+    function toast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg; el.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove("show"), 1600);
+    }
+
+    function applyI18n() {
+      document.getElementById("k-profile").textContent = t("popup.profile", "Profile");
+      document.getElementById("k-ip").textContent = t("popup.ip", "IPv4");
+      document.getElementById("k-gw").textContent = t("popup.gateway", "Gateway");
+      document.getElementById("k-dns").textContent = t("popup.dns", "DNS");
+      document.getElementById("k-signal").textContent = t("popup.signal", "Signal");
+      document.getElementById("sec-switch").textContent = t("popup.quick_switch", "Quick Switch");
+      document.getElementById("btn-editor").textContent = t("popup.open_editor", "Open Editor");
+      document.getElementById("btn-refresh").textContent = t("popup.refresh", "Refresh");
+      document.getElementById("btn-quit").textContent = t("tray.quit", "Quit");
+      document.getElementById("priv").title = t("tray.priv", "Privilege");
+    }
+
+    function render(data) {
+      const st = data.status || {};
+      const connected = !!st.connected;
+      document.getElementById("dot").className = "dot" + (connected ? " on" : "");
+      document.getElementById("ssid").textContent = st.ssid || t("popup.disconnected", "Not connected");
+      document.getElementById("v-profile").textContent = data.current || t("status.no_profile", "No profile applied");
+      document.getElementById("v-ip").textContent = st.ipv4 || "—";
+      document.getElementById("v-gw").textContent = st.gateway || "—";
+      document.getElementById("v-dns").textContent = st.dns || "—";
+      document.getElementById("v-signal").textContent = st.rssi != null ? st.rssi + " dBm" : "—";
+
+      const priv = document.getElementById("priv");
+      priv.className = "badge " + (data.priv || "");
+      priv.textContent = data.priv === "direct"
+        ? t("tray.priv_direct", "No prompt")
+        : (data.priv ? t("tray.priv_prompt", "Asks each time") : "");
+
+      const list = document.getElementById("switches");
+      const names = (data.profiles || []).slice().sort();
+      currentProfile = data.current;
+      if (!names.length) {
+        list.innerHTML = `<div class="empty">${esc(t("popup.no_profiles", "No configured networks"))}</div>`;
+        return;
+      }
+      list.innerHTML = names.map(n => {
+        const cur = n === data.current;
+        return `<div class="sw${cur ? " current" : ""}" data-name="${esc(n)}">
+                  <span>${cur ? "● " : ""}${esc(n)}</span>
+                  <span class="go">${cur ? "" : esc(t("popup.apply", "Apply"))}</span>
+                </div>`;
+      }).join("");
+      list.querySelectorAll(".sw").forEach(el => {
+        el.onclick = () => apply(el.dataset.name);
+      });
+    }
+
+    async function refresh() {
+      try {
+        const raw = await invoke("get_status");
+        const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (data.language) {
+          document.getElementById("lang").value = data.language;
+          strings = await invoke("get_strings");
+        }
+        applyI18n();
+        render(data);
+      } catch (e) { /* 非 Tauri 环境（浏览器直接打开）时静默 */ }
+    }
+
+    async function apply(name) {
+      if (!name || name === currentProfile) return;
+      try {
+        await invoke("force_apply", { payload: JSON.stringify({ name }) });
+        toast(t("notify.applied", "Applied profile: {name}").replace("{name}", name));
+        await refresh();
+      } catch (e) {
+        toast(String(e));
+      }
+    }
+
+    document.getElementById("lang").addEventListener("change", async (ev) => {
+      try {
+        await invoke("set_language", { code: ev.target.value });
+        strings = await invoke("get_strings");
+        applyI18n();
+        await refresh();
+      } catch (e) { /* ignore */ }
+    });
+    document.getElementById("btn-editor").onclick = () => invoke("open_editor").catch(() => {});
+    document.getElementById("btn-refresh").onclick = refresh;
+    document.getElementById("btn-quit").onclick = () => invoke("quit_app").catch(() => {});
+
+    // 面板每次获得焦点（被托盘点开）时刷新一次，保证数据新鲜
+    window.addEventListener("focus", refresh);
+    // 后端在网络切换 / 配置重载后会广播，面板与编辑器同步刷新
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.listen("netsense://status", () => refresh());
+    }
+    (async () => {
+      try { strings = await invoke("get_strings"); } catch (e) {}
+      applyI18n();
+      refresh();
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NetSense</title>
+  <style>
+    :root {
+      --bg-main: #121212; --bg-panel: #1e1e1e; --bg-input: #2d2d2d;
+      --border-color: #383838; --text-main: #e0e0e0; --text-label: #aaaaaa;
+      --text-accent: #64B5F6; --btn-primary: #1976D2; --btn-danger: #D32F2F;
+      --btn-warning: #E65100; --radius-md: 8px; --radius-sm: 4px;
+    }
+    body {
+      background-color: var(--bg-main); color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      margin: 0; padding: 12px; font-size: 13px; user-select: none; overflow: hidden;
+    }
+    .container { display: grid; grid-template-columns: 230px 1fr; gap: 12px; height: calc(580px - 24px); }
+    .sidebar, .main-panel {
+      background: var(--bg-panel); border: 1px solid var(--border-color);
+      border-radius: var(--radius-md); display: flex; flex-direction: column; overflow: hidden;
+    }
+    .panel-header {
+      padding: 10px 12px; border-bottom: 1px solid var(--border-color);
+      font-weight: bold; font-size: 13px; display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel-content { padding: 12px; flex: 1; overflow-y: auto; }
+    .list-header {
+      padding: 6px 12px; background: rgba(255,255,255,0.02); font-size: 10px; color: #64B5F6;
+      text-transform: uppercase; letter-spacing: 1px; border-left: 3px solid var(--text-accent);
+      border-bottom: 1px solid var(--border-color); font-weight: 700;
+    }
+    .list-item {
+      padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border-color);
+      font-size: 12px; display: flex; justify-content: space-between;
+    }
+    .list-item:hover { background: #2a2a2a; }
+    .list-item.active { background: #1565C0; color: #fff; }
+    .list-item.current-connected { background: #2E7D32; color: #fff; }
+    .list-item.current-connected.active { background: #1565C0; color: #fff; }
+    .list-item.unconfigured { opacity: .6; }
+    .list-item.primary-section { color: #FFD54F; }
+    .status-card {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 10px 12px;
+      border-radius: var(--radius-md); border: 1px solid rgba(100,181,246,.2); margin-bottom: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+      line-height: 1.6; white-space: pre-wrap; color: #e0e0e0; box-shadow: 0 2px 8px rgba(0,0,0,.3);
+    }
+    .target-info {
+      background: linear-gradient(135deg, #1565C0 0%, #0D47A1 100%); padding: 10px 12px;
+      border-radius: var(--radius-sm); margin-bottom: 12px; display: flex;
+      justify-content: space-between; align-items: center;
+    }
+    .target-name { color: #fff; font-weight: bold; font-size: 12px; }
+    .target-hint { color: rgba(255,255,255,.7); font-size: 10px; }
+    .section-title {
+      font-size: 12px; color: var(--text-accent); margin: 10px 0 6px 0;
+      padding-bottom: 4px; border-bottom: 1px dashed #333; font-weight: bold;
+    }
+    .form-group { margin-bottom: 8px; display: grid; grid-template-columns: 90px 1fr; gap: 8px; align-items: center; }
+    label { color: var(--text-label); font-size: 12px; text-align: right; }
+    input, select {
+      background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main);
+      padding: 4px 6px; border-radius: var(--radius-sm); font-size: 12px; width: 100%; box-sizing: border-box;
+    }
+    input:focus, select:focus { border-color: var(--btn-primary); outline: none; }
+    .hint { grid-column: 2; color: #7a7a7a; font-size: 10px; margin-top: -4px; }
+    .btn-group {
+      padding: 10px 12px; border-top: 1px solid var(--border-color);
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+    button {
+      background: var(--btn-primary); color: #fff; border: none; padding: 6px 14px;
+      border-radius: var(--radius-sm); cursor: pointer; font-size: 12px;
+    }
+    button:hover { opacity: .9; }
+    button.danger { background: var(--btn-danger); }
+    button.warning { background: var(--btn-warning); }
+    button.secondary { background: #4a4a4a; color: #ccc; }
+    #toast {
+      position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+      background: rgba(0,0,0,.85); border: 1px solid var(--border-color); color: #fff;
+      padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
+      transition: opacity .2s; pointer-events: none; white-space: nowrap;
+    }
+    #toast.show { opacity: 1; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="sidebar">
+    <div class="panel-header" id="header-networks">Wi-Fi</div>
+    <div class="panel-content" style="padding:0;" id="networks-list"></div>
+  </div>
+
+  <div class="main-panel">
+    <div class="panel-header"><span id="header-panel">Policy</span></div>
+
+    <div class="panel-content">
+      <div class="status-card" id="current-hardware-info">…</div>
+
+      <div class="target-info" id="target-info" style="display:none;">
+        <span class="target-name" id="target-name"></span>
+        <span class="target-hint" id="target-hint"></span>
+      </div>
+
+      <div class="section-title" id="section-match">匹配条件</div>
+      <div class="form-group"><label id="label-m-ssid">SSID</label><input type="text" id="m-ssid"></div>
+      <div class="form-group"><label id="label-m-gwmac">Gateway MAC</label><input type="text" id="m-gwmac" placeholder="aa:bb:cc:dd:ee:ff"></div>
+      <div class="form-group"><label id="label-m-bssid">BSSID</label><input type="text" id="m-bssid" placeholder="00:11:22:33:44:55"></div>
+      <div class="form-group"><label id="label-priority">Priority</label><input type="number" id="priority" value="0"></div>
+      <div class="form-group"><span></span><span class="hint" id="match-hint"></span></div>
+
+      <div class="section-title" id="section-ipv4">IPv4</div>
+      <div class="form-group">
+        <label id="label-mode">Type</label>
+        <select id="mode" onchange="toggleFields()">
+          <option value="dhcp">DHCP</option>
+          <option value="manual">Manual</option>
+        </select>
+      </div>
+      <div id="v4-manual-inputs">
+        <div class="form-group"><label id="label-ip">IP</label><input type="text" id="ip"></div>
+        <div class="form-group"><label id="label-netmask">Mask</label><input type="text" id="netmask" value="255.255.255.0"></div>
+        <div class="form-group"><label id="label-gateway">Router</label><input type="text" id="gateway"></div>
+      </div>
+
+      <div class="section-title" id="section-ipv6">IPv6</div>
+      <div class="form-group">
+        <label id="label-v6mode">Type</label>
+        <select id="v6mode" onchange="toggleFields()">
+          <option value="automatic">Automatic</option>
+          <option value="manual">Manual</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+      <div id="v6-manual-inputs">
+        <div class="form-group"><label id="label-ipv6">IP</label><input type="text" id="ipv6"></div>
+        <div class="form-group"><label id="label-v6prefix">Prefix</label><input type="text" id="v6prefix" value="64"></div>
+        <div class="form-group"><label id="label-v6gateway">Router</label><input type="text" id="v6gateway"></div>
+      </div>
+
+      <div class="section-title" id="section-dns">DNS</div>
+      <div class="form-group">
+        <label id="label-dns">Servers</label>
+        <input type="text" id="dns" placeholder="">
+      </div>
+    </div>
+
+    <div class="btn-group">
+      <button class="warning" id="btn-force">Force</button>
+      <button class="danger" id="btn-delete">Delete</button>
+      <button id="btn-save">Save</button>
+      <button class="secondary" id="btn-close">Close</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+  const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
+  const invoke = (cmd, args) => {
+    if (!hasTauri()) return Promise.reject(new Error("no tauri bridge"));
+    return window.__TAURI__.core.invoke(cmd, args);
+  };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  let strings = {};
+  const t = (k, d) => strings[k] || d || k;
+  const DEFAULT_KEY = "__DEFAULT__";
+
+  let configs = {};            // name -> profile（后端 config 原样）
+  let preferred = [];          // 系统已保存的 SSID 列表
+  let currentSSID = null;      // 当前连接的 SSID
+  let hardware = {};           // 当前硬件真实值（用于 manual 回填）
+  let selected = null;
+
+  function toast(msg) {
+    const el = $("toast");
+    el.textContent = msg; el.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => el.classList.remove("show"), 1800);
+  }
+
+  function applyI18n() {
+    $("header-networks").textContent = t("editor.wifi_networks", "Wi-Fi Networks");
+    $("header-panel").textContent = t("editor.config_panel", "Policy Configuration Panel");
+    $("section-match").textContent = t("editor.match_title", "Matching Conditions");
+    $("label-m-ssid").textContent = t("editor.match_ssid", "SSID");
+    $("label-m-gwmac").textContent = t("editor.match_gateway_mac", "Gateway MAC");
+    $("label-m-bssid").textContent = t("editor.match_bssid", "BSSID");
+    $("label-priority").textContent = t("editor.priority", "Priority");
+    $("match-hint").textContent = t("editor.match_hint", "");
+    $("section-ipv4").textContent = t("editor.ipv4_config", "IPv4");
+    $("section-ipv6").textContent = t("editor.ipv6_config", "IPv6");
+    $("section-dns").textContent = t("editor.dns_config", "DNS");
+    $("label-mode").textContent = t("editor.config_type", "Type");
+    $("label-v6mode").textContent = t("editor.config_type", "Type");
+    $("label-ip").textContent = t("editor.ip_address", "IP");
+    $("label-netmask").textContent = t("editor.subnet_mask", "Mask");
+    $("label-gateway").textContent = t("editor.router", "Router");
+    $("label-ipv6").textContent = t("editor.ip_address", "IP");
+    $("label-v6prefix").textContent = t("editor.prefix_length", "Prefix");
+    $("label-v6gateway").textContent = t("editor.router", "Router");
+    $("label-dns").textContent = t("editor.dns_servers", "Servers");
+    $("dns").placeholder = t("editor.dns_placeholder", "");
+    $("btn-force").textContent = t("editor.force_apply", "Force");
+    $("btn-delete").textContent = t("editor.delete", "Delete");
+    $("btn-save").textContent = t("editor.save", "Save");
+    $("btn-close").textContent = t("editor.close", "Close");
+  }
+
+  function renderSidebar() {
+    const box = $("networks-list");
+    box.innerHTML = "";
+
+    const configKeys = Object.keys(configs);
+    const configSet = new Set(configKeys);
+    const prefSet = new Set(preferred);
+
+    const configured = configKeys.filter(n => n !== DEFAULT_KEY).sort();
+    const unconfigured = preferred
+      .filter(s => s !== DEFAULT_KEY && !configSet.has(s))
+      .sort();
+    if (currentSSID && !prefSet.has(currentSSID) && !configSet.has(currentSSID)) {
+      unconfigured.push(currentSSID);
+      unconfigured.sort();
+    }
+
+    const add = (cls, html, name) => {
+      const el = document.createElement("div");
+      el.className = "list-item " + cls;
+      el.innerHTML = html;
+      el.onclick = () => selectName(name, el);
+      box.appendChild(el);
+      return el;
+    };
+
+    if (currentSSID) {
+      const hasCfg = configSet.has(currentSSID);
+      add("current-connected primary-section",
+        `<span>📶 ${esc(currentSSID)}</span>${hasCfg ? '<span style="color:#4CAF50;">●</span>' : ""}`,
+        currentSSID);
+    }
+    if (configSet.has(DEFAULT_KEY)) {
+      add("primary-section", `<span>${esc(t("editor.global_fallback", "★ Global Fallback"))}</span>
+        <span style="color:#4CAF50;">●</span>`, DEFAULT_KEY);
+    }
+    if (configured.length) {
+      const h = document.createElement("div");
+      h.className = "list-header"; h.textContent = t("editor.configured_networks", "Configured");
+      box.appendChild(h);
+      configured.forEach(n => {
+        if (n === currentSSID) return;
+        add("", `<span>${esc(n)}</span><span style="color:#4CAF50;">●</span>`, n);
+      });
+    }
+    if (unconfigured.length) {
+      const h = document.createElement("div");
+      h.className = "list-header"; h.textContent = t("editor.unconfigured_networks", "Unconfigured");
+      box.appendChild(h);
+      unconfigured.forEach(n => {
+        if (n === currentSSID) return;
+        add("unconfigured", `<span>${esc(n)}</span>`, n);
+      });
+    }
+
+    const first = box.querySelector(".list-item");
+    if (first) first.click();
+  }
+
+  function selectName(name, el) {
+    selected = name;
+    document.querySelectorAll(".list-item").forEach(x => x.classList.remove("active"));
+    if (el) el.classList.add("active");
+
+    const isDefault = name === DEFAULT_KEY;
+    const cfg = configs[name] || {};
+    const isConfigured = !!configs[name];
+    const isCurrent = !!name && name === currentSSID;
+
+    $("target-info").style.display = "flex";
+    $("target-name").textContent = isDefault
+      ? t("editor.global_fallback", "★ Global Fallback")
+      : name;
+    $("target-hint").textContent = isDefault
+      ? t("editor.global_hint", "")
+      : (isConfigured ? t("editor.configured", "Configured") : t("editor.unconfigured_networks", "Unconfigured"));
+
+    $("btn-delete").style.display = (isConfigured && !isDefault) ? "block" : "none";
+    $("btn-force").style.display = (isCurrent && !isDefault) ? "block" : "none";
+
+    const m = cfg.match || {};
+    $("m-ssid").value = m.ssid ?? (isDefault ? "" : (isConfigured ? "" : name));
+    $("m-gwmac").value = m.gateway_mac || "";
+    $("m-bssid").value = m.bssid || "";
+    $("priority").value = cfg.priority ?? 0;
+
+    $("mode").value = cfg.mode || "dhcp";
+    $("ip").value = cfg.ip || "";
+    $("netmask").value = cfg.netmask || "255.255.255.0";
+    $("gateway").value = cfg.gateway || "";
+    $("v6mode").value = cfg.v6mode || "automatic";
+    $("ipv6").value = cfg.ipv6 || "";
+    $("v6prefix").value = cfg.v6prefix || "64";
+    $("v6gateway").value = cfg.v6gateway || "";
+    $("dns").value = cfg.dns || "";
+
+    toggleFields();
+  }
+
+  function toggleFields() {
+    const manual = $("mode").value === "manual";
+    $("v4-manual-inputs").style.display = manual ? "block" : "none";
+    if (manual && selected === currentSSID) {
+      if (!$("ip").value && hardware.ip) $("ip").value = hardware.ip;
+      if (!$("netmask").value && hardware.netmask) $("netmask").value = hardware.netmask;
+      if (!$("gateway").value && hardware.gateway) $("gateway").value = hardware.gateway;
+      if (!$("dns").value && hardware.dns) $("dns").value = hardware.dns;
+    }
+    $("v6-manual-inputs").style.display = $("v6mode").value === "manual" ? "block" : "none";
+  }
+
+  function renderHardware(st) {
+    if (!st) return;
+    hardware = { ip: st.ipv4 || "", netmask: st.netmask || "", gateway: st.gateway || "", dns: st.dns || "" };
+    $("current-hardware-info").textContent =
+      `📶 ${t("editor.current_connection", "Current")}: ${st.ssid || t("editor.not_connected", "Not Connected")}
+━━━━━━━━ IPv4 ━━━━━━━━
+${t("editor.config_type", "Type")}: ${st.ipv4 ? "manual/dhcp" : t("editor.not_assigned", "Not Assigned")}
+${t("editor.ip_address", "IP")}: ${st.ipv4 || t("editor.not_assigned", "Not Assigned")}
+${t("editor.subnet_mask", "Mask")}: ${st.netmask || t("editor.not_assigned", "Not Assigned")}
+${t("editor.router", "Router")}: ${st.gateway || t("editor.not_assigned", "Not Assigned")}
+
+━━━━━━━━ IPv6 ━━━━━━━━
+${t("editor.config_type", "Type")}: ${st.v6mode || "automatic"}
+
+━━━━━━━━ DNS ━━━━━━━━
+${t("editor.dns_servers", "DNS")}: ${st.dns || t("editor.system_auto", "System Auto")}`;
+  }
+
+  function buildProfile() {
+    const p = {
+      mode: $("mode").value,
+      dns: $("dns").value.trim(),
+      v6mode: $("v6mode").value,
+      priority: Number($("priority").value) || 0
+    };
+    const match = {};
+    const ssid = $("m-ssid").value.trim();
+    const gwmac = $("m-gwmac").value.trim();
+    const bssid = $("m-bssid").value.trim();
+    if (ssid) match.ssid = ssid;
+    if (gwmac) match.gateway_mac = gwmac;
+    if (bssid) match.bssid = bssid;
+    if (Object.keys(match).length) p.match = match;
+
+    if (p.mode === "manual") {
+      p.ip = $("ip").value.trim();
+      p.netmask = $("netmask").value.trim();
+      p.gateway = $("gateway").value.trim();
+    }
+    if (p.v6mode === "manual") {
+      p.ipv6 = $("ipv6").value.trim();
+      p.v6prefix = $("v6prefix").value.trim();
+      p.v6gateway = $("v6gateway").value.trim();
+    }
+    return p;
+  }
+
+  async function loadAll() {
+    try {
+      strings = await invoke("get_strings");
+    } catch (_) {}
+    applyI18n();
+    try {
+      const rawCfg = await invoke("get_config");
+      const cfg = typeof rawCfg === "string" ? JSON.parse(rawCfg) : rawCfg;
+      configs = cfg.profiles || {};
+
+      preferred = await invoke("get_networks") || [];
+      const rawSt = await invoke("get_status");
+      const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
+      currentSSID = st.status && st.status.ssid ? st.status.ssid : null;
+      renderHardware(st.status);
+      renderSidebar();
+    } catch (e) {
+      $("current-hardware-info").textContent = "invoke 失败（请用 cargo tauri dev 运行）: " + e;
+    }
+  }
+
+  $("btn-save").onclick = async () => {
+    if (!selected) { toast(t("editor.select_network_first", "Select a network first")); return; }
+    const profile = buildProfile();
+    if (selected !== DEFAULT_KEY && !profile.match) {
+      toast(t("editor.match_required", "请至少填写一个匹配条件"));
+      return;
+    }
+    try {
+      await invoke("save_scene", { payload: JSON.stringify({ name: selected, profile }) });
+      toast(t("editor.saved", "Saved").replace("{name}", selected));
+      await loadAll();
+    } catch (e) { toast(t("editor.save_failed", "Save failed").replace("{error}", e)); }
+  };
+
+  $("btn-delete").onclick = async () => {
+    if (!selected) return;
+    if (!confirm(`${t("editor.confirm_delete", "Delete")} ${selected} ${t("editor.confirm_delete_hint", "")}`)) return;
+    try {
+      await invoke("delete_profile", { name: selected });
+      toast(t("editor.deleted", "Deleted").replace("{name}", selected));
+      selected = null;
+      await loadAll();
+    } catch (e) { toast(String(e)); }
+  };
+
+  $("btn-force").onclick = async () => {
+    if (!selected) return;
+    try {
+      await invoke("force_apply", { payload: JSON.stringify({ name: selected }) });
+      toast(t("notify.applied", "Applied").replace("{name}", selected));
+      await loadAll();
+    } catch (e) { toast(String(e)); }
+  };
+
+  $("btn-close").onclick = () => { invoke("close_editor").catch(() => {}); };
+
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    window.__TAURI__.event.listen("netsense://status", () => loadAll());
+  }
+  loadAll();
+</script>
+</body>
+</html>

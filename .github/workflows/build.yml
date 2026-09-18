@@ -1,0 +1,95 @@
+name: build
+
+# 三平台构建：push tag / 手动触发即产出安装包。
+# 之所以把构建放在云端：Windows 上 Tauri 官方要求 MSVC + Windows SDK（约 3–6GB），
+# macOS 包必须在 macOS 上签，Linux 依赖 webkit2gtk —— 云端矩阵一次全覆盖，本地零依赖。
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "是否创建 GitHub Release 并附带安装包"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # 先跑与平台无关的静态校验（JSON / i18n parity / PAL 边界），失败就不浪费编译机时
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 静态校验
+        run: python scripts/validate.py
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            label: macos-x64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux 系统依赖
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf build-essential curl wget file libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.label }}
+
+      - name: 单元测试（matcher / i18n）
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --lib
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          args: --target ${{ matrix.target }}
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('NetSense {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
+
+      # 即使不发布 Release，也把裸可执行文件传成 artifact，方便直接下载手动测试
+      - name: 上传裸可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: netsense-${{ matrix.label }}-exe
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/netsense.exe
+            src-tauri/target/${{ matrix.target }}/release/netsense
+          if-no-files-found: ignore

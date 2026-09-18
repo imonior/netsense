@@ -1,0 +1,32 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+
+# Tauri 生成物
+/src-tauri/target/
+/src-tauri/gen/
+
+# 用户配置（含敏感网络信息，不入库）
+config.json
+config.json.backup
+
+# 日志
+*.log
+switcher.log
+
+# Node / 前端
+node_modules/
+frontend/node_modules/
+
+# 编辑器 / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# AI 工具目录（跨平台一致忽略，非项目发布物）
+.workbuddy/
+github-copilot/
+.cursor/
+.claude/
+.trae/
