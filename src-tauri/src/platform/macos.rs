@@ -229,6 +229,19 @@ fn exec_ops_osascript(ops: &[PrivOp]) -> Result<(), String> {
     run_via_osascript(&chain).map(|_| ())
 }
 
+/// 提权执行用户脚本时拼给 root shell 的命令行。
+///
+/// 与 `legacy_shell()` 一样，这里的结果最终会进 `/bin/sh`（且是 root），所以每个分量
+/// 都必须单独 `sh_q` 引用——不能先 join 再整体转义，那样各 token 边界丢失，`;`、`$()`
+/// 依然会被 shell 按语法解释。
+fn elevated_script_line(path: &str, args: &[String]) -> String {
+    std::iter::once(path)
+        .chain(args.iter().map(|s| s.as_str()))
+        .map(sh_q)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 系统授权框执行（macOS GUI）：经 osascript 弹出授权，一次覆盖多条命令。
 fn run_via_osascript(shell_cmd: &str) -> Result<String, String> {
     let escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
@@ -498,10 +511,7 @@ impl NetworkPlatform for MacPlatform {
         if elevated {
             // 安全决策：用户脚本**不走** netsense-priv.sh 白名单通道（那套只放行网络配置操作），
             // 提权执行脚本必须显式经由系统授权框，确保用户每次知情。
-            let parts: Vec<String> = std::iter::once(path.to_string())
-                .chain(args.iter().cloned())
-                .collect();
-            run_via_osascript(&parts.join(" ")).map(|_| ())
+            run_via_osascript(&elevated_script_line(path, args)).map(|_| ())
         } else {
             run(path, &refs).map(|_| ())
         }
