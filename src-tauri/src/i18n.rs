@@ -173,10 +173,19 @@ pub fn check_parity() -> (Vec<String>, Vec<String>, Vec<String>) {
 mod tests {
     use super::*;
 
+    /// 串行锁：`DICTS` / `CURRENT` 都是进程级共享的 `OnceLock`，
+    /// 而 `cargo test` 默认多线程并行跑用例，`set_language` 会互相污染，
+    /// 导致断言结果依赖线程调度（在 Windows 上表现为偶发失败）。
+    /// 所有用例都必须经 `with_dicts` 进入，保证串行且状态确定。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn with_dicts(f: impl Fn()) {
-        // 测试前重置全局（每个测试独立）
-        let _ = DICTS.set(load_dicts());
-        let _ = CURRENT.set(Mutex::new(Language::En));
+        // 锁中毒（前一个用例断言失败）时取回内部值继续，避免连带失败
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // OnceLock 只能初始化一次，用 get_or_init 而非 set，避免第二个用例起变成空操作
+        DICTS.get_or_init(load_dicts);
+        CURRENT.get_or_init(|| Mutex::new(Language::En));
+        set_language(Language::En);
         f();
     }
 
@@ -193,6 +202,8 @@ mod tests {
     #[test]
     fn fallback_to_en_then_key() {
         with_dicts(|| {
+            // 显式声明前置状态，不依赖全局默认值
+            set_language(Language::En);
             assert_eq!(t("tray.quit"), "Quit NetSense");
             set_language(Language::Zh);
             assert_eq!(t("tray.quit"), "退出 NetSense");
