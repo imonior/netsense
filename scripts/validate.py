@@ -8,6 +8,7 @@
   4. 代码里 i18n::t("...") / i18n::tf("...") 引用的 key 都真实存在
   5. 平台抽象层没有被上层越权绕过（main/ipc/core 里不出现具体平台类型名）
   6. 各平台模块都实现了 NetworkPlatform 的全部方法（按方法名计数兜底检查）
+  7. tauri.conf.json 的字段是否真实存在（详见 check_tauri_fields 的说明）
 
 用法：python scripts/validate.py
 """
@@ -149,6 +150,95 @@ def check_trait_impls() -> None:
             ok(f"platform/{plat}.rs 覆盖全部 {len(methods)} 个方法")
 
 
+def _field_names(*camel_case: str) -> set[str]:
+    """Tauri 配置文件同时接受 camelCase 与其 kebab-case 别名，两种都要放行。
+
+    只为「纯 camelCase」（多个首字母小写的单词拼接）生成别名；像 `macOS` / `iOS`
+    这种含连续大写的名字并没有 kebab 形式，不能按规则拆开。
+    """
+    out: set[str] = set()
+    pure_camel = re.compile(r"^[a-z]+([A-Z][a-z0-9]*)+$")
+    for name in camel_case:
+        out.add(name)
+        if pure_camel.match(name):
+            out.add(re.sub(r"(?<!^)(?=[A-Z])", "-", name).lower())
+    return out
+
+
+# Tauri v2 `bundle` 配置树的合法字段名。
+# 来源：https://schema.tauri.app/config/2 的 definitions.BundleConfig 子树（离线快照）。
+# 升级 Tauri 大版本时请重新抓取该 schema 并同步这三组常量。
+_BUNDLE_FIELDS = _field_names(
+    "active", "targets", "icon", "publisher", "copyright", "license", "licenseFile",
+    "homepage", "category", "shortDescription", "longDescription", "resources",
+    "externalBin", "fileAssociations", "useLocalToolsDir", "createUpdaterArtifacts",
+    "linux", "macOS", "windows", "iOS", "android",
+)
+_WINDOWS_FIELDS = _field_names(
+    "certificateThumbprint", "digestAlgorithm", "timestampUrl", "tsp",
+    "webviewInstallMode", "minimumWebview2Version", "allowDowngrades",
+    "signCommand", "nsis", "wix",
+)
+# ▼ 注意：installMode 只属于 nsis，WiX 不支持（WiX 本来就按机器安装到 Program Files）。
+#   曾经误把它写进 wix，导致四个平台的构建全部在 build script 阶段失败。
+_NSIS_FIELDS = _field_names(
+    "template", "languages", "customLanguageFiles", "displayLanguageSelector",
+    "installMode", "installerIcon", "uninstallerIcon", "installerHooks",
+    "headerImage", "uninstallerHeaderImage", "sidebarImage", "startMenuFolder",
+    "compression", "minimumWebview2Version",
+)
+_WIX_FIELDS = _field_names(
+    "version", "upgradeCode", "language", "template", "fragmentPaths",
+    "componentGroupRefs", "componentRefs", "featureGroupRefs", "featureRefs",
+    "mergeRefs", "bannerPath", "dialogImagePath", "enableElevatedUpdateTask",
+    "fipsCompliant",
+)
+
+
+def _report_unknown(scope: str, node: dict, allowed: set[str]) -> None:
+    if not isinstance(node, dict):
+        if node is not None:
+            bad(f"tauri.conf.json: {scope} 应为对象，实际为 {type(node).__name__}")
+        return
+    unknown = sorted(set(node) - allowed)
+    if unknown:
+        for u in unknown:
+            near = sorted(a for a in allowed if u.lower().replace("-", "") in a.lower().replace("-", ""))
+            hint = f"，是否想写 {near[0]}？" if near else ""
+            bad(f"tauri.conf.json: {scope} 含未知字段 {u!r}{hint}")
+
+
+def check_tauri_fields() -> None:
+    """tauri.conf.json 的字段合法性。
+
+    为什么需要这一步：未知字段不会让 JSON 解析失败，而是等到 `tauri-build` 的 build script
+    运行时才炸 —— 也就是四个平台的 CI 各自装完工具链之后。在这里提前拦住，把一轮失败
+    从「几十分钟 × 4」压缩到本地的 0 秒。
+    """
+    print("[7] tauri.conf.json 字段合法性（避免构建期才炸）")
+    path = os.path.join(ROOT, "src-tauri", "tauri.conf.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except Exception:  # noqa: BLE001  # 解析失败已在 [1] 报过
+        return
+    before = len(failures)
+    bundle = cfg.get("bundle")
+    if bundle is None:
+        ok("bundle 段缺省（合法）")
+        return
+    _report_unknown("bundle", bundle, _BUNDLE_FIELDS)
+    win = bundle.get("windows")
+    if win is None:
+        ok("bundle.windows 段缺省（合法）")
+        return
+    _report_unknown("bundle.windows", win, _WINDOWS_FIELDS)
+    _report_unknown("bundle.windows.nsis", win.get("nsis"), _NSIS_FIELDS)
+    _report_unknown("bundle.windows.wix", win.get("wix"), _WIX_FIELDS)
+    if len(failures) == before:
+        ok("bundle / bundle.windows 子树字段均合法")
+
+
 def main() -> int:
     print("=" * 62)
     print("NetSense 静态校验")
@@ -158,6 +248,7 @@ def main() -> int:
     check_key_usage(dicts)
     check_pal_boundary()
     check_trait_impls()
+    check_tauri_fields()
     print("=" * 62)
     if failures:
         print(f"结果: {len(failures)} 项不通过")
