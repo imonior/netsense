@@ -7,10 +7,17 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은 
 ### ✨ 추가
 - **기본값이 영어인 다국어 문서**: `README.md`(en) 외에 `README.zh.md` / `README.zh-TW.md` / `README.ja.md` / `README.ko.md`; `CHANGELOG.md`(en) 외에 `CHANGELOG.zh.md` / `CHANGELOG.zh-TW.md` / `CHANGELOG.ja.md` / `CHANGELOG.ko.md`.
 - 버전 번호의 단일 진짜 값으로 `VERSION` 파일을 추가. `scripts/bump_version.sh`가 이를 `tauri.conf.json`과 `Cargo.toml`에 동기화.
+- 앱 아이콘: `app-icon.png`(1024² 마스터)를 창·트레이·설치 관리자 아이콘의 원본으로 사용하며, `scripts/gen_icons.py`가 여기서 전체 세트를 생성 — 각 크기 PNG, 7프레임 ICO(16 → 256, BMP 프레임 + PNG 프레임), 8청크 ICNS(ic07–ic14).
 
 ### 🔧 변경
 - **Windows 설치 관리자가 컴퓨터 단위(per-machine) 설치로 변경**(`bundle.windows.nsis.installMode` / `wix.installMode` = `perMachine`). 앱은 `C:\Program Files\NetSense`에 설치되며 설치 시 관리자 권한 필요(이전에는 `%LOCALAPPDATA%` 아래 사용자 단위로 설치).
 - 릴리스 노트는 해당 버전의 영어 `CHANGELOG.md` 섹션에서 생성되므로 게시 릴리스는 기본적으로 영어.
+- `scripts/gen_icons.py`가 더 이상 자리 표시자 도형을 그리지 않음: 마스터를 리샘플링하고 각 대상 크기에 둥근 모서리 마스크를 적용한 뒤 PNG/ICO/ICNS 컨테이너를 조립(순수 stdlib, 서드파티 의존성 없음).
+
+### 🐛 수정
+- **Windows: 불필요한 콘솔 창이 더 이상 나타나지 않음.** PAL이 `Command::output()`으로 `powershell.exe` / `netsh`를 호출하면서 생성 플래그를 지정하지 않아, 상태를 읽을 때마다 Windows가 보이는 콘솔(제목 표시줄 버튼 포함)을 할당했습니다 — 이제 `CREATE_NO_WINDOW`로 시작합니다.
+- **Windows: 앱이 "실행되지 않은" 것처럼 보였음.** NetSense는 트레이 상주 앱이며 시작 시 두 창 모두 표시하지 않으므로, 콘솔 창이 사라지면 아무것도 보이지 않았습니다. 이제 시작 시 상태 패널을 열고 포커스를 잃거나 닫으면 트레이로 되돌립니다.
+- CI: Windows의 `choco install wixtoolset nsis` 단계에 하드 타임아웃을 설정하여 다운로드가 멈춰도 러너 한도까지 매달리지 않습니다.
 
 ### 📝 문서
 - `DEVELOPMENT.md`를 영어(기본값)로 재작성.

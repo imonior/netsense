@@ -7,10 +7,17 @@ NetSense 的所有重要變更記錄於此。格式遵循 [Keep a Changelog](htt
 ### ✨ 新增
 - 多語言文件，**預設英文**：`README.md`（英文）外加 `README.zh.md` / `README.zh-TW.md` / `README.ja.md` / `README.ko.md`；`CHANGELOG.md`（英文）外加 `CHANGELOG.zh.md` / `CHANGELOG.zh-TW.md` / `CHANGELOG.ja.md` / `CHANGELOG.ko.md`。
 - 新增 `VERSION` 檔案作為版本號唯一真值；`scripts/bump_version.sh` 將其同步進 `tauri.conf.json` 與 `Cargo.toml`。
+- 應用圖示：以 `app-icon.png`（1024² 母圖）作為視窗、系統匣與安裝程式圖示的來源，`scripts/gen_icons.py` 由其衍生整套圖示——各尺寸 PNG、7 幀 ICO（16 → 256，BMP 幀 + PNG 幀）與 8 段 ICNS（ic07–ic14）。
 
 ### 🔧 變更
 - **Windows 安裝器改為依電腦安裝**（`bundle.windows.nsis.installMode` / `wix.installMode` = `perMachine`）。應用安裝到 `C:\Program Files\NetSense`，安裝時需管理員權限（此前為每使用者安裝，位於 `%LOCALAPPDATA%` 下）。
 - 發布說明改由英文 `CHANGELOG.md` 中對應版本段落產生，發布內容預設英文。
+- `scripts/gen_icons.py` 不再繪製佔位圖形：改為對母圖重新取樣、在每個目標尺寸套用圓角遮罩，並封裝 PNG/ICO/ICNS 容器（純 stdlib，無第三方相依）。
+
+### 🐛 修正
+- **Windows：不再出現殘留主控台視窗。** PAL 先前以 `Command::output()` 呼叫 `powershell.exe` / `netsh` 且未設定建立旗標，導致每次讀取狀態時 Windows 都會配置一個可見主控台（連同標題列按鈕一併顯示）——現已改用 `CREATE_NO_WINDOW` 啟動行程。
+- **Windows：應用看起來「沒開啟」。** NetSense 是系統匣常駐應用，啟動時兩個視窗都不顯示，主控台視窗一消失就什麼都看不到。現改為啟動即開啟狀態面板，失焦或關閉時收回系統匣。
+- CI：Windows 的 `choco install wixtoolset nsis` 步驟加上硬性逾時，下載停滯時不再一路掛到 runner 上限。
 
 ### 📝 文件
 - `DEVELOPMENT.md` 改寫為英文（預設）。

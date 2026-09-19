@@ -7,10 +7,17 @@ NetSense 的所有重要变更记录于此。格式遵循 [Keep a Changelog](htt
 ### ✨ 新增
 - 多语言文档，**默认英文**：`README.md`（英文）外加 `README.zh.md` / `README.zh-TW.md` / `README.ja.md` / `README.ko.md`；`CHANGELOG.md`（英文）外加 `CHANGELOG.zh.md` / `CHANGELOG.zh-TW.md` / `CHANGELOG.ja.md` / `CHANGELOG.ko.md`。
 - 新增 `VERSION` 文件作为版本号唯一真值；`scripts/bump_version.sh` 将其同步进 `tauri.conf.json` 与 `Cargo.toml`。
+- 应用图标：以 `app-icon.png`（1024² 母图）作为窗口、托盘与安装包图标来源，`scripts/gen_icons.py` 由其派生整套图标——各尺寸 PNG、7 帧 ICO（16 → 256，BMP 帧 + PNG 帧）与 8 段 ICNS（ic07–ic14）。
 
 ### 🔧 变更
 - **Windows 安装器改为按计算机安装**（`bundle.windows.nsis.installMode` / `wix.installMode` = `perMachine`）。应用安装到 `C:\Program Files\NetSense`，安装时需管理员权限（此前为每用户安装，位于 `%LOCALAPPDATA%` 下）。
 - 发布说明改由英文 `CHANGELOG.md` 中对应版本段落生成，发布内容默认英文。
+- `scripts/gen_icons.py` 不再绘制占位图形：改为对母图做重采样、在每个目标尺寸上套用圆角遮罩，并封装 PNG/ICO/ICNS 容器（纯 stdlib，无第三方依赖）。
+
+### 🐛 修复
+- **Windows：不再出现残留控制台窗口。** PAL 此前用 `Command::output()` 调用 `powershell.exe` / `netsh` 且未设置创建标志，导致每次读取状态时 Windows 都会分配一个可见控制台（连标题栏按钮一起显示）——现已使用 `CREATE_NO_WINDOW` 启动进程。
+- **Windows：应用看起来"没打开"。** NetSense 是托盘常驻应用，启动时两个窗口都不显示，控制台窗口一消失就什么都看不到。现改为启动即打开状态面板，失焦或关闭时收回托盘。
+- CI：Windows 的 `choco install wixtoolset nsis` 步骤加了硬超时，下载卡住时不再一直挂到 runner 上限。
 
 ### 📝 文档
 - `DEVELOPMENT.md` 改写为英文（默认）。

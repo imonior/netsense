@@ -7,10 +7,17 @@ All notable changes to NetSense are documented here. The format is based on [Kee
 ### ✨ Added
 - Multi-language documentation with **English as the default**: `README.md` (en) plus `README.zh.md` / `README.zh-TW.md` / `README.ja.md` / `README.ko.md`; `CHANGELOG.md` (en) plus `CHANGELOG.zh.md` / `CHANGELOG.zh-TW.md` / `CHANGELOG.ja.md` / `CHANGELOG.ko.md`.
 - `VERSION` file as the single source of truth for the version number; `scripts/bump_version.sh` syncs it into `tauri.conf.json` and `Cargo.toml`.
+- Application artwork: `app-icon.png` (1024² master) is now the source of the window, tray and installer icons, and `scripts/gen_icons.py` derives the full set from it — PNG sizes, a 7-frame ICO (16 → 256, BMP frames plus a PNG frame) and an 8-chunk ICNS (ic07–ic14).
 
 ### 🔧 Changed
 - **Windows installer now installs per-machine** (`bundle.windows.nsis.installMode` / `wix.installMode` = `perMachine`). The app installs to `C:\Program Files\NetSense` and requires administrator privileges at install time (previously it installed per-user under `%LOCALAPPDATA%`).
 - Release notes are generated from the English `CHANGELOG.md` section for the matching version, so published releases are English by default.
+- `scripts/gen_icons.py` no longer paints a placeholder mark: it resamples the artwork master, applies the rounded-corner mask at every target size and packs the PNG/ICO/ICNS containers (pure stdlib, no third-party dependencies).
+
+### 🐛 Fixed
+- **Windows: no more stray console window.** The PAL ran `powershell.exe` / `netsh` through `Command::output()` without a creation flag, so Windows allocated a visible console (complete with its own title bar) for every status read — the process is now started with `CREATE_NO_WINDOW`.
+- **Windows: the app looked like it never opened.** NetSense is tray-resident and neither window is shown at launch, so once those console windows disappeared nothing was visible. The status panel is now opened on startup and collapses back to the tray on blur or close.
+- CI: the Windows `choco install wixtoolset nsis` step is bounded by a timeout, so a stalled download can no longer hang the job until the runner's limit.
 
 ### 📝 Docs
 - `DEVELOPMENT.md` rewritten in English (default).
