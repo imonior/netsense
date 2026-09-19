@@ -243,6 +243,19 @@ pub fn normalize_mac(s: &str) -> String {
         .join(":")
 }
 
+/// POSIX 单引号包裹：把一段文本变成 shell 里的**字面量参数**。
+///
+/// 单引号内部除 `'` 本身外一切字符都不再被 shell 解释，因此 `;` `|` `&` `$()`
+/// 反引号、换行等元字符会被中和。内部的单引号以 `'\''` 收尾再续 quoting。
+///
+/// 凡是**拼接进 shell 字符串**再交给 `sh -c` / `osascript do shell script` 执行的值，
+/// 都必须过这个函数一个都不能漏。
+// Windows / Linux 走 argv 直传不需要它，此处避免 dead_code 告警。
+#[allow(dead_code)]
+pub(crate) fn sh_q(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// 秒级超时（供 ping 等以秒为单位的命令使用，最小 1 秒）。
 pub(crate) fn timeout_secs(ms: u64) -> String {
     ((ms.max(1000) / 1000).max(1)).to_string()
@@ -296,3 +309,44 @@ pub use macos::{priv_channel, MacPlatform as Platform};
 pub use windows::{priv_channel, WindowsPlatform as Platform};
 #[cfg(target_os = "linux")]
 pub use linux::{priv_channel, LinuxPlatform as Platform};
+
+#[cfg(test)]
+mod tests {
+    use super::sh_q;
+
+    #[test]
+    fn sh_q_neutralises_shell_metacharacters() {
+        assert_eq!(sh_q("Wi-Fi"), "'Wi-Fi'");
+        // 命令分隔符、管道、后台执行、命令替换、反引号都必须变成普通字符
+        assert_eq!(sh_q("a;rm -rf /"), "'a;rm -rf /'");
+        assert_eq!(sh_q("a | b"), "'a | b'");
+        assert_eq!(sh_q("$(id)"), "'$(id)'");
+        assert_eq!(sh_q("`id`"), "'`id`'");
+        assert_eq!(sh_q("a && b"), "'a && b'");
+        assert_eq!(sh_q("a\nb"), "'a\nb'");
+    }
+
+    #[test]
+    fn sh_q_escapes_embedded_single_quote() {
+        // cat's -> 'cat'\''s' ：关闭引号 → 转义一个引号 → 重新开引号
+        assert_eq!(sh_q("cat's"), "'cat'\\''s'");
+        // 空串与纯引号边界情况
+        assert_eq!(sh_q(""), "''");
+        assert_eq!(sh_q("'"), "''\\'''");
+    }
+
+    #[test]
+    fn sh_q_roundtrip_keeps_value_intact() {
+        // sh_q 只做包裹与转义，不得改变其它内容（含 Unicode）
+        let probes = ["Wi-Fi", "192.168.1.1/24", "办公室 Wi-Fi", "a'b'c"];
+        for p in probes {
+            let wrapped = sh_q(p);
+            // 去掉首尾包裹的单引号后，内部只允许出现 '\'' 这种转义序列
+            let inner = &wrapped[1..wrapped.len() - 1];
+            assert!(wrapped.starts_with('\'') && wrapped.ends_with('\''));
+            assert!(!inner.ends_with('\\'));
+            let restored = inner.replace("'\\''", "'");
+            assert_eq!(restored, p, "roundtrip failed for {:?}", p);
+        }
+    }
+}

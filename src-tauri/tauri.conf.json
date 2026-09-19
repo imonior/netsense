@@ -58,9 +58,6 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine"
-      },
-      "wix": {
-        "installMode": "perMachine"
       }
     }
   }

@@ -7,7 +7,7 @@
 //! 不可用时自动回落 `osascript ... with administrator privileges`，功能不中断。
 
 use super::{
-    extract_mac, parse_kv, poll_ssid_watch, run, timeout_secs, Health, InterfaceStatus,
+    extract_mac, parse_kv, poll_ssid_watch, run, sh_q, timeout_secs, Health, InterfaceStatus,
     NetworkPlatform, PrivChannel, ProbeTarget, WatcherHandle,
 };
 use crate::config::{Mode, Profile, V6Mode};
@@ -89,24 +89,35 @@ impl PrivOp {
     }
 
     /// 回落通道：osascript 授权框模式下拼成的等价 networksetup / route 命令。
+    ///
+    /// ⚠️ 这里拼出来的字符串最终会以 root 身份交给 `/bin/sh`（见 `run_via_osascript`），
+    /// 所以**每一个插值参数都必须过 `sh_q`**。早期版本直接裸插值，配置文件里的
+    /// `svc` / `dns` 只要带一个 `;` 就能以 root 执行任意命令。
     fn legacy_shell(&self) -> String {
         match self {
-            PrivOp::SetDhcp { svc } => format!("networksetup -setdhcp {}", svc),
+            PrivOp::SetDhcp { svc } => format!("networksetup -setdhcp {}", sh_q(svc)),
             PrivOp::SetManual {
                 svc,
                 ip,
                 netmask,
                 gateway,
-            } => format!("networksetup -setmanual {} {} {} {}", svc, ip, netmask, gateway),
+            } => format!(
+                "networksetup -setmanual {} {} {} {}",
+                sh_q(svc),
+                sh_q(ip),
+                sh_q(netmask),
+                sh_q(gateway)
+            ),
             PrivOp::SetDns { svc, servers } => {
                 if servers.is_empty() {
-                    format!("networksetup -setdnsservers {} Empty", svc)
+                    format!("networksetup -setdnsservers {} Empty", sh_q(svc))
                 } else {
-                    format!("networksetup -setdnsservers {} {}", svc, servers.join(" "))
+                    let list: Vec<String> = servers.iter().map(|s| sh_q(s)).collect();
+                    format!("networksetup -setdnsservers {} {}", sh_q(svc), list.join(" "))
                 }
             }
-            PrivOp::SetV6Off { svc } => format!("networksetup -setv6off {}", svc),
-            PrivOp::SetV6Auto { svc } => format!("networksetup -setv6automatic {}", svc),
+            PrivOp::SetV6Off { svc } => format!("networksetup -setv6off {}", sh_q(svc)),
+            PrivOp::SetV6Auto { svc } => format!("networksetup -setv6automatic {}", sh_q(svc)),
             PrivOp::SetV6Manual {
                 svc,
                 addr,
@@ -114,7 +125,10 @@ impl PrivOp {
                 gateway,
             } => format!(
                 "networksetup -setv6manual {} {} {} {}",
-                svc, addr, prefix, gateway
+                sh_q(svc),
+                sh_q(addr),
+                sh_q(prefix),
+                sh_q(gateway)
             ),
             PrivOp::RouteAdd {
                 dest,
@@ -122,12 +136,17 @@ impl PrivOp {
                 metric,
             } => {
                 if *metric > 0 {
-                    format!("route -n add -net {} {} -metrics {}", dest, gateway, metric)
+                    format!(
+                        "route -n add -net {} {} -metrics {}",
+                        sh_q(dest),
+                        sh_q(gateway),
+                        metric
+                    )
                 } else {
-                    format!("route -n add -net {} {}", dest, gateway)
+                    format!("route -n add -net {} {}", sh_q(dest), sh_q(gateway))
                 }
             }
-            PrivOp::RouteDelete { dest } => format!("route -n delete -net {}", dest),
+            PrivOp::RouteDelete { dest } => format!("route -n delete -net {}", sh_q(dest)),
         }
     }
 }

