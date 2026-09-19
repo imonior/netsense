@@ -1,7 +1,7 @@
 name: build
 
 # 三平台构建与发布：
-#   - 推 v* tag  → 自动建 Draft Release 并附三平台安装包
+#   - 推 v* tag  → 自动创建 Draft Release 并附三平台安装包
 #                 （windows-x64 / macos-arm64 / macos-x64 / linux-x64）
 #   - 手动 Run workflow → 仅构建并上传裸可执行文件产物，不创建 Release
 # 放云端的原因：Windows 需 MSVC + WiX/NSIS，macOS 包须本机签，Linux 依赖 webkit2gtk。
@@ -11,6 +11,10 @@ on:
   push:
     tags:
       - "v*"
+
+# 创建/上传 Release 需要写权限（默认 GITHUB_TOKEN 对 contents 仅为 read）
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,27 +31,6 @@ jobs:
           python-version: "3.12"
       - name: 静态校验
         run: python scripts/validate.py
-
-  # 仅 tag 触发：先建好 Draft Release，build 任务再往里塞资产，
-  # 避免 4 个平台并发调用 tauri-action 时同时建 Release 的竞态（后到者 409）。
-  release:
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    outputs:
-      id: ${{ steps.create.outputs.id }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: 创建 Draft Release
-        id: create
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          rid=$(gh release create "${{ github.ref_name }}" \
-            --draft --title "NetSense ${{ github.ref_name }}" \
-            --notes "自动构建的预发布安装包，仅供测试。Windows 首次改网络会弹一次 UAC；以管理员运行一次可免除。" \
-            --repo "${{ github.repository }}" --generate-notes 2>/dev/null) || \
-          rid=$(gh release view "${{ github.ref_name }}" --json id -q .id --repo "${{ github.repository }}")
-          echo "id=$rid" >> "$GITHUB_OUTPUT"
 
   build:
     needs: validate
@@ -84,14 +67,16 @@ jobs:
             libayatana-appindicator3-dev patchelf build-essential curl wget file libssl-dev
 
       # windows-latest 默认不带 WiX / NSIS，Tauri 打 msi/nsis 必须显式装。
+      # choco 对“已安装/待重启”可能返回非 0，用 || true 避免误伤；关键是把工具 bin 加入 PATH。
       - name: Windows 打包依赖 (WiX + NSIS)
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
-          choco install wixtoolset nsis -y --no-progress
-          WIX=$(ls -d "/c/Program Files (x86)/WiX Toolset"/*/bin 2>/dev/null | head -1)
+          choco install wixtoolset nsis -y --no-progress || true
+          WIX=$(ls -d "/c/Program Files (x86)/WiX Toolset"*/bin 2>/dev/null | head -1)
           [ -n "$WIX" ] && echo "$WIX" >> "$GITHUB_PATH"
           echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          command -v light.exe candle.exe makensis.exe || ls "$WIX"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -107,29 +92,23 @@ jobs:
       - name: 单元测试（matcher / i18n）
         run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
-      # 仅 tag 触发：等 release 任务建好 Draft 后取其 ID，往里传资产。
-      - name: 解析 Release ID
-        id: rel
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for i in $(seq 1 10); do
-            rid=$(gh release view "${{ github.ref_name }}" --json id -q .id --repo "${{ github.repository }}" 2>/dev/null)
-            if [ -n "$rid" ]; then break; fi
-            sleep 6
-          done
-          echo "id=${rid:-}" >> "$GITHUB_OUTPUT"
-
-      - name: 打包安装包（tauri-action）
+      # 推 v* tag 时 tauri-action 创建/更新 Draft Release 并上传安装包；
+      # 多平台并行时首个创建、其余更新同一 Release（tauri-action 自带 upsert）。
+      - name: 打包安装包并发布到 Release（tauri-action）
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: src-tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-          releaseId: ${{ steps.rel.outputs.id }}
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('NetSense {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
+          releaseBody: |
+            自动构建的预发布安装包，仅供测试。
+            - Windows 首次改网络会弹一次 UAC；以管理员运行一次可免除。
+            - macOS 未签名，打开时需在“系统设置 → 隐私与安全性”里允许。
 
       # 即便打包/发布失败，也把裸可执行文件传成产物，方便直接下载手动测试
       - name: 上传裸可执行文件
