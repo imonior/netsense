@@ -61,7 +61,7 @@ sh scripts/install-priv-helper.sh
 
 ```bash
 python scripts/validate.py     # JSON / 5 语 i18n parity / PAL 边界 / 三平台 trait 覆盖
-cd src-tauri && cargo test --lib
+cd src-tauri && cargo test       # 本项目为纯 bin crate（无 lib target），用 cargo test 而非 --lib
 ```
 
 启动后以托盘形态常驻（不弹主窗口）：**左键点托盘图标**打开弹窗面板，

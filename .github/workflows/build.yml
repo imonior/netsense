@@ -1,16 +1,13 @@
 name: build
 
-# 三平台构建：push tag / 手动触发即产出安装包。
-# 之所以把构建放在云端：Windows 上 Tauri 官方要求 MSVC + Windows SDK（约 3–6GB），
-# macOS 包必须在 macOS 上签，Linux 依赖 webkit2gtk —— 云端矩阵一次全覆盖，本地零依赖。
+# 三平台构建与发布：
+#   - 推 v* tag  → 自动建 Draft Release 并附三平台安装包
+#                 （windows-x64 / macos-arm64 / macos-x64 / linux-x64）
+#   - 手动 Run workflow → 仅构建并上传裸可执行文件产物，不创建 Release
+# 放云端的原因：Windows 需 MSVC + WiX/NSIS，macOS 包须本机签，Linux 依赖 webkit2gtk。
 
 on:
   workflow_dispatch:
-    inputs:
-      release:
-        description: "是否创建 GitHub Release 并附带安装包"
-        type: boolean
-        default: false
   push:
     tags:
       - "v*"
@@ -20,7 +17,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # 先跑与平台无关的静态校验（JSON / i18n parity / PAL 边界），失败就不浪费编译机时
+  # 与平台无关的静态校验，失败就不浪费编译机时
   validate:
     runs-on: ubuntu-latest
     steps:
@@ -31,6 +28,27 @@ jobs:
       - name: 静态校验
         run: python scripts/validate.py
 
+  # 仅 tag 触发：先建好 Draft Release，build 任务再往里塞资产，
+  # 避免 4 个平台并发调用 tauri-action 时同时建 Release 的竞态（后到者 409）。
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.create.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 创建 Draft Release
+        id: create
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          rid=$(gh release create "${{ github.ref_name }}" \
+            --draft --title "NetSense ${{ github.ref_name }}" \
+            --notes "自动构建的预发布安装包，仅供测试。Windows 首次改网络会弹一次 UAC；以管理员运行一次可免除。" \
+            --repo "${{ github.repository }}" --generate-notes 2>/dev/null) || \
+          rid=$(gh release view "${{ github.ref_name }}" --json id -q .id --repo "${{ github.repository }}")
+          echo "id=$rid" >> "$GITHUB_OUTPUT"
+
   build:
     needs: validate
     strategy:
@@ -40,15 +58,19 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
+            bundles: "nsis,msi"
           - platform: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
+            bundles: "dmg"
           - platform: macos-15-intel
             target: x86_64-apple-darwin
             label: macos-x64
+            bundles: "dmg"
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: linux-x64
+            bundles: "deb"
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +83,16 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev patchelf build-essential curl wget file libssl-dev
 
+      # windows-latest 默认不带 WiX / NSIS，Tauri 打 msi/nsis 必须显式装。
+      - name: Windows 打包依赖 (WiX + NSIS)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          choco install wixtoolset nsis -y --no-progress
+          WIX=$(ls -d "/c/Program Files (x86)/WiX Toolset"/*/bin 2>/dev/null | head -1)
+          [ -n "$WIX" ] && echo "$WIX" >> "$GITHUB_PATH"
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -70,27 +102,41 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.label }}
 
-      # 注意：本项目是纯 bin crate（无 lib.rs），测试位于 core/matcher.rs 与 i18n.rs
-      # 的 #[cfg(test)] 模块内，因此不能加 --lib —— 否则会因 “no library targets found” 直接失败。
+      # 本项目是纯 bin crate（无 lib.rs），测试位于 core/matcher.rs 与 i18n.rs 的 #[cfg(test)] 内，
+      # 不能加 --lib，否则 “no library targets found” 直接失败。
       - name: 单元测试（matcher / i18n）
         run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
-      - uses: tauri-apps/tauri-action@v0
+      # 仅 tag 触发：等 release 任务建好 Draft 后取其 ID，往里传资产。
+      - name: 解析 Release ID
+        id: rel
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 1 10); do
+            rid=$(gh release view "${{ github.ref_name }}" --json id -q .id --repo "${{ github.repository }}" 2>/dev/null)
+            if [ -n "$rid" ]; then break; fi
+            sleep 6
+          done
+          echo "id=${rid:-}" >> "$GITHUB_OUTPUT"
+
+      - name: 打包安装包（tauri-action）
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: src-tauri
-          args: --target ${{ matrix.target }}
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('NetSense {0}', github.ref_name) || '' }}
-          releaseDraft: true
-          prerelease: false
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          releaseId: ${{ steps.rel.outputs.id }}
 
-      # 即使不发布 Release，也把裸可执行文件传成 artifact，方便直接下载手动测试
+      # 即便打包/发布失败，也把裸可执行文件传成产物，方便直接下载手动测试
       - name: 上传裸可执行文件
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: netsense-${{ matrix.label }}-exe
+          name: netsense-${{ matrix.label }}-bin
           path: |
             src-tauri/target/${{ matrix.target }}/release/netsense.exe
             src-tauri/target/${{ matrix.target }}/release/netsense
