@@ -10,7 +10,7 @@ NetSense 的所有重要变更记录于此。格式遵循 [Keep a Changelog](htt
 - 应用图标：以 `app-icon.png`（1024² 母图）作为窗口、托盘与安装包图标来源，`scripts/gen_icons.py` 由其派生整套图标——各尺寸 PNG、7 帧 ICO（16 → 256，BMP 帧 + PNG 帧）与 8 段 ICNS（ic07–ic14）。
 
 ### 🔧 变更
-- **Windows 安装器改为按计算机安装**（`bundle.windows.nsis.installMode` / `wix.installMode` = `perMachine`）。应用安装到 `C:\Program Files\NetSense`，安装时需管理员权限（此前为每用户安装，位于 `%LOCALAPPDATA%` 下）。
+- **Windows 安装器改为按计算机安装**（`bundle.windows.nsis.installMode` = `perMachine`）。应用安装到 `C:\Program Files\NetSense`，安装时需管理员权限（此前为每用户安装，位于 `%LOCALAPPDATA%` 下）。MSI 没有对应选项——WiX 本就装到 `%PROGRAMFILES%`——因此不再设置该字段。
 - 发布说明改由英文 `CHANGELOG.md` 中对应版本段落生成，发布内容默认英文。
 - `scripts/gen_icons.py` 不再绘制占位图形：改为对母图做重采样、在每个目标尺寸上套用圆角遮罩，并封装 PNG/ICO/ICNS 容器（纯 stdlib，无第三方依赖）。
 
@@ -18,6 +18,16 @@ NetSense 的所有重要变更记录于此。格式遵循 [Keep a Changelog](htt
 - **Windows：不再出现残留控制台窗口。** PAL 此前用 `Command::output()` 调用 `powershell.exe` / `netsh` 且未设置创建标志，导致每次读取状态时 Windows 都会分配一个可见控制台（连标题栏按钮一起显示）——现已使用 `CREATE_NO_WINDOW` 启动进程。
 - **Windows：应用看起来"没打开"。** NetSense 是托盘常驻应用，启动时两个窗口都不显示，控制台窗口一消失就什么都看不到。现改为启动即打开状态面板，失焦或关闭时收回托盘。
 - CI：Windows 的 `choco install wixtoolset nsis` 步骤加了硬超时，下载卡住时不再一直挂到 runner 上限。
+
+### 🔒 安全
+- **所有提权路径统一做 shell 引用。** 来自配置文件或系统（配置名、SSID、网关地址、路由）的值都会进入 `osascript` / `sudo` / shell。现已在插值处统一做 POSIX 单引号处理，含 `'`、`$(…)`、反引号或 `;` 的值无法再向 root shell 注入命令。
+- **macOS 提权分支同样加引用。** 免密的 `osascript … with administrator privileges` 路径此前沿用字符串拼接构造命令行；现改为路径与参数逐 token 引用。
+- **Windows `v6prefix` 改为解析而非直插。** 系统返回的前缀此前被直接拼进 PowerShell 命令行；现仅接受整数，否则丢弃该选项。
+- **自动化脚本白名单不再可被路径前缀绕过。** 形如 `scripts2/` 的目录此前用纯字符串前缀比较就能匹配 `scripts/`；现改为两侧先规范化再按路径分量比较。
+
+### 🛠 内部
+- `scripts/validate.py` 新增检查 **[7] `tauri.conf.json` 字段合法性**：对 `bundle`、`bundle.windows`、`nsis`、`wix` 子树按官方 Tauri v2 schema 校验，使非法字段在 10 分钟的校验任务里失败，而不是跑到四平台构建才炸。
+- 发布步骤限定为仅 tag 推送时执行，手动 `workflow_dispatch` 验证不再会改写已有 Draft Release 的 tag。
 
 ### 📝 文档
 - `DEVELOPMENT.md` 改写为英文（默认）。

@@ -10,7 +10,7 @@ All notable changes to NetSense are documented here. The format is based on [Kee
 - Application artwork: `app-icon.png` (1024² master) is now the source of the window, tray and installer icons, and `scripts/gen_icons.py` derives the full set from it — PNG sizes, a 7-frame ICO (16 → 256, BMP frames plus a PNG frame) and an 8-chunk ICNS (ic07–ic14).
 
 ### 🔧 Changed
-- **Windows installer now installs per-machine** (`bundle.windows.nsis.installMode` / `wix.installMode` = `perMachine`). The app installs to `C:\Program Files\NetSense` and requires administrator privileges at install time (previously it installed per-user under `%LOCALAPPDATA%`).
+- **Windows installer now installs per-machine** (`bundle.windows.nsis.installMode` = `perMachine`). The app installs to `C:\Program Files\NetSense` and requires administrator privileges at install time (previously it installed per-user under `%LOCALAPPDATA%`). The MSI bundle has no equivalent option — WiX already targets `%PROGRAMFILES%` — so nothing is set there.
 - Release notes are generated from the English `CHANGELOG.md` section for the matching version, so published releases are English by default.
 - `scripts/gen_icons.py` no longer paints a placeholder mark: it resamples the artwork master, applies the rounded-corner mask at every target size and packs the PNG/ICO/ICNS containers (pure stdlib, no third-party dependencies).
 
@@ -18,6 +18,16 @@ All notable changes to NetSense are documented here. The format is based on [Kee
 - **Windows: no more stray console window.** The PAL ran `powershell.exe` / `netsh` through `Command::output()` without a creation flag, so Windows allocated a visible console (complete with its own title bar) for every status read — the process is now started with `CREATE_NO_WINDOW`.
 - **Windows: the app looked like it never opened.** NetSense is tray-resident and neither window is shown at launch, so once those console windows disappeared nothing was visible. The status panel is now opened on startup and collapses back to the tray on blur or close.
 - CI: the Windows `choco install wixtoolset nsis` step is bounded by a timeout, so a stalled download can no longer hang the job until the runner's limit.
+
+### 🔒 Security
+- **Every privileged path is shell-quoted.** Values that come from the config file or from the OS (profile names, SSIDs, gateway addresses, routes) are passed through `osascript`, `sudo` or a shell. They are now POSIX single-quoted at the point of interpolation, so a value containing `'`, `$(…)`, a backtick or `;` can no longer inject a command into a root shell.
+- **macOS elevation branch quoted too.** The password-free `osascript … with administrator privileges` path built its command line by string concatenation; script path and arguments are now quoted token by token.
+- **Windows `v6prefix` is parsed, not interpolated.** A prefix returned by the OS used to be spliced straight into the PowerShell command line; it is now accepted only as an integer and the option is dropped otherwise.
+- **Automation script allow-list can no longer be escaped with a path prefix.** A directory such as `scripts2/` used to match the `scripts/` prefix by plain string comparison; both paths are now canonicalised and compared component-wise.
+
+### 🛠 Internal
+- `scripts/validate.py` gained check **[7] `tauri.conf.json` field validity**: the `bundle`, `bundle.windows`, `nsis` and `wix` subtrees are validated against the official Tauri v2 schema, so an unsupported field fails the cheap 10-minute validation job instead of a 4-platform build.
+- The release-publishing step is restricted to tag pushes, so a manual `workflow_dispatch` verification run can no longer rewrite the tag of an existing Draft Release.
 
 ### 📝 Docs
 - `DEVELOPMENT.md` rewritten in English (default).
