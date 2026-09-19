@@ -102,6 +102,11 @@ jobs:
 
       # 推 v* tag 时 tauri-action 创建/更新 Draft Release 并上传安装包；
       # 多平台并行时首个创建、其余更新同一 Release（tauri-action 自带 upsert）。
+      #
+      # ⚠️ 这一步必须限定在 tag 推送时执行。非 tag 运行（workflow_dispatch 手动验证）
+      # 时 tagName 为空，tauri-action 会生成 untagged-<hash> 作为 tag，并把**已存在的
+      # Draft Release** 的 tag 字段改写掉——曾经一次手动验证就把 v0.2.0 Draft 的 tag
+      # 从 v0.2.0 改成了 untagged-…。手动验证只做编译与测试，不碰 Release。
       # Release 说明默认英文：从英文 CHANGELOG.md 的「本版本」段落抽取，避免中文提交污染。
       - name: 生成 Release 说明（英文，来自 CHANGELOG.md）
         id: notes
@@ -125,17 +130,18 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: 打包安装包并发布到 Release（tauri-action）
+        if: startsWith(github.ref, 'refs/tags/')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: src-tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('NetSense {0}', github.ref_name) || '' }}
+          tagName: ${{ github.ref_name }}
+          releaseName: NetSense ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
-          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && steps.notes.outputs.body || 'Automated pre-release build for testing.' }}
+          releaseBody: ${{ steps.notes.outputs.body }}
 
       # 即便打包/发布失败，也把裸可执行文件传成产物，方便直接下载手动测试
       - name: 上传裸可执行文件
