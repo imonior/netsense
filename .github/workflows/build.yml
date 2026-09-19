@@ -22,8 +22,11 @@ env:
 
 jobs:
   # 与平台无关的静态校验，失败就不浪费编译机时
+  # timeout-minutes：不给 Job 设上限时，若 runner 排队拿不到机器，会一路挂到 GitHub 的
+  # 任务上限（此前出现过 macos-x64 任务挂 17 小时才发现）。这里统一兜底。
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,6 +58,9 @@ jobs:
             label: linux-x64
             bundles: "deb"
     runs-on: ${{ matrix.platform }}
+    # 单平台冷启动编译约 3~10 分钟；给 60 分钟上限，既能覆盖首次全量编译，
+    # 又能避免 runner 供应不上时无限排队（历史上有过 17h 才被手动取消的情况）。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
