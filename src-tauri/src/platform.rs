@@ -13,6 +13,8 @@
 use crate::config::Profile;
 use serde::Serialize;
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -120,8 +122,15 @@ pub trait NetworkPlatform: Send + Sync {
 
 /// 普通执行（无需提权），返回 stdout 文本，失败返回 stderr 文本。
 pub(crate) fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    // Windows：GUI 程序（windows_subsystem="windows"）拉起 powershell/netsh/arp/ping/curl 等
+    // 控制台子系统子进程时，若不隐藏窗口，Windows 会为子进程分配一个**可见控制台窗口**，
+    // 表现为“启动后弹出 PowerShell 黑窗 + 标题栏按钮”。CREATE_NO_WINDOW 让子进程无窗口运行，
+    // 输出仍可被 .output() 正常捕获。UAC 提权路径（run_elevated_ps）的 outer/inner 进程同样受益。
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let out = cmd
         .output()
         .map_err(|e| format!("spawn {}: {}", program, e))?;
     if out.status.success() {

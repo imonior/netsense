@@ -428,6 +428,11 @@ fn main() {
 
             build_tray(app, &shared).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
+            // 启动即展示状态面板：GUI 程序若启动后无任何可见窗口，用户会误以为“软件自动关闭 / 无法运行”。
+            // popup 为无边框主交互入口（最小化回托盘由失焦 / 关闭事件处理）。如只想首次启动才弹，
+            // 可改为读配置里的“已引导”标记再决定是否调用。
+            popup::toggle(app.handle(), None);
+
             // 首次应用（启动即按当前网络身份匹配一次）
             {
                 let name = resolve_current_name(&shared);

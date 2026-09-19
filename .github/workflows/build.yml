@@ -72,7 +72,9 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
-          choco install wixtoolset nsis -y --no-progress || true
+          # 给 choco 装包设硬上限：若 WiX/NSIS 下载stall，步骤会在 900s 失败而非挂到 GitHub 6h 任务上限
+          # （此前「第一个 run 卡 13h」很可能就是 choco 下载卡死；`|| true` 只兜底“装完即失败”，挡不住“卡住”）。
+          choco install wixtoolset nsis -y --no-progress --timeout 900 || true
           WIX=$(ls -d "/c/Program Files (x86)/WiX Toolset"*/bin 2>/dev/null | head -1)
           [ -n "$WIX" ] && echo "$WIX" >> "$GITHUB_PATH"
           echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
