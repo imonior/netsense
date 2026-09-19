@@ -94,6 +94,28 @@ jobs:
 
       # 推 v* tag 时 tauri-action 创建/更新 Draft Release 并上传安装包；
       # 多平台并行时首个创建、其余更新同一 Release（tauri-action 自带 upsert）。
+      # Release 说明默认英文：从英文 CHANGELOG.md 的「本版本」段落抽取，避免中文提交污染。
+      - name: 生成 Release 说明（英文，来自 CHANGELOG.md）
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          echo "extracting changelog section for v${VER}"
+          awk -v v="## [${VER}]" '
+            substr($0,1,4)=="## [" {
+              if (p) exit
+              if (substr($0,1,length(v))==v && substr($0,length(v)+1,1)==" ") { p=1; next }
+            }
+            p { print }
+          ' CHANGELOG.md > release-notes.md
+          echo "---- preview ----"; head -20 release-notes.md
+          {
+            echo "body<<RELBODY_EOF"
+            cat release-notes.md
+            echo "RELBODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 打包安装包并发布到 Release（tauri-action）
         uses: tauri-apps/tauri-action@v0
         env:
@@ -105,10 +127,7 @@ jobs:
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('NetSense {0}', github.ref_name) || '' }}
           releaseDraft: true
           prerelease: false
-          releaseBody: |
-            自动构建的预发布安装包，仅供测试。
-            - Windows 首次改网络会弹一次 UAC；以管理员运行一次可免除。
-            - macOS 未签名，打开时需在“系统设置 → 隐私与安全性”里允许。
+          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && steps.notes.outputs.body || 'Automated pre-release build for testing.' }}
 
       # 即便打包/发布失败，也把裸可执行文件传成产物，方便直接下载手动测试
       - name: 上传裸可执行文件

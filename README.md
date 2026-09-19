@@ -1,77 +1,77 @@
 # NetSense
 
-> 跨平台独立桌面应用：根据当前网络身份（SSID / 网关 MAC / BSSID）自动匹配并应用网络 profile（静态 IP / DHCP / DNS / IPv6），带健康度监测（失联回落 DHCP 保底）与按网络触发的自动化任务（设路由 / 开软件 / 跑脚本）。
+> A cross-platform standalone desktop app that automatically matches and applies network profiles (static IP / DHCP / DNS / IPv6) from the current network identity (SSID / gateway MAC / BSSID), with health monitoring (fallback to DHCP on disconnect) and network-triggered automation (set routes / launch apps / run scripts).
 
-由 [hammerspoon-wifi-switcher](https://github.com/imonior/hammerspoon-wifi-switcher) 演进为**不依赖 Hammerspoon** 的独立软件，支持 macOS / Windows / Linux。
+Evolved from [hammerspoon-wifi-switcher](https://github.com/imonior/hammerspoon-wifi-switcher) into a **Hammerspoon-free** standalone app for macOS / Windows / Linux.
 
-## 特性
+## Features
 
-- **网络身份匹配**：SSID、网关 MAC、AP BSSID 三者均可作为独立判断条件（可单独或组合使用，AND 关系）。同名 SSID 多场景、伪造热点（evil twin）也能正确区分。
-- **每 SSID profile**：静态 IP / DHCP / 自定义 DNS / IPv6（automatic / manual / off）。
-- **全局回退**：`__DEFAULT__` 应用到任何未配置网络。
-- **健康度监测**：ICMP / HTTP / both 探测；连续失败且开启回落时自动切回 DHCP 保底，不中断上网。
-- **自动化任务**：按网络触发 `route` / `launch` / `run`（netsetman 式附加动作），`on_apply` / `on_revert` 触发，脚本受 allow-list 约束。
-- **托盘弹窗面板**：左键点状态栏/托盘图标即弹出面板（状态 + 一键切换 profile + 语言），失焦自动收起；右键出原生菜单。
-- **三平台同一套代码**：平台差异全部收敛在 PAL（`platform/{macos,windows,linux}.rs`），上层只依赖 trait。
-- **提权体验**：macOS 装一次 `sudoers` 白名单后免密；Windows 以管理员运行一次即免 UAC；Linux 配 `sudo -n` 即免弹窗。不可用时自动回落系统授权框，功能不中断。
-- **多语言（zh / en / zh-TW / ja / ko）**，79 个 key × 5 语，带 parity 校验。
+- **Network identity matching**: SSID, gateway MAC, and AP BSSID each work as an independent condition (alone or combined, AND logic). Correctly distinguishes same-named SSIDs across scenes and spoofed hotspots (evil twin).
+- **Per-SSID profile**: static IP / DHCP / custom DNS / IPv6 (automatic / manual / off).
+- **Global fallback**: `__DEFAULT__` applies to any unconfigured network.
+- **Health monitoring**: ICMP / HTTP / both probes; on consecutive failures with fallback enabled, automatically reverts to DHCP as a safety net without dropping connectivity.
+- **Automation**: network-triggered `route` / `launch` / `run` actions (netsetman-style), fired on `on_apply` / `on_revert`; scripts are constrained by an allow-list.
+- **Tray popup panel**: left-click the status-bar / tray icon to open the panel (status + one-click profile switch + language); auto-collapses on blur; right-click for the native menu.
+- **One codebase for three platforms**: all platform differences are confined to the PAL (`platform/{macos,windows,linux}.rs`); the upper layer depends only on the trait.
+- **Privilege escalation**: macOS gains passwordless sudo after installing a `sudoers` allow-list; Windows runs passwordless once launched as admin (no UAC); Linux is passwordless with `sudo -n` configured. Falls back to the system authorization dialog when unavailable — no feature breakage.
+- **Multi-language (en / zh / zh-TW / ja / ko)**: 79 keys × 5 languages, with parity validation.
 
-## 技术栈
+## Tech Stack
 
-- **Tauri v2 (Rust)** + 系统 WebView（前端复用现有 HTML/CSS 编辑器，无 Node 构建链）
-- 后端 Rust：Core Engine（匹配 / 应用 / 健康度 / 自动化）+ PAL（平台抽象层）
-- 平台实现（同一套上层代码，编译期选择）：
+- **Tauri v2 (Rust)** + system WebView (reuses the existing HTML/CSS editor; no Node build chain)
+- Rust backend: Core Engine (matching / applying / health / automation) + PAL (platform abstraction layer)
+- Platform implementations (same upper-layer code, selected at compile time):
 
-| 平台 | 读 | 写 | 提权 |
-|------|----|----|------|
-| macOS | `networksetup` / `arp` / `airport` | `networksetup` / `route` | 免密 sudoers 白名单脚本，回落 `osascript` 授权框 |
-| Windows | PowerShell CIM（`Get-NetAdapter` / `Get-NetConnectionProfile` …）+ `netsh` | `netsh` / `New-NetRoute` | 已是管理员则免弹窗，否则 UAC |
-| Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | `sudo -n` 可用则免弹窗，否则 `pkexec` |
+| Platform | Read | Write | Privilege |
+|----------|------|-------|-----------|
+| macOS | `networksetup` / `arp` / `airport` | `networksetup` / `route` | passwordless sudoers allow-list, fallback `osascript` dialog |
+| Windows | PowerShell CIM (`Get-NetAdapter` / `Get-NetConnectionProfile` …) + `netsh` | `netsh` / `New-NetRoute` | passwordless if already admin, otherwise UAC |
+| Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | passwordless with `sudo -n`, otherwise `pkexec` |
 
-## 快速开始
+## Quick Start
 
-### 方式一：云端出包（推荐，本地零依赖）
+### Method 1: Cloud build (recommended, zero local dependencies)
 
-推一个 tag 即可由 CI 同时产出三平台安装包与可执行文件（`windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`）：
+Pushing a tag triggers CI to produce installers and binaries for all three platforms at once (`windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`):
 
 ```bash
 git tag v0.3.0 && git push origin v0.3.0
 ```
 
-也可在 GitHub 网页端 Actions → build → Run workflow 手动触发。
+You can also trigger it manually from GitHub → Actions → build → Run workflow.
 
-### 方式二：本机构建
+### Method 2: Local build
 
 ```bash
-# 前置：Rust + 各平台构建依赖（Windows 另需 MSVC C++ 生成工具 + WebView2）
+# Prerequisites: Rust + per-platform build deps (Windows also needs MSVC C++ build tools + WebView2)
 
-# Windows（脚本会先体检 Rust/MSVC/SDK/WebView2/磁盘，缺什么告诉你装什么）
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1            # 出裸 exe
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Installer # 出 msi/nsis
+# Windows (the script first checks Rust/MSVC/SDK/WebView2/disk and tells you what is missing)
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1            # bare exe
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Installer # msi/nsis
 
 # macOS / Linux
-cd src-tauri && cargo build --release   # 裸可执行文件
-cd src-tauri && cargo tauri build       # 出安装包（需 tauri-cli）
+cd src-tauri && cargo build --release   # bare executable
+cd src-tauri && cargo tauri build       # installer (needs tauri-cli)
 
-# macOS 可选：装免密特权通道，消除每次改网络的授权弹窗
+# macOS optional: install the passwordless privilege channel to remove the auth prompt on every network change
 sh scripts/install-priv-helper.sh
 ```
 
-### 校验（不需编译，任何平台可跑）
+### Validate (no compile needed, runs on any platform)
 
 ```bash
-python scripts/validate.py     # JSON / 5 语 i18n parity / PAL 边界 / 三平台 trait 覆盖
-cd src-tauri && cargo test       # 本项目为纯 bin crate（无 lib target），用 cargo test 而非 --lib
+python scripts/validate.py     # JSON / 5-language i18n parity / PAL boundary / 3-platform trait coverage
+cd src-tauri && cargo test       # this is a pure bin crate (no lib target), use cargo test not --lib
 ```
 
-启动后以托盘形态常驻（不弹主窗口）：**左键点托盘图标**打开弹窗面板，
-右键出菜单（显示编辑器 / 打开日志目录 / 查看权限通道 / 退出）。
+After launch the app lives in the tray (no main window pops up): **left-click the tray icon** opens the popup panel,
+right-click opens the menu (show editor / open log folder / view privilege channel / quit).
 
-> **Windows 首次改网络会弹一次 UAC**。以管理员身份运行一次可免除（此后提权通道显示"无需授权"）。
+> **Windows prompts UAC once on the first network change.** Launching as administrator once removes it (after that the privilege channel shows "no authorization needed").
 
-## 配置
+## Configuration
 
-编辑 `config.json`（从 `config.example.json` 复制）。关键结构：
+Edit `config.json` (copied from `config.example.json`). Key structure:
 
 ```json
 {
@@ -85,8 +85,8 @@ cd src-tauri && cargo test       # 本项目为纯 bin crate（无 lib target）
 }
 ```
 
-详见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+See [DEVELOPMENT.md](DEVELOPMENT.md) for details.
 
-## 许可证
+## License
 
 MIT
