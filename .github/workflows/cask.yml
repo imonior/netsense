@@ -8,7 +8,7 @@ name: cask
 # cask，`brew install --cask netsense` 会在「已推 tag、还没点发布」的窗口里一直 404。
 # 挂到 `release: published` 上，cask 只在产物真正可下载之后才指向新版本。
 #
-# 同一个 tap 里还有 wireguide-plus 的 cask；两个项目各写各的文件，互不覆盖。
+# 同一个 tap 里还有另一个项目的 cask；两者各写各的文件，互不覆盖。
 # 但两者的 bump 提交都落在同一条 tap main 上——因此本文件的 push 必须能吸收
 # 「另一个项目刚 push 过」造成的 non-fast-forward（见文件末尾的 rebase + 重试）。
 #
@@ -96,9 +96,8 @@ jobs:
           repository: imonior/homebrew-tap
           token: ${{ secrets.TAP_PUSH_TOKEN }}
           path: tap
-          # 完整历史，使下面 push 步的 rebase 能 fast-forward 到另一个项目
-          # （wireguide-plus）刚 bump 过的 tap main。浅克隆（默认）下
-          # `git pull --rebase` 拿不到共同祖先，rebase 会直接失败。
+          # 完整历史，使下面 push 步的 rebase 能接上共享 tap main 的另一个 cask 项目刚推的
+          # 提交。浅克隆（默认）下 `git pull --rebase` 拿不到共同祖先，rebase 会直接失败。
           fetch-depth: 0
 
       - name: 重写 Casks/netsense.rb
@@ -166,7 +165,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # no-op 守卫：同 tag 重跑时跳过空 diff。只查本项目的 cask 文件，
-          # 因此 rebase 带上来的 wireguide-plus 改动不会产生空提交。
+          # 因此 rebase 带上来的别家改动不会产生空提交。
           if git diff --quiet Casks/netsense.rb; then
             echo "cask already up to date for ${TAG}; nothing to commit."
             exit 0
@@ -174,8 +173,8 @@ jobs:
           git add Casks/netsense.rb
           git commit -m "netsense ${TAG}: cask bump"
 
-          # 另一个共享 imonior/homebrew-tap 的项目（wireguide-plus）可能在本次 run
-          # 期间 push 过 cask bump，使裸 `git push` non-fast-forward 失败。
+          # tap 上共享 main 分支的另一个项目可能在本次 run 期间 push 过 cask bump，
+          # 使裸 `git push` non-fast-forward 失败。
           # 先 rebase 到最新 tap main 再重试，吸收并发窗口。
           # `|| true` 让 rebase 的偶发失败也进入下一次重试，而不是被 set -e 判死。
           pushed=false

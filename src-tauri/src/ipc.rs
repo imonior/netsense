@@ -516,8 +516,11 @@ pub(crate) fn fetch_url(url: &str) -> Result<String, String> {
     // URL 用单引号包住，并把里面的 `'` 按 PowerShell 的规则翻倍：传进来的不总是我们自己拼的
     // 常量（`run_update` 的 `checksum_url` 是前端回传的），不转义就能闭合字符串再拼命令。
     // `@{...}` 在 Rust format! 里用 `{{`/`}}` 转义为字面大括号。
+    // 首句把 TLS 1.2 **并入**当前协议集：GitHub 只接受 TLS 1.2 及以上，而 Windows PowerShell 5.1
+    // 在老 .NET Framework 上默认不协商它。用 `-bor` 而不是直接赋值，是为了只在现状之上补齐、
+    // 绝不让某个本来能用的配置变差。
     let ps = format!(
-        "(Invoke-WebRequest -Uri '{}' -Headers @{{Accept='application/vnd.github+json'; UserAgent='netsense'}} -TimeoutSec 10 -UseBasicParsing).Content",
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;(Invoke-WebRequest -Uri '{}' -Headers @{{Accept='application/vnd.github+json'; UserAgent='netsense'}} -TimeoutSec 10 -UseBasicParsing).Content",
         url.replace('\'', "''")
     );
     let out = std::process::Command::new("powershell")
@@ -534,9 +537,14 @@ pub(crate) fn fetch_url(url: &str) -> Result<String, String> {
 
 #[cfg(not(windows))]
 pub(crate) fn fetch_url(url: &str) -> Result<String, String> {
+    // `--proto =https`：`-L` 跟随时，重定向落点也必须是 https。只校验我们传进来的那个 URL
+    // 是不够的 —— 一个 https→http 的跳转会把明文请求送出去。这条筛选不会被重定向放宽
+    // （curl 对跳转目标用的是同一份协议集，实测报 `Protocol "http" disabled (in redirect)`）。
     let out = std::process::Command::new("curl")
         .args([
             "-fsSL",
+            "--proto",
+            "=https",
             "--max-time",
             "10",
             "-H",
