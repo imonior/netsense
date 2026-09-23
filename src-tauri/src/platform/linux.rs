@@ -45,7 +45,7 @@ fn spawn_detached(program: &str, args: &[String]) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {}: {}", program, e))?;
     std::thread::spawn(move || {
@@ -541,6 +541,9 @@ impl NetworkPlatform for LinuxPlatform {
                 };
                 let gateway = get_field(&dev, "IP4.GATEWAY");
                 let dns = get_field_all(&dev, "IP4.DNS");
+                // 取 MAC 必须在 `dev` 被搬进 `NicInfo` 之前：`name: dev` 一移动，后面再
+                // `&dev` 就是 use-after-move（这个函数体只有 Linux 腿会编译，本机看不到）。
+                let mac = get_field(&dev, "GENERAL.HWADDR");
                 let ssid = if kind == super::NicKind::Wireless && Some(&dev) == wifi.as_ref() {
                     self.get_current_ssid()
                 } else {
@@ -562,7 +565,7 @@ impl NetworkPlatform for LinuxPlatform {
                     kind,
                     up: true,
                     ssid,
-                    mac: get_field(&dev, "GENERAL.HWADDR"),
+                    mac,
                     ipv4,
                     netmask,
                     gateway,

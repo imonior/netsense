@@ -112,7 +112,7 @@ fn parse_prefix_len(s: &str) -> Result<String, String> {
 /// 标准 base64 编码（自带实现，避免为一个小工具引入依赖）。
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = *chunk.get(1).unwrap_or(&0) as u32;
@@ -811,7 +811,7 @@ fn safe_tunnel_name(name: &str) -> Result<(), String> {
 fn connect_wireguard(tunnel: &str) -> Result<(), String> {
     safe_tunnel_name(tunnel)?;
     let dir = wireguard_conf_dir().ok_or_else(|| {
-        format!("找不到 %PROGRAMDATA%，无法定位 WireGuard 的隧道配置目录")
+        "找不到 %PROGRAMDATA%，无法定位 WireGuard 的隧道配置目录".to_string()
     })?;
     let conf = dir.join(format!("{}.conf", tunnel));
     if !conf.is_file() {
@@ -970,6 +970,16 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                     .and_then(|x| x.as_u64())
                     .and_then(|p| prefix_to_mask(p as u32));
 
+                // VPN 归属要在 `name` 搬进 `NicInfo` 之前算完：这个文件只有 Windows 腿会
+                // 编译，写在字面量字段里就是一次 use-after-move。
+                let app = if kind == super::NicKind::Vpn {
+                    super::guess_vpn_app(&desc)
+                        .or_else(|| super::guess_vpn_app(&name))
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+
                 out.push(super::NicInfo {
                     name,
                     label: if desc.is_empty() { None } else { Some(desc.clone()) },
@@ -982,13 +992,7 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                     gateway,
                     gateway_mac,
                     dns: get("dns"),
-                    app: if kind == super::NicKind::Vpn {
-                        super::guess_vpn_app(&desc)
-                            .or_else(|| super::guess_vpn_app(&name))
-                            .map(|s| s.to_string())
-                    } else {
-                        None
-                    },
+                    app,
                 });
             }
 
