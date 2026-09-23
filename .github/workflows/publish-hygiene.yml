@@ -1,0 +1,49 @@
+name: publish-hygiene
+
+# Tool-agnostic, cross-platform guard: fails the build if any pushed commit
+# message or changed published file leaks an assistant-tool (AI-IDE) name
+# or the standalone token "AI". Mirrors scripts/git-hooks/pre-commit so the
+# rule holds even when a dev commits without the local hook enabled
+# (core.hooksPath is in .git/config and is not cloned, so most fresh clones
+# have no local hook at all).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ai-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Resolve scan range
+        id: range
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          zero=0000000000000000000000000000000000000000
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            # pull_request: every commit the PR adds on top of its base
+            range="origin/${GITHUB_BASE_REF}..HEAD"
+          elif [ -n "${EVENT_BEFORE:-}" ] && [ "$EVENT_BEFORE" != "$zero" ] \
+               && git cat-file -e "${EVENT_BEFORE}^{commit}" 2>/dev/null; then
+            # push: exactly the commits this push added. A fixed lookback window
+            # (HEAD~20..HEAD) must NOT be used here -- it re-scans history that
+            # predates the guard and goes red on the guard's own commit message.
+            range="${EVENT_BEFORE}..${GITHUB_SHA}"
+          elif git cat-file -e "${GITHUB_SHA}~1^{commit}" 2>/dev/null; then
+            # no usable `before` (new ref / force-push sentinel): scan the tip
+            range="${GITHUB_SHA}~1..${GITHUB_SHA}"
+          else
+            range="${GITHUB_SHA}"
+          fi
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+          echo "publish-hygiene scan range: $range"
+      - name: Scan commit messages and diff
+        shell: bash
+        run: bash scripts/check-no-ai.sh --ci "${{ steps.range.outputs.range }}"

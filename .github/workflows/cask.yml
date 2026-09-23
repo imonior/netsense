@@ -1,0 +1,194 @@
+name: cask
+
+# 只做一件事：Release **正式发布**（从 Draft 点 Publish）之后，把两个 macOS dmg 的
+# SHA256 写进 homebrew-tap 的 Casks/netsense.rb。
+#
+# 为什么不放在 build.yml 里跟着 tag 走：tauri-action 在 tag 推送时创建的是 **Draft**
+# Release，而 `releases/download/<tag>/...` 对未发布的 Draft 返回 404。若那一刻就更新
+# cask，`brew install --cask netsense` 会在「已推 tag、还没点发布」的窗口里一直 404。
+# 挂到 `release: published` 上，cask 只在产物真正可下载之后才指向新版本。
+#
+# 同一个 tap 里还有 wireguide-plus 的 cask；两个项目各写各的文件，互不覆盖。
+# 但两者的 bump 提交都落在同一条 tap main 上——因此本文件的 push 必须能吸收
+# 「另一个项目刚 push 过」造成的 non-fast-forward（见文件末尾的 rebase + 重试）。
+#
+# 需要在 imonior/netsense 仓库配置 secrets.TAP_PUSH_TOKEN（对 imonior/homebrew-tap
+# 有 Contents: Read and write 权限的 fine-grained PAT）。未配置时本 job 自动跳过。
+#
+# 手动补跑：Actions → cask → Run workflow，填入 tag（例如 v1.0.0）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cask:
+    name: Sync Casks/netsense.rb
+    # 预发布版本不更新稳定 cask（tag 含 '-'，或 Release 标了 prerelease）
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 解析 tag
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then TAG="${{ inputs.tag }}"; fi
+          if [ -z "$TAG" ]; then
+            echo "::error::no tag resolved (release event had no tag_name and no input.tag given)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "resolved tag: $TAG"
+
+      - name: 检查 TAP_PUSH_TOKEN 是否存在
+        id: check_token
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          if [ -z "$TAP_PUSH_TOKEN" ]; then
+            echo "TAP_PUSH_TOKEN secret not set; skipping cask update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 用 Release asset 自带的 digest 字段取 SHA256 —— 服务端已算好，无需下载 5MB 的 dmg，
+      # 也就不受「代理下载被截断」这类问题影响（下载拿到的 dmg 若是残文件，sha 就错了）。
+      - name: 读取两个 dmg 的 SHA256
+        id: sha
+        if: steps.check_token.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq '.assets[] | select(.name | endswith(".dmg")) | "\(.name)\t\(.digest)"' > assets.tsv
+          echo "---- dmg assets (name / digest) ----"
+          cat assets.tsv
+          arm=$(awk -F'\t' '$1 ~ /_aarch64\.dmg$/ {print $2}' assets.tsv | sed 's/^sha256://')
+          intel=$(awk -F'\t' '$1 ~ /_x64\.dmg$/ {print $2}' assets.tsv | sed 's/^sha256://')
+          if [ -z "$arm" ] || [ -z "$intel" ]; then
+            echo "::error::could not resolve both dmg digests for $TAG (asset digest missing?)"
+            exit 1
+          fi
+          echo "arm_sha=$arm" >> "$GITHUB_OUTPUT"
+          echo "intel_sha=$intel" >> "$GITHUB_OUTPUT"
+          echo "arm  = $arm"
+          echo "intel= $intel"
+
+      - name: Checkout homebrew-tap
+        if: steps.check_token.outputs.skip == 'false'
+        uses: actions/checkout@v7
+        with:
+          repository: imonior/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: tap
+          # 完整历史，使下面 push 步的 rebase 能 fast-forward 到另一个项目
+          # （wireguide-plus）刚 bump 过的 tap main。浅克隆（默认）下
+          # `git pull --rebase` 拿不到共同祖先，rebase 会直接失败。
+          fetch-depth: 0
+
+      - name: 重写 Casks/netsense.rb
+        if: steps.check_token.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ARM_SHA: ${{ steps.sha.outputs.arm_sha }}
+          INTEL_SHA: ${{ steps.sha.outputs.intel_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Casks
+          cask="tap/Casks/netsense.rb"
+          # 下面这块非 version / sha256 / url 的文本必须与 tap 里现存的
+          # Casks/netsense.rb 逐字节一致，这样每次 bump 的 diff 就只有版本与哈希，
+          # 不会把无关行重排。反引号要转义，否则 shell 会把 `xattr ...` 当命令执行。
+          #
+          # 这里**故意不写** depends_on macos:。NetSense 要求 10.15+，而 10.15 已在
+          # Homebrew 自己的运行下限（Big Sur / 11）之下；这种"下限以下"的显式最低版本
+          # 既冗余、又会被 Homebrew 7.0 直接拒绝：
+          #     Calling `depends_on macos: :catalina` is disabled! There is no replacement.
+          # 一旦出现，`brew install --cask netsense` 连解析 cask 都过不去。官方 Cask
+          # Cookbook 对这种情况的指引就是"该声明冗余，删掉"——所以这里没有这一行。
+          cat > "$cask" <<EOF
+          cask "netsense" do
+            version "$VERSION"
+            arch arm: "aarch64", intel: "x64"
+            sha256 arm: "$ARM_SHA",
+                   intel: "$INTEL_SHA"
+
+            url "https://github.com/imonior/netsense/releases/download/v#{version}/NetSense_#{version}_#{arch}.dmg"
+            name "NetSense"
+            desc "Cross-platform SSID-aware network profile switcher"
+            homepage "https://github.com/imonior/netsense"
+
+            # No depends_on macos: here -- NetSense needs 10.15+, which is at or below
+            # Homebrew's own floor (Big Sur), so it is redundant and Homebrew 7.0 rejects
+            # it outright ("Calling depends_on macos: :catalina is disabled!").
+            app "NetSense.app"
+
+            # Unsigned build: strip the Gatekeeper quarantine flag after install
+            # (equivalent to the user running \`xattr -dr com.apple.quarantine\`).
+            postflight do
+              system_command "/usr/bin/xattr",
+                             args: ["-dr", "com.apple.quarantine", "#{appdir}/NetSense.app"]
+            end
+
+            uninstall quit: "com.netsense.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.netsense.app",
+              "~/Library/Caches/com.netsense.app",
+              "~/Library/Preferences/com.netsense.app.plist",
+            ]
+          end
+          EOF
+          echo "---- Casks/netsense.rb ----"; cat "$cask"
+
+      - name: 提交并推送
+        if: steps.check_token.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # no-op 守卫：同 tag 重跑时跳过空 diff。只查本项目的 cask 文件，
+          # 因此 rebase 带上来的 wireguide-plus 改动不会产生空提交。
+          if git diff --quiet Casks/netsense.rb; then
+            echo "cask already up to date for ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git add Casks/netsense.rb
+          git commit -m "netsense ${TAG}: cask bump"
+
+          # 另一个共享 imonior/homebrew-tap 的项目（wireguide-plus）可能在本次 run
+          # 期间 push 过 cask bump，使裸 `git push` non-fast-forward 失败。
+          # 先 rebase 到最新 tap main 再重试，吸收并发窗口。
+          # `|| true` 让 rebase 的偶发失败也进入下一次重试，而不是被 set -e 判死。
+          pushed=false
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main || true
+            if git push origin main; then
+              pushed=true
+              break
+            fi
+            echo "push attempt ${i} failed; rebasing onto latest tap main and retrying..."
+            sleep 3
+          done
+          if [ "$pushed" != "true" ]; then
+            echo "::error::could not push netsense cask bump to tap after 5 attempts"
+            exit 1
+          fi

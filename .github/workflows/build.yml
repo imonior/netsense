@@ -1,0 +1,414 @@
+name: build
+
+# Three-platform build and release:
+#   - Pushing a v* tag  -> auto-creates a Draft Release with the three-platform installers
+#                          (windows-x64 / macos-arm64 / macos-x64 / linux-x64)
+#   - Manual workflow run -> only builds and uploads bare executable artifacts, no Release
+# Why in the cloud: Windows needs MSVC + WiX/NSIS, macOS signing must run on a Mac,
+# Linux depends on webkit2gtk.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+# Creating/uploading a Release needs write permission (the default GITHUB_TOKEN only has
+# read on contents).
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Concurrency control: repeated runs on the same tag (or ref) queue instead of running in parallel.
+# ⚠️ This only governs "between runs" -- the 4 matrix legs inside one run still run in parallel,
+# so this layer never protected against "multiple legs creating a Release at once". The real
+# protection is the release leg creating the Draft first and handing releaseId to the legs
+# (see that job's comments): once tauri-action has a releaseId it never looks up or creates.
+# Grouping by ref rather than a fixed constant lets different tags run in parallel, and keeps a
+# manual workflow_dispatch verification from queuing behind a 60-minute four-platform release --
+# manual runs are blocked by the `refs/tags/` guard and never touch a Release. cancel-in-progress
+# is always false: a release must never be killed halfway; better late than broken.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Platform-independent static checks; fail fast to avoid wasting build-machine time.
+  # timeout-minutes: without a cap, if a runner can't be allocated the job hangs until GitHub's
+  # task limit (seen before: a macos-x64 job hung 17h before anyone noticed). This is a safety net.
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Static checks
+        run: python scripts/validate.py
+      # The editor's form is plain DOM + innerHTML strings, so nothing type-checks the JSON it
+      # sends. This harness runs the real editor.html headlessly and asserts what it emits; it is
+      # checked here (fail fast, ~2s) instead of four build legs from, because the same failure
+      # would otherwise surface only after each leg had already compiled every dependency.
+      - name: Editor smoke (frontend payload contract)
+        run: node scripts/editor-smoke.mjs
+
+  # Create the Draft Release first, then hand its id to the platform legs.
+  #
+  # Why this leg exists: tauri-action only looks up or creates a Release when releaseId is
+  # absent (source: `if (tagName && !releaseId)`). The four matrix legs belong to the **same run**
+  # and run in parallel, while workflow-level concurrency only queues between runs, not between
+  # legs in a run -- so multiple legs could all fail to find a Release and each create one,
+  # producing **multiple Drafts for the same tag** with installers split across them (observed once:
+  # 2 Drafts, 2 macOS dmgs in one, Windows/Linux msi+exe+deb in the other; `gh release view`
+  # randomly showed only one). Getting a fixed releaseId makes tauri-action skip the entire
+  # lookup/create branch, eliminating the race at the root.
+  release:
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Release notes default to English: extracted from the current version's section of the
+      # English CHANGELOG.md, so Chinese commits can't leak into the published notes.
+      - name: Generate release notes (English, from CHANGELOG.md)
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          echo "extracting changelog section for v${VER}"
+          awk -v v="## [${VER}]" '
+            substr($0,1,4)=="## [" {
+              if (p) exit
+              if (substr($0,1,length(v))==v && substr($0,length(v)+1,1)==" ") { p=1; next }
+            }
+            p { print }
+          ' CHANGELOG.md > release-notes.md
+          echo "---- preview ----"; head -20 release-notes.md
+
+      - name: Create Draft Release
+        id: create
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          # Idempotent + self-healing: first delete every **stale Draft** for this tag. This makes
+          # re-running the same tag safe, and also auto-cleans duplicate Drafts left by the old race.
+          # Only drafts are deleted -- a published Release is never touched, so re-pushing an old
+          # tag can't destroy the live version.
+          for id in $(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+                        --jq ".[] | select(.tag_name==\"${TAG}\" and .draft) | .id"); do
+            echo "removing stale draft release id=${id} (tag=${TAG})"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+          done
+          # The previous step only deleted drafts, so if we can still find one by tag now, the tag
+          # is a **published** version: refuse to recreate it. Re-pushing an already-published tag
+          # should fail, not silently rewrite the live artifact and its hash.
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .id >/dev/null 2>&1; then
+            echo "::error::a published release for ${TAG} already exists; refusing to recreate it"
+            exit 1
+          fi
+          # Take the id straight from the POST /releases **response** -- creation and id fetch in one step.
+          #
+          # ⚠️ Never `gh release create` and then `GET releases/tags/$TAG` to fetch the id:
+          # a Draft Release hangs off a placeholder tag on GitHub (html_url looks like
+          # `releases/tag/untagged-<hash>`, only landing on the real tag after you click Publish),
+          # so querying `GET releases/tags/$TAG` against the draft state **always 404s**. That failure
+          # looks like: the Release was created, the immediate lookup 404s, the whole release leg
+          # goes red, and build is skipped.
+          #
+          # target_commitish is given $GITHUB_SHA explicitly: ignored once the tag exists, but if
+          # the tag hasn't synced yet it still has a definite landing (otherwise the draft falls
+          # back to the default branch).
+          jq -n --arg tag "$TAG" --arg sha "$GITHUB_SHA" --arg name "NetSense ${TAG}" \
+                --rawfile body release-notes.md \
+                '{tag_name:$tag, target_commitish:$sha, name:$name, body:$body, draft:true}' \
+            > release-payload.json
+          RID=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
+                  --input release-payload.json --jq .id)
+          if [ -z "$RID" ] || [ "$RID" = "null" ]; then
+            echo "::error::failed to create draft release for tag ${TAG}"
+            exit 1
+          fi
+          echo "created draft release id=${RID}"
+          echo "release_id=${RID}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [validate, release]
+    # The release leg is skipped on a non-tag workflow_dispatch; we still compile + run unit tests.
+    # But if it **fails**, we must stop -- without a known releaseId, tauri-action falls back to
+    # "look up / create by tag", which is exactly the race path that produces duplicate Releases.
+    if: ${{ !cancelled() && needs.validate.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x64
+            bundles: "nsis,msi"
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+            bundles: "dmg"
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+            label: macos-x64
+            bundles: "dmg"
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+            bundles: "deb"
+    runs-on: ${{ matrix.platform }}
+    # A single-platform cold build takes ~3-10 min; 60 min covers a first full compile and avoids
+    # infinite queuing when runners are scarce (a 17h hang has happened before).
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf build-essential curl wget file libssl-dev
+
+      # windows-latest doesn't ship WiX / NSIS; Tauri needs them explicitly to build msi/nsis.
+      # choco may return non-zero on "already installed / pending reboot"; `|| true` absorbs that,
+      # but the key is adding the tool bins to PATH.
+      - name: Windows packaging deps (WiX + NSIS)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          # Hard cap on choco installs: if WiX/NSIS downloads stall, the step fails at 900s instead
+          # of hanging to GitHub's 6h task limit (the "first run hung 13h" case was likely a choco
+          # download stall; `|| true` only covers "installed-then-failed", not "stalled").
+          choco install wixtoolset nsis -y --no-progress --timeout 900 || true
+          WIX=$(ls -d "/c/Program Files (x86)/WiX Toolset"*/bin 2>/dev/null | head -1)
+          [ -n "$WIX" ] && echo "$WIX" >> "$GITHUB_PATH"
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          command -v light.exe candle.exe makensis.exe || ls "$WIX"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.label }}
+
+      # This is a pure bin crate (no lib.rs); the unit tests live in #[cfg(test)] blocks inside the
+      # modules themselves (config/ / conditions/ / detection/ / network/ / automation/ / engine.rs /
+      # platform*.rs / i18n.rs). Don't add --lib or it fails with "no library targets found".
+      #
+      # The harness doubles as a fixture generator here: `--write-fixtures` dumps the payloads the
+      # editor really sends, and the Rust test `payloads_the_editor_actually_sends_are_the_ones_
+      # serde_accepts` replays them through the same upsert+validate path `save_profile` uses. That
+      # closes the one gap static checks cannot see -- serde has no deny_unknown_fields and its
+      # action enums are internally tagged, so a tag typo on the frontend is a *config-wide* failure
+      # at load time, not a validation warning. Without NS_EDITOR_FIXTURES the test skips.
+      - name: Record editor payloads (fixture for the contract test)
+        shell: bash
+        run: |
+          node scripts/editor-smoke.mjs --write-fixtures target/editor-payloads.json
+          # github.workspace rather than $PWD: on a Windows runner bash reports /d/a/... which
+          # Rust's std::fs cannot resolve (it is not a drive path), while the expression expands to
+          # the native `D:\a\...`.
+          echo "NS_EDITOR_FIXTURES=${{ github.workspace }}/target/editor-payloads.json" >> "$GITHUB_ENV"
+
+      # Warnings are errors here. Why per-leg instead of once in `validate`: roughly a third of the
+      # PAL is `#[cfg(windows)]` / `#[cfg(linux)]` code that simply does not exist on another
+      # runner's target, so a single lint pass could never see it -- and `validate` has none of the
+      # system dependencies (webkit2gtk) needed to build the crate in the first place. `--all-targets`
+      # covers the `#[cfg(test)]` blocks too, which is where a good half of the lints used to live.
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets -- -D warnings
+
+      - name: Unit tests (matcher / i18n / editor contract)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      # The installer ownership, Release title and notes are all written once by the `release` leg
+      # above; we don't regenerate them here (previously the CHANGELOG extraction lived in the
+      # matrix legs, i.e. four legs each wrote the same Release body).
+
+      # macOS signing/notarization (Apple Developer ID) env vars.
+      # ⚠️ Don't feed empty APPLE_* strings straight into tauri-action's env -- on GitHub Actions an
+      # unconfigured secret renders as "", and this tauri-action version treats "" as "configured"
+      # and runs `security import` on an empty cert, breaking macOS packaging (failed to import
+      # keychain certificate) and taking both mac legs red. So we only write the 6 vars into
+      # $GITHUB_ENV with `if: secrets.APPLE_CERTIFICATE != ''` when a cert is truly configured;
+      # otherwise the vars stay undefined and tauri-action skips signing, producing an unsigned dmg
+      # that doesn't block the other platforms. Fill in the cert later and it auto-becomes
+      # signed+notarized with no code change.
+      - name: Export Apple signing env vars (if configured)
+        # Use the github context to decide whether this is a tag push; whether the cert is configured
+        # is checked in-shell with -n, to avoid using the secrets context in a step's if (some GitHub
+        # environments disallow secrets in step-if and would mark the workflow invalid).
+        # ⚠️ In a cross-platform job, bash syntax must set shell: bash explicitly, or the Windows
+        # runner defaults to PowerShell and fails with a syntax error.
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            printf 'APPLE_CERTIFICATE=%s\n' "$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+            printf 'APPLE_CERTIFICATE_PASSWORD=%s\n' "$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+            printf 'APPLE_SIGNING_IDENTITY=%s\n' "$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            printf 'APPLE_ID=%s\n' "$APPLE_ID" >> "$GITHUB_ENV"
+            printf 'APPLE_PASSWORD=%s\n' "$APPLE_PASSWORD" >> "$GITHUB_ENV"
+            printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          else
+            echo "Apple certificate not configured: skipping signing, producing an unsigned dmg (distributed via Homebrew / manual allow)"
+          fi
+
+      # Upload the installer to the Draft Release pre-created by the `release` leg.
+      #
+      # ⚠️ releaseId must be passed. tauri-action only takes the "look up / create by tagName" branch
+      # when releaseId is absent (`if (tagName && !releaseId)`) -- that's the root cause of the
+      # concurrent-legs duplicate-Release race. With releaseId it uploads straight to that id.
+      #
+      # ⚠️ This step must also be restricted to tag pushes. On a non-tag run (manual workflow_dispatch)
+      # tagName is empty, so tauri-action generates untagged-<hash> as the tag and overwrites the
+      # **existing Draft Release's** tag field -- a manual check once rewrote a Draft's tag from the
+      # real tag to untagged-... . Manual checks only compile and test, never touch a Release.
+      # tagName is still kept: it builds the updater JSON download URL (releaseId only sets the
+      # upload target).
+      - name: Build installer and upload to Draft Release (tauri-action)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          tagName: ${{ github.ref_name }}
+          releaseId: ${{ needs.release.outputs.release_id }}
+
+      # Note on Windows packaging: no "offline" installer, and no second packaging pass. The
+      # offlineInstaller variant embedded the full WebView2 runtime into setup.exe (~218MB);
+      # `bundle.windows.webviewInstallMode = skip` (see tauri.conf.json) keeps the
+      # installer to a few MB and the install never touches the network or checks the runtime. If
+      # WebView2 is genuinely missing, the app shows a native dialog with the official download link
+      # at launch (see platform::webview2_available() in src-tauri/src/main.rs) instead of silently
+      # exiting and looking "installed but won't open".
+
+      # Even if packaging/publishing fails, upload the bare executable so it can be downloaded
+      # directly for manual testing.
+      - name: Upload bare executable
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: netsense-${{ matrix.label }}-bin
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/netsense.exe
+            src-tauri/target/${{ matrix.target }}/release/netsense
+          if-no-files-found: ignore
+
+  # Collect every platform's installer, generate a root-level SHA256SUMS, and upload it back to the
+  # same Draft Release.
+  #
+  # Why a separate job instead of each matrix leg writing its own: the four legs run in the same run
+  # in parallel; if each leg ran `sha256sum *` and uploaded a same-named SHA256SUMS, the four uploads
+  # would overwrite each other and only one leg's manifest would survive -- so in-app upgrade
+  # verification would read "not listed in SHA256SUMS" for every platform but that one. So after build
+  # finishes we pull the Draft Release's assets back and hash them all once.
+  #
+  # ⚠️ Locate assets by releaseId, not tag: a Draft Release hangs off a placeholder tag
+  # (`releases/tag/untagged-<hash>`, see the release leg comments), so looking up by tag 404s.
+  # Uploading likewise must go through uploads.github.com + releaseId, not `gh release upload <tag>`.
+  checksums:
+    needs: [release, build]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Generate and upload SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RID:-}" ] || [ "$RID" = "null" ]; then
+            echo "::error::no release id from release job"
+            exit 1
+          fi
+          api="repos/${GITHUB_REPOSITORY}/releases/${RID}/assets"
+          mkdir -p sums && cd sums
+
+          # Pull back every installer on this Release (skip any pre-existing checksum file to avoid
+          # self-reference).
+          count=0
+          while IFS=$'\t' read -r id name; do
+            [ -z "$id" ] && continue
+            case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
+              sha256sums*|checksums*|sha256.txt|shasums*)
+                echo "skip existing checksum asset: $name"; continue ;;
+            esac
+            echo "fetching asset $name (id=$id)"
+            gh api "$api/$id" -H "Accept: application/octet-stream" > "$name"
+            count=$((count + 1))
+          done < <(gh api "$api?per_page=100" --jq '.[] | "\(.id)\t\(.name)"')
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no release assets found to checksum"
+            exit 1
+          fi
+
+          # GNU-style `hash  filename`: matches update.rs's parse_hash and wireguide-plus.
+          sha256sum * > ../SHA256SUMS
+          cd .. && cat SHA256SUMS
+
+          # Upload (overwrites the old manifest on a re-run). Content-Type must be set explicitly or
+          # GitHub guesses from the extension.
+          gh api -X POST \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=SHA256SUMS" \
+            -H "Content-Type: application/octet-stream" \
+            --input SHA256SUMS
+          echo "uploaded SHA256SUMS covering ${count} asset(s)"
+
+  # Auto-publish once checksums are verified. Keeps the safe gated flow: the release stays a draft
+  # through build + checksum, and only goes public after every platform artifact is present and its
+  # SHA256SUMS is uploaded. Publishing also fires the Homebrew cask sync (cask.yml listens on
+  # release: published), so `brew upgrade --cask netsense` tracks the new version without a manual step.
+  publish:
+    needs: [release, build, checksums]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.build.result == 'success' && needs.checksums.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Publish release (auto, after checksums verified)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RID:-}" ] || [ "$RID" = "null" ]; then
+            echo "::error::no release id; refusing to publish"
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RID}" -f draft=false
+          echo "published release id=${RID}"
+
+  # Homebrew cask auto-update has moved out of this file into `.github/workflows/cask.yml`.
+  # Reason: tauri-action only creates a **Draft** Release on tag push, and
+  # `releases/download/<tag>/...` returns 404 for an unpublished Draft -- if the cask pointed at
+  # that tag now, `brew install --cask netsense` would fail until you publish manually. Switching to
+  # `release: published` makes the cask update only at the moment the release goes truly public.
