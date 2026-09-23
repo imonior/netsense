@@ -1,0 +1,20 @@
+[package]
+name = "netsense"
+version = "1.0.0"
+description = "Cross-platform SSID-aware network profile switcher"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["clock"] }
+sha2 = "0.10"
+
+[features]
+# default = macOS; 后续加 windows / linux feature gates
+default = []

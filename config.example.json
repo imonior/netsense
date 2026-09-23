@@ -1,0 +1,161 @@
+{
+  "schema": 1,
+  "language": "en",
+  "allowed_scripts": [
+    "/opt/ops/office-init.sh"
+  ],
+  "profiles": [
+    {
+      "id": "home",
+      "name": "HomeWiFi",
+      "enabled": true,
+      "detection": {
+        "mode": "network_events",
+        "change_delay_secs": 5
+      },
+      "rules": [
+        {
+          "id": "r1",
+          "enabled": true,
+          "conditions": [
+            { "id": "c1", "enabled": true, "type": "wifi_ssid", "value": "MyHomeWiFi" },
+            { "id": "c2", "enabled": true, "type": "gateway_mac", "value": "aa:bb:cc:11:22:33" }
+          ]
+        }
+      ],
+      "then": {
+        "network": {
+          "mode": "dhcp",
+          "dns": "127.0.0.1",
+          "v6mode": "off",
+          "verify": {
+            "readback": true,
+            "health": {
+              "enabled": true,
+              "fallback": { "enabled": true },
+              "mode": "both",
+              "http_target": "http://cp.cloudflare.com",
+              "icmp_target": "223.5.5.5",
+              "interval": 30,
+              "retries": 3,
+              "timeout": 5
+            }
+          }
+        }
+      },
+      "else": {
+        "network": {
+          "mode": "dhcp",
+          "dns": ""
+        }
+      }
+    },
+    {
+      "id": "office",
+      "name": "Office_5G",
+      "enabled": true,
+      "detection": {
+        "mode": "network_events_and_polling",
+        "change_delay_secs": 5,
+        "poll_interval_secs": 30
+      },
+      "rules": [
+        {
+          "id": "r1",
+          "enabled": true,
+          "conditions": [
+            { "id": "c1", "enabled": true, "type": "wifi_ssid", "value": "Office_5G" },
+            { "id": "c2", "enabled": true, "type": "bssid", "value": "00:11:22:33:44:55" },
+            { "id": "c3", "enabled": false, "type": "network_interface", "value": "en0" }
+          ]
+        },
+        {
+          "id": "r2",
+          "enabled": true,
+          "conditions": [
+            { "id": "c4", "enabled": true, "type": "gateway_mac", "value": "aa:bb:cc:dd:ee:ff" }
+          ]
+        }
+      ],
+      "then": {
+        "network": {
+          "mode": "manual",
+          "ip": "192.168.1.100",
+          "netmask": "255.255.255.0",
+          "gateway": "192.168.1.1",
+          "dns": "192.168.1.1,8.8.8.8",
+          "v6mode": "off",
+          "routes": [
+            { "dest": "10.0.0.0/8", "gateway": "192.168.1.1", "metric": 0 }
+          ],
+          "verify": {
+            "readback": true,
+            "health": {
+              "enabled": true,
+              "fallback": { "enabled": true },
+              "mode": "both",
+              "http_target": "http://cp.cloudflare.com",
+              "icmp_target": "223.5.5.5",
+              "interval": 30,
+              "retries": 3,
+              "timeout": 5
+            }
+          }
+        },
+        "one_shot": [
+          { "id": "a1", "enabled": true, "priority": 1, "action": { "type": "launch_app", "app": "/Applications/Slack.app" } },
+          { "id": "a2", "enabled": true, "priority": 1, "action": { "type": "run_script", "path": "scripts/office-vpn.sh", "elevated": false } },
+          { "id": "a3", "enabled": false, "priority": 2, "action": { "type": "launch_app", "app": "/Applications/Test.app" } }
+        ],
+        "persistent": [
+          { "id": "p1", "enabled": true, "priority": 1, "action": { "type": "keep_wireguard_connected", "tunnel": "wg0", "interval_secs": 15 } }
+        ]
+      },
+      "else": {
+        "network": {
+          "mode": "dhcp",
+          "dns": "",
+          "routes": [
+            { "dest": "10.0.0.0/8", "delete": true }
+          ]
+        }
+      }
+    },
+    {
+      "id": "router_only",
+      "name": "IdentifyByRouterOnly",
+      "enabled": false,
+      "detection": {
+        "mode": "polling_only",
+        "poll_interval_secs": 60
+      },
+      "rules": [
+        {
+          "id": "r1",
+          "enabled": true,
+          "conditions": [
+            { "id": "c1", "enabled": true, "type": "gateway_mac", "value": "de:ad:be:ef:00:01" }
+          ]
+        }
+      ],
+      "then": {
+        "network": {
+          "mode": "manual",
+          "ip": "192.168.50.20",
+          "netmask": "255.255.255.0",
+          "gateway": "192.168.50.1",
+          "dns": "192.168.50.1",
+          "v6mode": "automatic"
+        }
+      }
+    }
+  ],
+  "fallback": {
+    "enabled": true,
+    "network": {
+      "mode": "dhcp",
+      "dns": "",
+      "v6mode": "automatic"
+    }
+  }
+}

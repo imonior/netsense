@@ -1,0 +1,11 @@
+# Line-ending policy.
+#
+# Shell scripts MUST keep LF. With core.autocrlf=true a re-checkout rewrites
+# them with CRLF, which breaks a `#!/bin/sh` shebang on macOS/Linux
+# ("bad interpreter: /bin/sh^M") and makes `exec` of a script unreliable under
+# MSYS2 / Git-Bash on Windows. The publish-hygiene hooks in scripts/git-hooks
+# have no file extension, so they are pinned separately.
+#
+# This matters here because the hook scripts are executed on every commit.
+*.sh                text eol=lf
+scripts/git-hooks/* text eol=lf

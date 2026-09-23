@@ -1,0 +1,44 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+
+# Tauri 生成物
+/src-tauri/target/
+/src-tauri/gen/
+
+# 用户配置（含敏感网络信息，不入库）
+config.json
+config.json.backup
+
+# 日志
+*.log
+switcher.log
+
+# Node / 前端
+node_modules/
+frontend/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器 / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# 助手工具目录（IDE / agent 的本地状态，不是项目发布物）
+.workbuddy/
+github-copilot/
+.cursor/
+.claude/
+.codex/
+.continue/
+.gemini/
+.qoder/
+.trae/
+.windsurf/
+# 工具写在仓库根的单文件配置（同样是本地状态，不随项目发布）
+.aider*
+.mcp.json
