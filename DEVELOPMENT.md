@@ -514,6 +514,12 @@ earlier, so it keeps its own rules:
   unfetchable sums file and a mismatch all abort the update; the UI then falls back to "open the
   release page", which is what makes being strict affordable. `build.yml` publishes exactly one
   root-level `SHA256SUMS` after all four legs land (§13.2), so a normal release always verifies.
+- **Every hop is https, not just the URL we were handed.** The scheme is screened before a request
+  leaves the process, and both curl call sites pass `--proto =https` because `-L` alone would follow
+  an `https → http` redirect and finish the transfer in cleartext (`--proto` filters redirect targets
+  too; verified against a live redirector). `--proto-redir` is deliberately absent: it needs curl
+  7.65.2, while the oldest Windows this app supports ships 7.60.1, and one unrecognised option would
+  turn "an update is available" into "download failed" for no added protection.
 - **The verdict is made at check time, not at click time.** `check_update` reports
   `installable` / `install_note`, decided from the same `SHA256SUMS` `run_update` is about to read
   (one extra GET to that URL, and only when an update is actually pending). A release the app cannot

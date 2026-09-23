@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 从仓库根目录的 VERSION 文件同步版本号到 tauri.conf.json 与 Cargo.toml。
-# 对标 wireguideplus 的 tools/bumpversion：VERSION 是唯一真值，避免多文件版本串漂移。
+# VERSION 是唯一真值：避免版本号在多份文件之间各写一份然后串掉。
 #
 # ⚠️ Windows / Git Bash 注意：必须先把工作目录切到 $ROOT，再用**相对路径**调用 python。
 # `cd ... && pwd` 在 Git Bash 里给出的是 MSYS 风格路径（形如 /d/<仓库目录>），而这里调用的是

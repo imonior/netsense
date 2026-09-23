@@ -371,7 +371,7 @@ jobs:
             exit 1
           fi
 
-          # GNU-style `hash  filename`: matches update.rs's parse_hash and wireguide-plus.
+          # GNU-style `hash  filename`: this is the exact shape update.rs's parse_hash accepts.
           sha256sum * > ../SHA256SUMS
           cd .. && cat SHA256SUMS
 

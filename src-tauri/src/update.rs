@@ -1,10 +1,9 @@
 //! 在线升级：检查 →（Homebrew 渠道）`brew upgrade --cask` /（独立安装）下载 + SHA256
 //! 校验 + 平台安装器（提权）→ 重启。
 //!
-//! 交互模型对齐 wireguide-plus：默认动作就是「下载并调用安装流程」，而不是只给一条
-//! 命令或链接。下发过程中通过 `netsense://update_progress` 事件广播阶段与进度，前端
-//! 据此显示进度。任一环节失败都回退到「打开 Release 页」这条永远可用的手动路径，
-//! 不会把用户卡死。
+//! 交互模型：默认动作就是「下载并调用安装流程」，而不是只给一条命令或链接。下发过程中
+//! 通过 `netsense://update_progress` 事件广播阶段与进度，前端据此显示进度。
+//! 任一环节失败都回退到「打开 Release 页」这条永远可用的手动路径，不会把用户卡死。
 //!
 //! 安全：下载后必须用 Release 附带的 `SHA256SUMS` 校验，**拿不到可信哈希就中止安装**
 //! （CI 在四条平台腿跑完后统一上传一份根级 SHA256SUMS，见 build.yml，所以正常发布永远
@@ -112,8 +111,22 @@ fn download_file(
 
     // 用 spawn 而非 output：curl 下载大包可能持续数十秒，期间轮询临时文件大小，
     // 把「已下载/总大小」换算成百分比推给前端（GitHub 资产带 size，故总大小已知）。
+    //
+    // `--proto =https` 让 `-L` 的跳转目标也必须是 https（GitHub 的资产下载正是 302）。这里
+    // **故意不加** `--proto-redir`：它要 curl 7.65.2，而 Windows 10 1803 —— 也就是 `main.rs`
+    // 承诺的下限 —— 自带 curl 7.60.1，认不出的选项会让 curl 直接退出，把「能更新」变成「下载失败」，
+    // 换来的是 `--proto` 已经覆盖不到的零额外约束。
     let mut child = Command::new("curl")
-        .args(["-fsSL", "--retry", "2", "--max-time", "300", "-o"])
+        .args([
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--retry",
+            "2",
+            "--max-time",
+            "300",
+            "-o",
+        ])
         .arg(&dest)
         .arg(url)
         .stdout(std::process::Stdio::null())
@@ -499,8 +512,8 @@ fn extract_zip(zip: &Path) -> Result<(PathBuf, Staging), String> {
 /// （见 build.yml 的「未配置 Apple 证书：跳过签名」分支），硬性 `codesign --verify`
 /// 会恒失败，等于把所有人的应用内自更新直接废掉。
 ///
-/// 采用「随当前安装包对齐」的策略（等价于 wireguide-plus 的 require_signed_release /
-/// require_signed_dev 双构建开关，只是改成运行时判定）：
+/// 采用「随当前安装包对齐」的策略（等价于构建期二选一的 require_signed_release /
+/// require_signed_dev 开关，只是改成运行时判定）：
 ///   - 新包签名可验证 → 通过；
 ///   - 新包签名不可验证，且**当前已安装的包同样不可验证**（未签名分发）→ 告警放行，
 ///     安全性仍由 Release 的 SHA256SUMS 兜底；
