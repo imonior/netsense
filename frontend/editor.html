@@ -16,10 +16,23 @@
       font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
       margin: 0; padding: 8px; font-size: 12px; user-select: none; overflow: hidden;
     }
-    /* 侧栏（Profile 列表）+ 三列：条件 / 3A 网络 / 3B 动作 */
-    .container {
-      display: grid; grid-template-columns: 215px repeat(3, minmax(0, 1fr));
-      gap: 8px; height: calc(100vh - 16px);
+    /* 三层：当前状态条 / 四列编辑区 / 命令按钮。
+       第一层的四格与第二层的四列用**同一套** grid-template-columns，所以每一格正好压在
+       它所说的那一列上面 —— 状态与编辑区一一对应，用户不需要在两个地方找同一个东西。 */
+    .wrap { display: flex; flex-direction: column; gap: 8px; height: calc(100vh - 16px); }
+    .strip, .cols {
+      display: grid; grid-template-columns: 215px repeat(3, minmax(0, 1fr)); gap: 8px;
+    }
+    .strip { flex: none; }
+    .cols { flex: 1; min-height: 0; }
+    .cell {
+      background: var(--bg-panel); border: 1px solid var(--border-color);
+      border-radius: var(--radius-md); padding: 6px 8px; max-height: 132px;
+      overflow-y: auto; min-height: 0;
+    }
+    .cell-k {
+      font-size: 10px; color: var(--text-accent); text-transform: uppercase;
+      letter-spacing: 1px; font-weight: 700; margin-bottom: 3px;
     }
     .panel {
       background: var(--bg-panel); border: 1px solid var(--border-color);
@@ -32,26 +45,39 @@
       align-items: center; gap: 6px; flex: none;
     }
     .panel-content { padding: 10px; flex: 1; overflow-y: auto; min-height: 0; }
-    .list-item {
-      padding: 6px 9px; cursor: pointer; border-bottom: 1px solid var(--border-color);
-      font-size: 12px; display: flex; align-items: center; gap: 6px;
+    .panel-content.pad0 { padding: 0; }
+    .rowhead { display: flex; align-items: center; gap: 6px; }
+    /* Profile 行：勾选框、名字、状态、快速切换勾选全在一行；选中行把名字换成输入框 */
+    .prow {
+      padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--border-color);
+      border-left: 3px solid transparent; font-size: 12px;
+      display: flex; align-items: center; gap: 6px;
     }
-    .list-item:hover { background: #2a2a2a; }
-    .list-item.active { background: #1565C0; color: #fff; }
-    .list-item.dirty .li-name::after { content: " ●"; color: var(--warn); }
+    .prow:hover { background: #2a2a2a; }
+    .prow.active { background: #1565C0; color: #fff; }
+    .prow.active .badge-slot .b-active { background: #0d3d1a; }
+    /* 生效中的那一条：绿色描边。它和「选中」是两件事，可以同时出现。 */
+    .prow.live { border-left-color: var(--ok); background: rgba(76, 175, 80, .10); }
+    .prow.live.active { border-left-color: var(--ok); background: #14562b; }
+    .prow.dirty .li-name::after { content: " ●"; color: var(--warn); }
     .li-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .li-name.in { min-width: 0; }
     .li-off { opacity: .55; }
-    .list-header {
-      padding: 5px 9px; background: rgba(255,255,255,0.02); font-size: 10px; color: #64B5F6;
-      text-transform: uppercase; letter-spacing: 1px; border-left: 3px solid var(--text-accent);
-      border-bottom: 1px solid var(--border-color); font-weight: 700;
-    }
+    .badge-slot { display: flex; align-items: center; }
     .group-title {
       font-size: 11px; color: var(--text-accent); margin: 10px 0 5px 0;
       padding-bottom: 3px; border-bottom: 1px dashed #333; font-weight: bold;
       display: flex; justify-content: space-between; align-items: center; gap: 6px;
     }
     .group-title:first-child { margin-top: 0; }
+    /* 分支标题（THEN / ELSE）：本列先 THEN 后 ELSE，与执行顺序一致 */
+    .branch-title {
+      margin: 12px 0 6px; padding: 3px 7px; border-radius: var(--radius-sm);
+      background: #26262a; color: #cfe3ff; font-size: 11px; font-weight: 700;
+      letter-spacing: .3px;
+    }
+    .branch-title:first-child { margin-top: 0; }
+    .branch-title.else { color: #d6d6dc; }
     .form-group { margin-bottom: 5px; display: grid; grid-template-columns: 84px 1fr; gap: 6px; align-items: center; }
     label { color: var(--text-label); font-size: 11px; text-align: right; line-height: 1.2; }
     input, select, textarea {
@@ -85,6 +111,10 @@
     .switch { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
     .switch.inline { margin: 0; }
     .switch label, .switch span { text-align: left; color: var(--text-main); }
+    /* 条件行：勾选框、类型、值、状态、删除，全部一行 */
+    .crow { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+    .crow .ct { flex: 0 0 106px; min-width: 0; }
+    .crow .cv { flex: 1 1 auto; min-width: 0; }
     /* 三态徽标：条件 / 规则 / Profile 共用一套 */
     .badge {
       font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 999px;
@@ -112,10 +142,11 @@
     .rule-box.r-match { border-left-color: var(--ok); }
     .rule-box.r-nomatch { border-left-color: var(--err); }
     .rule-box.r-inactive { border-left-color: #4a4a4a; }
-    .tabs { display: flex; gap: 4px; align-items: center; }
     .btn-group {
       padding: 8px 10px; border-top: 1px solid var(--border-color);
-      display: flex; justify-content: flex-end; gap: 8px; grid-column: 1 / -1; flex: none;
+      display: flex; justify-content: flex-end; gap: 8px; flex: none;
+      background: var(--bg-panel); border-radius: var(--radius-md);
+      border: 1px solid var(--border-color);
     }
     button {
       background: var(--btn-primary); color: #fff; border: none; padding: 5px 12px;
@@ -127,7 +158,7 @@
     button.secondary { background: #4a4a4a; color: #ccc; }
     button.ghost { background: #333; color: #cfcfcf; border: 1px solid var(--border-color); }
     .banner {
-      grid-column: 1 / -1; background: #4a3410; color: #ffd27f; border: 1px solid #6b4c14;
+      background: #4a3410; color: #ffd27f; border: 1px solid #6b4c14;
       border-radius: var(--radius-sm); padding: 6px 10px; font-size: 11px; flex: none;
     }
     .banner.info { background: #1b2432; color: #8ea3c0; border-color: #263449; }
@@ -145,6 +176,7 @@
     .modal-mask[hidden] { display: none; }
     .modal { width: 400px; max-width: 92%; background: var(--bg-panel);
       border: 1px solid var(--border-color); border-radius: 10px; padding: 14px; }
+    .modal.wide { width: 520px; max-height: 86vh; overflow-y: auto; }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 11px; color: var(--text-label); line-height: 1.5; }
     .modal ul { margin: 8px 0; padding-left: 18px; font-size: 12px; }
@@ -154,41 +186,52 @@
 </head>
 <body>
 
-<div class="container">
+<div class="wrap">
   <div class="banner" id="conflict-bar" hidden></div>
 
-  <!-- 侧栏：Profile 列表 + 尚未配置的已保存网络 + 全局项 -->
-  <div class="panel">
-    <div class="panel-header">
-      <span id="hdr-profiles">Profiles</span>
-      <button class="mini-btn" id="btn-new">+ New</button>
+  <!-- 第一层：当前状态。四格与下面四列一一对应。 -->
+  <div class="strip">
+    <div class="cell"><div class="cell-k" id="sk-1" data-i18n="editor.state_active_profile">Active profile</div><div class="cell-v" id="st-profile"></div></div>
+    <div class="cell"><div class="cell-k" id="sk-2" data-i18n="editor.state_conditions">Why it matched</div><div class="cell-v" id="st-cond"></div></div>
+    <div class="cell"><div class="cell-k" id="sk-3" data-i18n="editor.state_network">Current network</div><div class="cell-v" id="st-net"></div></div>
+    <div class="cell"><div class="cell-k" id="sk-4" data-i18n="editor.state_actions">What it runs</div><div class="cell-v" id="st-act"></div></div>
+  </div>
+
+  <!-- 第二层：四列编辑区。列序 = 决策链的顺序：选哪套配置 → 靠什么条件 → 3A 网络 → 3B 动作。 -->
+  <div class="cols">
+    <div class="panel">
+      <div class="panel-header">
+        <span id="hdr-profiles" data-i18n="editor.profiles_column">Profiles</span>
+        <span class="rowhead"><span id="obj-badge"></span><button class="mini-btn" id="btn-new" data-i18n="editor.new_profile">+ New</button></span>
+      </div>
+      <div class="panel-content pad0" id="col-profiles"></div>
     </div>
-    <div class="panel-content" style="padding:0;" id="sidebar"></div>
+
+    <div class="panel">
+      <div class="panel-header"><span id="hdr-cond" data-i18n="editor.conditions_column">Match Conditions</span></div>
+      <div class="panel-content" id="col-cond"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span id="hdr-net" data-i18n="editor.network_title">3A · Network configuration</span>
+        <button class="mini-btn" id="btn-verify" data-act="open-verify" data-i18n="editor.verify_button">Verify</button>
+      </div>
+      <div class="panel-content" id="col-net"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span id="hdr-act" data-i18n="editor.automation_column">Automation Actions</span></div>
+      <div class="panel-content" id="col-act"></div>
+    </div>
   </div>
 
-  <!-- 第 1 列：Enabled / Detection / Rules × Conditions -->
-  <div class="panel">
-    <div class="panel-header"><span id="hdr-cond">Conditions</span><span id="obj-badge"></span></div>
-    <div class="panel-content" id="col-cond"></div>
-  </div>
-
-  <!-- 第 2 列：3A 网络配置（含静态路由与校验） -->
-  <div class="panel">
-    <div class="panel-header"><span id="hdr-net">Network</span><span class="tabs" id="branch-tabs"></span></div>
-    <div class="panel-content" id="col-net"></div>
-  </div>
-
-  <!-- 第 3 列：3B 动作 -->
-  <div class="panel">
-    <div class="panel-header"><span id="hdr-act">Actions</span></div>
-    <div class="panel-content" id="col-act"></div>
-  </div>
-
+  <!-- 第三层：命令。 -->
   <div class="btn-group">
-    <button class="warning" id="btn-apply">Apply</button>
-    <button class="danger" id="btn-delete">Delete</button>
-    <button id="btn-save">Save</button>
-    <button class="secondary" id="btn-close">Close</button>
+    <button class="warning" id="btn-apply" data-i18n="editor.force_apply">▶ Apply now</button>
+    <button class="danger" id="btn-delete" data-i18n="editor.delete">Delete</button>
+    <button id="btn-save" data-i18n="editor.save">Save</button>
+    <button class="secondary" id="btn-close" data-i18n="editor.close">Close</button>
   </div>
 </div>
 
@@ -198,6 +241,9 @@
 </div>
 <div class="modal-mask" id="apply-mask" hidden>
   <div class="modal" id="apply-modal"></div>
+</div>
+<div class="modal-mask" id="verify-mask" hidden>
+  <div class="modal wide" id="verify-modal"></div>
 </div>
 
 <script>
@@ -217,6 +263,10 @@
     return s;
   };
   const clone = (o) => JSON.parse(JSON.stringify(o ?? null));
+  // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。
+  const syncLang = () => invoke("get_language")
+    .then((c) => { document.documentElement.lang = c; })
+    .catch(() => {});
   let _seq = 0;
   const uid = (p) => p + Date.now().toString(36).slice(-5) + (_seq++).toString(36);
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -224,15 +274,18 @@
   /* —————————————————————— 状态 ——————————————————————
      `draft` 与磁盘上的配置刻意分成两份：引擎广播可能几秒就来一次，
      若每次都把表单重建一遍，用户正在输入的内容会被吞掉。
-     所以广播只更新徽标与侧栏；表单只在切换选中项、增删条目或保存成功时重建。 */
+     所以广播只更新状态条、徽标与按钮；表单只在切换选中项、增删条目或保存成功时重建。 */
   let cfg = { schema: 1, profiles: [], fallback: null, allowed_scripts: [] };
   let globalDraft = { fallback: null, allowed_scripts: [] };
-  let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings}
-  let wifiList = [];    // 系统已保存的 SSID
-  let sel = null;       // { kind: 'profile' | 'fallback' | 'global', id }
-  let branch = "then";  // 正在编辑的分支
+  let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings, last_run, workers}
+  let wifiList = [];    // 系统已保存的 SSID —— SSID 条件值的候选
+  let nicList = [];     // 系统硬件网卡（get_interfaces）—— 接口条件值的候选
+  let printerList = []; // 系统打印机（[{name, is_default}]）—— 默认打印机动作的候选
+  let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
   let dirty = false;
+  let langShown = null; // 界面上现在显示的是哪种语言
+  let verifyOpen = false;
 
   function toast(msg) {
     const el = $("toast");
@@ -266,18 +319,19 @@
   function editRoot() {
     if (!sel) return null;
     if (sel.kind === "profile") return draft;
-    if (sel.kind === "fallback") return (globalDraft.fallback ||= { enabled: true });
-    return null;
+    return (globalDraft.fallback ||= { enabled: true });
   }
-  /// 当前正在编辑的分支（THEN / ELSE）；兜底节点没有分支，直接用它自己。
-  function editBranch() {
-    if (sel && sel.kind === "profile") {
-      if (!draft[branch]) draft[branch] = {};
-      return draft[branch];
-    }
-    return editRoot();
+  /// 分支前缀直接写在绑定路径里（`then.` / `else.` / 兜底用空串），所以这里不存在
+  /// 「当前分支」这种隐藏状态：两分支的表单同时呈现在同一列里，谁也不依赖谁被选中。
+  function scope(pre) {
+    const root = editRoot();
+    if (!root) return {};
+    if (pre === "") return root;
+    return (root[pre.slice(0, -1)] ||= {});
   }
-  const branchPrefix = () => (sel && sel.kind === "profile" ? branch + "." : "");
+  const BRANCHES = () => (sel && sel.kind === "profile" ? ["then.", "else."] : [""]);
+  const branchTitle = (pre) =>
+    pre === "then." ? "editor.then" : pre === "else." ? "editor.else_branch" : "editor.global_fallback";
 
   /* —————————————————————— 引擎视图查询 —————————————————————— */
   const profileView = (id) => (view && view.profiles || []).find(p => p.id === id) || null;
@@ -299,6 +353,13 @@
     const m = BADGE[key];
     return m ? `<span class="badge ${m[0]}">${esc(t(m[1]))}</span>` : "";
   };
+  /// 引擎当前的判定指向哪个 Profile（Active 才有）。
+  function activeId() {
+    const st = view && view.state;
+    return st && st.state === "active" ? st.id : null;
+  }
+  const savedProfile = (id) => (cfg.profiles || []).find(p => p.id === id) || null;
+  const nameOf = (id) => { const p = savedProfile(id); return p ? (p.name || p.id) : id; };
 
   /* —————————————————————— 表单控件 —————————————————————— */
   const txt = (path, val, ph) =>
@@ -314,42 +375,162 @@
     `</select>`;
   const row = (labelKey, control) =>
     `<div class="form-group"><label>${esc(t(labelKey))}</label>${control}</div>`;
+  const row2 = (labelKey, control) =>
+    `<div style="display:flex;align-items:center;gap:4px;"><label style="flex:none;">${esc(t(labelKey))}</label>${control}</div>`;
+  const lst = (path, val, ph) =>
+    `<input type="text" value="${esc((val || []).join(" "))}" placeholder="${esc(ph || "")}" data-bind="${path}" data-cast="list">`;
+  const pre_ = (pre, rest) => (pre === "" ? rest : pre + rest);
 
   const COND_TYPES = () => [["wifi_ssid", t("editor.match_ssid")], ["gateway_mac", t("editor.match_gateway_mac")],
     ["bssid", t("editor.match_bssid")], ["network_interface", t("editor.match_interface")]];
-  const COND_PH = { wifi_ssid: "Office_5G", gateway_mac: "aa:bb:cc:dd:ee:ff", bssid: "00:11:22:33:44:55", network_interface: "en0" };
+  const COND_PH = { wifi_ssid: "Office_5G", gateway_mac: "aa:bb:cc:dd:ee:ff", bssid: "00:11:22:33:44:55" };
 
-  /* —————————————————————— 第 1 列：条件 —————————————————————— */
-  function renderConditions() {
-    const box = $("col-cond");
-    if (!sel) { box.innerHTML = `<div class="empty">${esc(t("editor.none_selected"))}</div>`; return; }
-    if (sel.kind !== "profile") $("obj-badge").innerHTML = "";
-    if (sel.kind === "global") {
-      box.innerHTML = `<div class="group-title">${esc(t("editor.allowed_scripts"))}</div>` +
-        `<textarea id="scripts-box" spellcheck="false">${esc(globalDraft.allowed_scripts.join("\n"))}</textarea>`;
-      return;
+  /// 系统硬件网络出口：条件比的是「在用的普通网卡」，VPN 隧道不是出口，不能选。
+  const ifaceNames = () => nicList
+    .filter(n => n && n.name && n.kind !== "vpn")
+    .map(n => String(n.name));
+
+  /* —————————————————————— 第一层：当前状态条 —————————————————————— */
+  function renderStrip() {
+    const aid = activeId();
+    const ap = aid ? profileView(aid) : null;
+
+    // 格 1：生效的那一套配置叫什么
+    let p1;
+    const st = view && view.state;
+    if (!st) p1 = `<span class="empty">${esc(t("editor.loading_status"))}</span>`;
+    else if (st.state === "conflict")
+      p1 = `${badge("conflict")} <span class="li-name">${esc(t("status.conflict", { names: (st.ids || []).map(nameOf).join(", ") }))}</span>`;
+    else if (aid) p1 = `${badge(ap && ap.status)} <b>${esc(nameOf(aid))}</b>`;
+    else p1 = `${badge("not_matched")} <span>${esc(t("status.no_profile"))}</span>`;
+    $("st-profile").innerHTML = p1;
+
+    // 格 2：它是靠哪些条件生效的
+    let p2 = "";
+    if (aid && ap) {
+      const saved = savedProfile(aid) || {};
+      for (const r of (saved.rules || [])) {
+        const rv = (ap.rules || []).find(x => x.id === r.id);
+        if (!rv || rv.status !== "match") continue;
+        for (const c of (r.conditions || [])) {
+          if (c.enabled === false) continue;
+          p2 += `<div class="kv"><span class="k">${esc(t(condLabel(c.type)))}</span><span class="v">${esc(c.value || "—")}</span></div>`;
+        }
+      }
     }
+    $("st-cond").innerHTML = p2 || `<span class="empty">${esc(t("editor.state_none"))}</span>`;
+
+    // 格 3：当前网络信息。条件值从这里取，而不是让用户手抄 MAC。
+    const s = (view && view.snapshot) || {};
+    const rows = [];
+    // 第四个元素是「能不能被用作条件」：没连 Wi-Fi 时 SSID 为空，这一行仍然要出现
+    // （否则用户分不清「读不到」和「这里本来就没有」），但不给「用作条件」按钮——
+    // 把读不到的值写进条件里，等于凭空造一条永远不成立的条件。
+    const put = (label, val, type) => { if (val) rows.push([label, val, type, val]); };
+    rows.push([t("status.ssid"), s.ssid || t("status.ssid_unknown"), "wifi_ssid", s.ssid]);
+    put(t("editor.nic_gateway_mac"), s.gateway_mac, "gateway_mac");
+    put(t("editor.match_bssid"), s.bssid, "bssid");
+    put(t("editor.match_interface"), s.primary_interface, "network_interface");
+    let p3 = rows.map(([k, v, type, canUse]) =>
+      `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}` +
+      (canUse ? `<button class="mini-btn" data-act="use-cond" data-type="${type}" data-val="${esc(v)}">${esc(t("editor.use_value"))}</button>` : "") +
+      `</span></div>`).join("");
+    if ((s.interfaces || []).length)
+      p3 += `<div class="kv"><span class="k">${esc(t("editor.hardware_column"))}</span><span class="v">${esc(s.interfaces.join(", "))}</span></div>`;
+    if ((s.tunnels || []).length)
+      p3 += `<div class="kv"><span class="k">${esc(t("editor.nic_vpn"))}</span><span class="v">${esc(s.tunnels.join(", "))}</span></div>`;
+    $("st-net").innerHTML = p3 || `<span class="empty">${esc(t("editor.loading_status"))}</span>`;
+
+    // 格 4：生效方案的 THEN 此刻在跑什么（3B1 的结果 + 3B2 的维持状态）
+    const lr = view && view.last_run;
+    const shown = lr && aid && lr.profile_id === aid ? lr : null;
+    const saved = aid ? (savedProfile(aid) || {}) : {};
+    const th = saved.then || {};
+    let p4 = "";
+    for (const a of (th.one_shot || [])) {
+      const o = shown && (shown.outcomes || []).find(x => x.id === a.id);
+      const cls = o ? (o.ok ? "ok" : "bad") : (shown && shown.running && a.enabled !== false ? "run" : "");
+      const txtv = o ? (o.ok ? t("editor.action_ok") : t("editor.action_failed"))
+        : (cls === "run" ? t("editor.action_running") : "");
+      p4 += `<div class="kv"><span class="k">${esc(actionWord(a))}</span><span class="v">${esc(actionTarget(a))}` +
+        `<span class="achip ${cls}">${esc(txtv)}</span></span></div>`;
+    }
+    for (const w of (view && view.workers) || []) {
+      const [key, cls] = WORKER_STATE[w.state] || WORKER_STATE.pending;
+      p4 += `<div class="kv"><span class="k">${esc(t("popup.workers"))}</span><span class="v">${esc(w.label || "")}` +
+        `<span class="achip ${cls}">${esc(t(key))}</span></span></div>`;
+    }
+    $("st-act").innerHTML = p4 || `<span class="empty">${esc(t("editor.state_none"))}</span>`;
+  }
+
+  const condLabel = (type) => ({
+    wifi_ssid: "editor.match_ssid", gateway_mac: "editor.match_gateway_mac",
+    bssid: "editor.match_bssid", network_interface: "editor.match_interface",
+  }[type] || "editor.match_ssid");
+
+  /* —————————————————————— 第 1 列：Profile 列表 —————————————————————— */
+  function renderProfiles() {
+    let html = "";
+    for (const p of cfg.profiles) {
+      const on = sel && sel.kind === "profile" && sel.id === p.id;
+      const src = on && draft ? draft : p;
+      const pv = profileView(p.id);
+      const en = on
+        ? `<input type="checkbox" data-bind="enabled" data-cast="bool" ${src.enabled !== false ? "checked" : ""} title="${esc(t("editor.enabled"))}">`
+        : `<input type="checkbox" data-row-en="${esc(p.id)}" ${src.enabled !== false ? "checked" : ""} title="${esc(t("editor.enabled"))}">`;
+      const quick = on
+        ? `<input type="checkbox" data-bind="quick" data-cast="bool" ${src.quick !== false ? "checked" : ""} title="${esc(t("editor.quick"))}">`
+        : `<input type="checkbox" data-row-quick="${esc(p.id)}" ${src.quick !== false ? "checked" : ""} title="${esc(t("editor.quick"))}">`;
+      const name = on
+        ? `<input type="text" class="li-name in" data-bind="name" value="${esc(src.name || "")}">`
+        : `<span class="li-name ${src.enabled === false ? "li-off" : ""}">${esc(p.name || p.id)}</span>`;
+      html += `<div class="prow ${on ? "active" : ""} ${pv && pv.status === "active" ? "live" : ""} ${on && dirty ? "dirty" : ""}" id="prow-${esc(p.id)}" data-act="sel-profile" data-id="${esc(p.id)}">
+        ${en}${name}<span class="badge-slot" id="pbadge-${esc(p.id)}">${pv ? badge(pv.status) : ""}</span>${quick}</div>`;
+    }
+    // 兜底：一条「特殊的 Profile」。它没有条件 —— 条件区为空就是「任意条件」，
+    // 也就是零命中时才走它，所以它永远不参与匹配与冲突判定。
+    const fon = sel && sel.kind === "fallback";
+    const fb = globalDraft.fallback;
+    html += `<div class="prow fb ${fon ? "active" : ""} ${fon && dirty ? "dirty" : ""}" data-act="sel-fallback">
+      ${fon
+        ? `<input type="checkbox" data-bind="enabled" data-cast="bool" ${!fb || fb.enabled !== false ? "checked" : ""} title="${esc(t("editor.enabled"))}">`
+        : `<input type="checkbox" data-row-fb-en="1" ${!fb || fb.enabled !== false ? "checked" : ""} title="${esc(t("editor.enabled"))}">`}
+      <span class="li-name ${fb && fb.enabled === false ? "li-off" : ""}">${esc(t("editor.global_fallback"))}</span>
+      <span class="badge-slot"></span><span style="width:13px"></span></div>`;
+    $("col-profiles").innerHTML = html;
+    $("obj-badge").innerHTML = sel && sel.kind === "profile"
+      ? badge((profileView(draft.id) || {}).status) : "";
+  }
+
+  function refreshBadges() {
+    for (const p of cfg.profiles) {
+      const slot = $("pbadge-" + p.id);
+      const pv = profileView(p.id);
+      if (slot) slot.innerHTML = pv ? badge(pv.status) : "";
+      // 绿框和徽标是同一份事实，所以也必须一起跟着广播走：只换徽标的话，
+      // 列表里「谁正在生效」要到下次整列重绘才对得上。
+      const row = $("prow-" + p.id);
+      if (row) row.classList.toggle("live", !!pv && pv.status === "active");
+    }
+    $("obj-badge").innerHTML = sel && sel.kind === "profile"
+      ? badge((profileView(draft.id) || {}).status) : "";
+  }
+
+  /* —————————————————————— 第 2 列：条件 —————————————————————— */
+  /// 名字与「启用」勾选框属于第 1 列的那一行，这里不再重复一遍：同一列里出现两个
+  /// 同名控件，用户会以为它们是两件事。
+  function renderCondColumn() {
+    const box = $("col-cond");
+    if (!sel) { box.innerHTML = emptySel(); return; }
     if (sel.kind === "fallback") {
-      box.innerHTML = `<div class="group-title">${esc(t("editor.global_fallback"))}</div>` +
-        `<div class="hint">${esc(t("editor.global_hint"))}</div>` +
-        chk("enabled", globalDraft.fallback?.enabled !== false, "editor.enabled");
+      box.innerHTML = `<div class="group-title">${esc(t("editor.rules_title"))}</div>` +
+        `<div class="hint">${esc(t("editor.any_conditions"))}</div>`;
       return;
     }
     const p = draft;
-    $("obj-badge").innerHTML = badge((profileView(p.id) || {}).status);
     const d = p.detection ||= { mode: "network_events", change_delay_secs: 5, poll_interval_secs: 30 };
-
-    let html = row("editor.name", txt("name", p.name, "")) +
-      chk("enabled", p.enabled !== false, "editor.enabled") +
-      `<div class="group-title">${esc(t("editor.detection_title"))}</div>` +
-      row("editor.detection_mode", sel_("detection.mode", d.mode, [
-        ["network_events", t("editor.detection_events")],
-        ["network_events_and_polling", t("editor.detection_events_polling")],
-        ["polling_only", t("editor.detection_polling")]])) +
-      row("editor.change_delay", int("detection.change_delay_secs", d.change_delay_secs, "5")) +
-      row("editor.poll_interval", int("detection.poll_interval_secs", d.poll_interval_secs, "30")) +
-      `<div class="group-title"><span>${esc(t("editor.rules_title"))}</span>` +
-        `<button class="mini-btn" data-act="add-rule">${esc(t("editor.add_rule"))}</button></div>` +
+    let html = `<div class="group-title"><span>${esc(t("editor.rules_title"))}</span>` +
+      `<button class="mini-btn" data-act="add-rule">${esc(t("editor.add_rule"))}</button></div>` +
       `<div class="hint">${esc(t("editor.match_hint"))}</div>`;
 
     const rules = p.rules || [];
@@ -369,66 +550,90 @@
         <div class="hint">${esc(t("editor.conditions_title"))}</div>` +
         (r.conditions || []).map((c, j) => {
           const cv = st && (st.conditions || []).find(x => x.id === c.id);
-          return `<div class="grid2" style="margin-bottom:4px;">
-            <div style="display:flex;align-items:center;gap:4px;">
-              <input type="checkbox" data-bind="rules.${i}.conditions.${j}.enabled" data-cast="bool" ${c.enabled !== false ? "checked" : ""}>
-              <span style="flex:1 1 96px;min-width:0;">${sel_(`rules.${i}.conditions.${j}.type`, c.type || "wifi_ssid", COND_TYPES())}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:4px;">
-              <span style="flex:1;min-width:0;">${txt(`rules.${i}.conditions.${j}.value`, c.value, COND_PH[c.type] || "")}</span>
-              ${cv ? badge(cv.status) : ""}
-              <button class="mini-btn" data-act="del-cond" data-i="${i}" data-j="${j}">&times;</button>
-            </div>
+          const b = `rules.${i}.conditions.${j}`;
+          return `<div class="crow">
+            <input type="checkbox" data-bind="${b}.enabled" data-cast="bool" ${c.enabled !== false ? "checked" : ""}>
+            <span class="ct">${sel_(`${b}.type`, c.type || "wifi_ssid", COND_TYPES())}</span>
+            <span class="cv">${condValue(b, c)}</span>
+            ${cv ? badge(cv.status) : ""}
+            <button class="mini-btn" data-act="del-cond" data-i="${i}" data-j="${j}">&times;</button>
           </div>`;
         }).join("") +
         `<button class="mini-btn" data-act="add-cond" data-i="${i}">${esc(t("editor.add_condition"))}</button></div>`;
     });
-    html += renderSnapshot();
+
+    // 检测方式排在条件之后：它决定的是「多久重看一次这些条件」，属于条件的注脚。
+    html += `<div class="group-title">${esc(t("editor.detection_title"))}</div>` +
+      row("editor.detection_mode", sel_("detection.mode", d.mode, [
+        ["network_events", t("editor.detection_events")],
+        ["network_events_and_polling", t("editor.detection_events_polling")],
+        ["polling_only", t("editor.detection_polling")]])) +
+      row("editor.change_delay", int("detection.change_delay_secs", d.change_delay_secs, "5")) +
+      row("editor.poll_interval", int("detection.poll_interval_secs", d.poll_interval_secs, "30")) +
+      ssidDatalist();
     box.innerHTML = html;
   }
 
-  /// 当前网络的实时身份。条件值从这里的「填入」按钮来，而不是让用户手抄 MAC。
-  function renderSnapshot() {
-    const s = (view && view.snapshot) || {};
-    const rows = [];
-    const put = (label, val, type) => { if (val) rows.push([label, val, type]); };
-    put(t("status.ssid"), s.ssid, "wifi_ssid");
-    put(t("editor.nic_gateway_mac"), s.gateway_mac, "gateway_mac");
-    put(t("editor.match_bssid"), s.bssid, "bssid");
-    put(t("editor.match_interface"), s.primary_interface, "network_interface");
-    let html = `<div class="group-title">${esc(t("editor.snapshot_title"))}</div>`;
-    if (!rows.length) return html + `<div class="empty">${esc(t("editor.loading_status"))}</div>`;
-    html += rows.map(([k, v, type]) =>
-      `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}` +
-      `<button class="mini-btn" data-act="use-cond" data-type="${type}" data-val="${esc(v)}">${esc(t("editor.use_value"))}</button>` +
-      `</span></div>`).join("");
-    if ((s.interfaces || []).length)
-      html += `<div class="kv"><span class="k">${esc(t("editor.hardware_column"))}</span><span class="v">${esc(s.interfaces.join(", "))}</span></div>`;
-    if ((s.tunnels || []).length)
-      html += `<div class="kv"><span class="k">${esc(t("editor.nic_vpn"))}</span><span class="v">${esc(s.tunnels.join(", "))}</span></div>`;
-    return html;
+  const ssidDatalist = () => `<datalist id="ssid-list">` +
+    wifiList.filter(Boolean).map(s => `<option value="${esc(s)}"></option>`).join("") + `</datalist>`;
+
+  /// SSID 可以手输（隐藏网络、还没连上过的环境都要能提前配好），所以是 datalist；
+  /// 网卡名是这台机器上的事实，猜没有意义，所以只能是下拉。
+  function condValue(b, c) {
+    const type = c.type || "wifi_ssid";
+    if (type === "wifi_ssid")
+      return `<input type="text" value="${esc(c.value ?? "")}" placeholder="${esc(COND_PH.wifi_ssid)}" list="ssid-list" data-bind="${b}.value">`;
+    if (type === "network_interface") {
+      const cur = String(c.value || "").trim();
+      const names = ifaceNames();
+      // 配置里写着这台机器现在没有的网卡是合法的（换台笔记本、拔了扩展坞）：
+      // 那一项原样列出来，否则下拉会把已存的值改成另一张卡，一次保存就把人改了。
+      const opts = cur && !names.includes(cur) ? [cur, ...names] : names;
+      return `<select data-bind="${b}.value">` +
+        `<option value=""${cur ? "" : " selected"}>—</option>` +
+        opts.map(n => `<option value="${esc(n)}" ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("") +
+        `</select>`;
+    }
+    return txt(`${b}.value`, c.value, COND_PH[type] || "");
   }
 
-  /* —————————————————————— 第 2 列：3A 网络 + 路由 + 校验 —————————————————————— */
-  function renderNetwork(prefix, net) {
-    if (!net) {
-      return `<div class="group-title">${esc(t("editor.network_title"))}</div>` +
-        chk(prefix + "network__new", false, "editor.network_enable");
-    }
-    const pre = prefix + "network";
+  /* —————————————————————— 第 3 列：3A 网络（先 THEN 后 ELSE） —————————————————————— */
+  function renderNetColumn() {
+    const box = $("col-net");
+    if (!sel) { box.innerHTML = emptySel(); return; }
+    box.innerHTML = BRANCHES().map(pre => netBlock(pre)).join("");
+  }
+
+  function netBlock(pre) {
+    const b = scope(pre);
+    let html = `<div class="branch-title ${pre === "else." ? "else" : ""}">${esc(t(branchTitle(pre)))}</div>`;
+    const net = b.network;
+    if (!net) return html + chk(pre_(pre, "network__new"), false, "editor.network_enable");
+    const p = pre_(pre, "network");
     const manual = net.mode === "manual";
     const dnsState = net.dns === undefined ? "keep" : (String(net.dns).trim() === "" ? "auto" : "set");
-    let html = `<div class="group-title"><span>${esc(t("editor.network_title"))}</span>` +
-      `<button class="mini-btn" data-act="drop-network">${esc(t("editor.action_delete"))}</button></div>` +
-      row("editor.config_type", sel_(pre + ".mode", net.mode || "dhcp",
-        [["dhcp", t("editor.dhcp")], ["manual", t("editor.manual")]]));
+    html += `<div class="group-title"><span>${esc(t("editor.network_title"))}</span>` +
+      `<button class="mini-btn" data-act="drop-network" data-pre="${pre}">${esc(t("editor.action_delete"))}</button></div>`;
+    // 顺序 = 配置栈从下到上：IPv4 → IPv6 → DNS → 静态路由。
+    html += `<div class="group-title">${esc(t("editor.ipv4_config"))}</div>` +
+      row("editor.config_type", sel_(p + ".mode", net.mode || "dhcp",
+      [["dhcp", t("editor.dhcp")], ["manual", t("editor.manual")]]));
     if (manual) {
-      html += row("editor.ip_address", txt(pre + ".ip", net.ip, "192.168.1.100")) +
-        row("editor.subnet_mask", txt(pre + ".netmask", net.netmask, "255.255.255.0")) +
-        row("editor.router", txt(pre + ".gateway", net.gateway, "192.168.1.1"));
+      html += row("editor.ip_address", txt(p + ".ip", net.ip, "192.168.1.100")) +
+        row("editor.subnet_mask", txt(p + ".netmask", net.netmask, "255.255.255.0")) +
+        row("editor.router", txt(p + ".gateway", net.gateway, "192.168.1.1"));
+    }
+    html += `<div class="group-title">${esc(t("editor.ipv6_config"))}</div>` +
+      row("editor.config_type", sel_(p + ".v6mode", net.v6mode ?? "", [
+        ["", t("editor.keep_unchanged")], ["automatic", t("editor.automatic")],
+        ["manual", t("editor.manual_v6")], ["off", t("editor.off")]]));
+    if (net.v6mode === "manual") {
+      html += row("editor.ip_address", txt(p + ".ipv6", net.ipv6, "2001:db8::10")) +
+        row("editor.prefix_length", txt(p + ".v6prefix", net.v6prefix, "64")) +
+        row("editor.router", txt(p + ".v6gateway", net.v6gateway, "fe80::1"));
     }
     html += `<div class="group-title">${esc(t("editor.dns_config"))}</div>` +
-      row("editor.config_type", `<select data-act="dns-tri">` +
+      row("editor.config_type", `<select data-act="dns-tri" data-pre="${pre}">` +
         [["keep", t("editor.keep_unchanged")], ["auto", t("editor.system_auto")], ["set", t("editor.dns_servers")]]
           .map(([v, l]) => `<option value="${v}" ${dnsState === v ? "selected" : ""}>${esc(l)}</option>`).join("") +
         `</select>`) +
@@ -436,29 +641,22 @@
          与 auto 无法区分（配置里 `dns:""` 的含义就是「交回系统自动获取」），
          所以这里不造第三种状态，只是保证选了「指定」后看得见可编辑的框。 */
       (dnsState === "keep" ? `<div class="hint">${esc(t("editor.dns_placeholder"))}</div>`
-        : row("editor.dns_servers", txt(pre + ".dns", net.dns, "192.168.1.1,8.8.8.8"))) +
-      `<div class="group-title">${esc(t("editor.ipv6_config"))}</div>` +
-      row("editor.config_type", sel_(pre + ".v6mode", net.v6mode ?? "", [
-        ["", t("editor.keep_unchanged")], ["automatic", t("editor.automatic")],
-        ["manual", t("editor.manual_v6")], ["off", t("editor.off")]]));
-    if (net.v6mode === "manual") {
-      html += row("editor.ip_address", txt(pre + ".ipv6", net.ipv6, "2001:db8::10")) +
-        row("editor.prefix_length", txt(pre + ".v6prefix", net.v6prefix, "64")) +
-        row("editor.router", txt(pre + ".v6gateway", net.v6gateway, "fe80::1"));
-    }
-    html += renderRoutes(pre, net.routes || []) + renderVerify(pre, net.verify);
+        : row("editor.dns_servers", txt(p + ".dns", net.dns, "192.168.1.1,8.8.8.8"))) +
+      renderRoutes(p, pre, net.routes || []);
     return html;
   }
 
-  function renderRoutes(pre, routes) {
+  /// `pre` 是分支前缀（`"then."` / `""`），`np` 是这个分支 network 字段的完整路径。
+  /// 增删路由要改的是分支对象，所以按钮上带的是前者；输入框绑定的是后者。
+  function renderRoutes(np, pre, routes) {
     let html = `<div class="group-title"><span>${esc(t("editor.routes_title"))}</span>` +
-      `<button class="mini-btn" data-act="add-route">${esc(t("editor.add_route"))}</button></div>`;
+      `<button class="mini-btn" data-act="add-route" data-pre="${pre}">${esc(t("editor.add_route"))}</button></div>`;
     if (!routes.length) return html + `<div class="empty">${esc(t("editor.action_none"))}</div>`;
     routes.forEach((r, i) => {
-      const p = `${pre}.routes.${i}`;
+      const p = `${np}.routes.${i}`;
       html += `<div class="card"><div class="card-head">
           <span class="card-title">${esc(r.dest || t("editor.action_dest"))}</span>
-          <button class="mini-btn" data-act="del-route" data-i="${i}">&times;</button></div>
+          <button class="mini-btn" data-act="del-route" data-i="${i}" data-pre="${pre}">&times;</button></div>
         <div class="grid2">
           <div class="full">${txt(`${p}.dest`, r.dest, "10.0.0.0/8")}</div>
           <div>${txt(`${p}.gateway`, r.gateway, "192.168.1.1")}</div>
@@ -469,11 +667,18 @@
     return html;
   }
 
+  /// 校验（readback / 健康检查）不摊在主列里：它不是「要下发什么」，而是「下发完怎么算成功」，
+  /// 属于列标题右边那个按钮背后的问题。
+  function renderVerifyBlock(pre) {
+    const net = scope(pre).network;
+    if (!net) return `<div class="mv">${esc(t("editor.confirm_3a_none"))}</div>`;
+    return renderVerify(pre_(pre, "network"), net.verify);
+  }
+
   function renderVerify(pre, verify) {
     const v = verify || {};
     const h = v.health;
-    let html = `<div class="group-title">${esc(t("editor.verify_title"))}</div>` +
-      chk(`${pre}.verify.readback`, v.readback !== false, "editor.readback") +
+    let html = chk(`${pre}.verify.readback`, v.readback !== false, "editor.readback") +
       chk(`${pre}.verify__health`, !!h, "editor.health_enable");
     if (!h) return html;
     return html +
@@ -487,55 +692,116 @@
       chk(`${pre}.verify.health.fallback.enabled`, h.fallback?.enabled, "editor.health_fallback");
   }
 
-  /* —————————————————————— 第 3 列：3B 动作 —————————————————————— */
-  function renderActions(pre, b) {
-    let html = `<div class="group-title"><span>${esc(t("editor.one_shot_title"))}</span>` +
-      `<span><button class="mini-btn" data-act="add-one" data-t="launch_app">${esc(t("editor.add_launch"))}</button> ` +
-      `<button class="mini-btn" data-act="add-one" data-t="run_script">${esc(t("editor.add_run"))}</button></span></div>` +
+  function renderVerifyModal() {
+    if (!verifyOpen) { $("verify-mask").hidden = true; return; }
+    $("verify-modal").innerHTML = `<h3>${esc(t("editor.verify_title"))}</h3>
+      <div class="mv">${esc(t("editor.verify_modal_hint"))}</div>` +
+      BRANCHES().map(pre => `<div class="branch-title ${pre === "else." ? "else" : ""}">${esc(t(branchTitle(pre)))}</div>` +
+        renderVerifyBlock(pre)).join("") +
+      `<div style="display:flex;justify-content:flex-end;margin-top:10px;">
+        <button class="secondary" data-act="close-verify">${esc(t("editor.close"))}</button></div>`;
+    $("verify-mask").hidden = false;
+  }
+
+  /* —————————————————————— 第 4 列：3B 动作（先 THEN 后 ELSE） —————————————————————— */
+  function renderActColumn() {
+    const box = $("col-act");
+    if (!sel) { box.innerHTML = emptySel(); return; }
+    if (sel.kind === "fallback") {
+      box.innerHTML = `<div class="empty">${esc(t("editor.action_none"))}</div>`;
+      return;
+    }
+    // 候选清单挂在列上而不是每个分支上：THEN 与 ELSE 两张列块若各带一份
+    // `<datalist id="printer-list">`，那个 id 就重复了，浏览器只会认第一份。
+    box.innerHTML = BRANCHES().map(pre => actBlock(pre)).join("") + printerDatalist();
+  }
+
+  /// 打印机名可以手输：这台机器上没装、但用户打算连上去的那台（共享打印机、以后才加的
+  /// 那台）也要能提前配好，和 SSID 同一个道理。
+  const printerDatalist = () => `<datalist id="printer-list">` +
+    printerList.filter(p => p && p.name).map(p =>
+      `<option value="${esc(p.name)}">${esc(p.is_default ? t("editor.printer_is_default") : "")}</option>`
+    ).join("") + `</datalist>`;
+
+  function actBlock(pre) {
+    const b = scope(pre);
+    let html = `<div class="branch-title ${pre === "else." ? "else" : ""}">${esc(t(branchTitle(pre)))}</div>` +
+      `<div class="group-title"><span>${esc(t("editor.one_shot_title"))}</span>` +
+      `<span><button class="mini-btn" data-act="add-one" data-pre="${pre}" data-t="launch_app">${esc(t("editor.add_launch"))}</button> ` +
+      `<button class="mini-btn" data-act="add-one" data-pre="${pre}" data-t="run_script">${esc(t("editor.add_run"))}</button> ` +
+      `<button class="mini-btn" data-act="add-one" data-pre="${pre}" data-t="set_default_printer">${esc(t("editor.add_printer"))}</button></span></div>` +
       `<div class="hint">${esc(t("editor.actions_hint"))}</div>` +
-      `<div class="hint" id="run-line" hidden></div>`;
+      `<div class="hint" id="run-line-${pre.slice(0, -1)}" hidden></div>`;
     const list = b.one_shot || [];
-    html += list.length ? list.map((a, i) => oneShotCard(`${pre}one_shot.${i}`, a, i)).join("")
+    html += list.length ? list.map((a, i) => oneShotCard(`${pre}one_shot.${i}`, pre, a, i)).join("")
       : `<div class="empty">${esc(t("editor.action_none"))}</div>`;
 
     html += `<div class="group-title"><span>${esc(t("editor.persistent_title"))}</span>` +
-      `<button class="mini-btn" data-act="add-persist">${esc(t("editor.add_persistent"))}</button></div>` +
-      `<div class="hint">${esc(t(branch === "else" ? "editor.persistent_else" : "editor.persistent_hint"))}</div>`;
+      `<button class="mini-btn" data-act="add-persist" data-pre="${pre}">${esc(t("editor.add_persistent"))}</button></div>` +
+      `<div class="hint">${esc(t(pre === "else." ? "editor.persistent_else" : "editor.persistent_hint"))}</div>`;
     const pl = b.persistent || [];
-    html += pl.length ? pl.map((a, i) => persistCard(`${pre}persistent.${i}`, a, i)).join("")
+    html += pl.length ? pl.map((a, i) => persistCard(`${pre}persistent.${i}`, pre, a, i)).join("")
       : `<div class="empty">${esc(t("editor.action_none"))}</div>`;
     return html;
   }
 
-  function oneShotCard(p, a, i) {
+  const ONE_TYPES = () => [["launch_app", t("editor.action_app")],
+    ["run_script", t("editor.action_path")], ["set_default_printer", t("editor.action_printer")]];
+
+  const actionWord = (a) => {
+    const act = (a && a.action) || {};
+    if (act.type === "run_script") return t("editor.action_path");
+    if (act.type === "set_default_printer") return t("editor.action_printer");
+    return t("editor.action_app");
+  };
+  const actionTarget = (a) => {
+    const act = (a && a.action) || {};
+    return act.path || act.app || act.printer || act.tunnel || act.profile || "—";
+  };
+
+  function oneShotCard(p, pre, a, i) {
     const act = a.action || {};
-    const isRun = act.type === "run_script";
-    let body = `<div>${sel_(`${p}.action.type`, act.type || "launch_app",
-        [["launch_app", t("editor.action_app")], ["run_script", t("editor.action_path")]])}</div>` +
+    const ty = act.type || "launch_app";
+    let body = `<div>${sel_(`${p}.action.type`, ty, ONE_TYPES())}</div>` +
       row2("editor.priority", int(`${p}.priority`, a.priority ?? 100, "100"));
-    if (isRun) {
+    if (ty === "run_script") {
       body += `<div class="full">${txt(`${p}.action.path`, act.path, "scripts/on-connect.sh")}</div>` +
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>` +
         `<div class="full">${chk(`${p}.action.elevated`, !!act.elevated, "editor.action_elevated", "inline")}</div>`;
+    } else if (ty === "set_default_printer") {
+      // 打印机名和 SSID 同理，可以手输：现在没装、连上那台网络后才有的共享打印机，
+      // 也要能提前配好。候选来自系统清单（printerDatalist），当前默认那台带标注。
+      body += `<div class="full">` +
+        `<input type="text" value="${esc(act.printer ?? "")}" placeholder="HP_LaserJet_M104w"` +
+        ` list="printer-list" data-bind="${p}.action.printer">` +
+        `</div>`;
     } else {
       body += `<div class="full">${txt(`${p}.action.app`, act.app, "/Applications/Slack.app")}</div>` +
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>`;
     }
     return `<div class="card"><div class="card-head">
-        <span class="card-title">${esc(isRun ? t("editor.action_path") : t("editor.action_app"))}</span>
+        <span class="card-title">${esc(actionWord(a))}</span>
         <span style="display:flex;gap:4px;align-items:center;">
           <span class="achip" id="achip-${p}"></span>
           <input type="checkbox" data-bind="${p}.enabled" data-cast="bool" ${a.enabled !== false ? "checked" : ""}>
-          <button class="mini-btn" data-act="del-one" data-i="${i}">&times;</button></span></div>
+          <button class="mini-btn" data-act="del-one" data-i="${i}" data-pre="${pre}">&times;</button></span></div>
         <div class="grid2">${body}</div>
         <div class="aerr" id="aerr-${p}" hidden></div></div>`;
   }
 
-  function persistCard(p, a, i) {
+  const PERSIST_TYPES = () => [["periodic_script", t("editor.persist_script")],
+    ["keep_wireguard_connected", t("editor.persist_wg")], ["keep_vpn_connected", t("editor.persist_vpn")]];
+
+  // 卡片标题说「这是哪一类常驻动作」，词是本地化的；下拉框的 value 仍是配置里的
+  // 机器词，那是要原样写回 JSON 的。
+  const persistWord = (a) => ({
+    keep_wireguard_connected: "editor.persist_wg",
+    keep_vpn_connected: "editor.persist_vpn",
+  }[(a.action || {}).type] || "editor.persist_script");
+
+  function persistCard(p, pre, a, i) {
     const act = a.action || {};
-    let body = `<div>${sel_(`${p}.action.type`, act.type || "periodic_script",
-        [["periodic_script", "periodic_script"], ["keep_wireguard_connected", "keep_wireguard_connected"],
-         ["keep_vpn_connected", "keep_vpn_connected"]])}</div>` +
+    let body = `<div>${sel_(`${p}.action.type`, act.type || "periodic_script", PERSIST_TYPES())}</div>` +
       row2("editor.priority", int(`${p}.priority`, a.priority ?? 100, "100"));
     if (act.type === "keep_wireguard_connected") {
       body += `<div class="full">${txt(`${p}.action.tunnel`, act.tunnel, "wg0")}</div>`;
@@ -548,99 +814,47 @@
     }
     body += row2("editor.health_interval", int(`${p}.action.interval_secs`, act.interval_secs ?? 30, "30"));
     return `<div class="card"><div class="card-head">
-        <span class="card-title">${esc(act.type || "periodic_script")}</span>
+        <span class="card-title">${esc(t(persistWord(a)))}</span>
         <span style="display:flex;gap:4px;align-items:center;">
           <span class="achip" id="wchip-${p}"></span>
           <input type="checkbox" data-bind="${p}.enabled" data-cast="bool" ${a.enabled !== false ? "checked" : ""}>
-          <button class="mini-btn" data-act="del-persist" data-i="${i}">&times;</button></span></div>
+          <button class="mini-btn" data-act="del-persist" data-i="${i}" data-pre="${pre}">&times;</button></span></div>
         <div class="grid2">${body}</div>
         <div class="aerr" id="werr-${p}" hidden></div></div>`;
   }
-  const row2 = (labelKey, control) =>
-    `<div style="display:flex;align-items:center;gap:4px;"><label style="flex:none;">${esc(t(labelKey))}</label>${control}</div>`;
-  const lst = (path, val, ph) =>
-    `<input type="text" value="${esc((val || []).join(" "))}" placeholder="${esc(ph || "")}" data-bind="${path}" data-cast="list">`;
+
+  const emptySel = () => `<div class="empty">${esc(t("editor.none_selected"))}</div>`;
 
   /* —————————————————————— 渲染入口 —————————————————————— */
-  function renderAll() {
-    $("hdr-profiles").textContent = t("editor.profiles_column");
-    $("btn-new").textContent = t("editor.new_profile");
-    $("hdr-cond").textContent = t("editor.conditions_column");
-    $("hdr-net").textContent = t("editor.network_title");
-    $("hdr-act").textContent = t("editor.automation_column");
-    $("btn-apply").textContent = t("editor.force_apply");
-    $("btn-delete").textContent = t("editor.delete");
-    $("btn-save").textContent = t("editor.save");
-    $("btn-close").textContent = t("editor.close");
+  // 静态标签只有一份来源：后端字典（静态标记里的英文是问不到字典时的兜底，由闸门
+  // 要求与字典的 en 值逐字一致）。写在这里而不是逐个 id 手写赋值：新加一个标签只要
+  // 在标记上挂 data-i18n，就不会出现「界面上多了一个英文标签」。
+  function applyStatic() {
+    const put = (n, key, set) => { const v = strings[key]; if (v) set(v); };
+    for (const n of document.querySelectorAll("[data-i18n]"))
+      put(n, n.dataset.i18n, (v) => { n.textContent = v; });
+    for (const n of document.querySelectorAll("[data-i18n-placeholder]"))
+      put(n, n.dataset.i18nPlaceholder, (v) => n.setAttribute("placeholder", v));
+    for (const n of document.querySelectorAll("[data-i18n-title]"))
+      put(n, n.dataset.i18nTitle, (v) => n.setAttribute("title", v));
+    syncLang();
+  }
 
-    renderSidebar();
-    if (!sel) {
-      $("obj-badge").innerHTML = ""; $("branch-tabs").innerHTML = "";
-      const e = `<div class="empty">${esc(t("editor.none_selected"))}</div>`;
-      $("col-cond").innerHTML = e; $("col-net").innerHTML = e; $("col-act").innerHTML = e;
-      $("btn-apply").style.display = "none"; $("btn-delete").style.display = "none";
-      refreshBanner();
-      return;
-    }
-    const pre = branchPrefix();
-    renderConditions();
-    if (sel.kind === "profile") {
-      $("branch-tabs").innerHTML = branchTabs();
-      $("col-net").innerHTML = renderNetwork(pre, editBranch().network);
-      $("col-act").innerHTML = renderActions(pre, editBranch());
-      $("btn-apply").style.display = "block"; $("btn-delete").style.display = "block";
-      refreshRun();
-    } else if (sel.kind === "fallback") {
-      $("branch-tabs").innerHTML = "";
-      $("col-net").innerHTML = renderNetwork("", editRoot().network);
-      $("col-act").innerHTML = `<div class="empty">${esc(t("editor.action_none"))}</div>`;
-      $("btn-apply").style.display = "none"; $("btn-delete").style.display = "block";
-    } else {
-      $("branch-tabs").innerHTML = "";
-      $("col-net").innerHTML = `<div class="empty">${esc(t("editor.action_none"))}</div>`;
-      $("col-act").innerHTML = `<div class="empty">${esc(t("editor.action_none"))}</div>`;
-      $("btn-apply").style.display = "none"; $("btn-delete").style.display = "block";
-    }
+  function renderAll() {
+    applyStatic();
+    renderStrip();
+    renderProfiles();
+    renderCondColumn();
+    renderNetColumn();
+    renderActColumn();
+    renderVerifyModal();
+    $("btn-apply").style.display = sel && sel.kind === "profile" ? "block" : "none";
+    $("btn-delete").style.display = sel ? "block" : "none";
+    refreshRun();
     refreshBanner();
   }
 
-  function branchTabs() {
-    const pv = profileView(draft.id);
-    return `<button class="${branch === "then" ? "" : "ghost"}" data-act="branch" data-b="then">${esc(t("editor.then"))}</button>` +
-      `<button class="${branch === "else" ? "" : "ghost"}" data-act="branch" data-b="else">${esc(t("editor.else_branch"))}</button>` +
-      (pv && pv.status === "active" ? badge("active") : "");
-  }
-
-  /* —————————————————————— 侧栏 —————————————————————— */
-  function renderSidebar() {
-    const used = new Set();
-    for (const p of cfg.profiles) for (const r of (p.rules || [])) for (const c of (r.conditions || []))
-      if (c.type === "wifi_ssid" && (c.value || "").trim()) used.add(c.value.trim());
-    let html = "";
-    for (const p of cfg.profiles) {
-      const on = sel && sel.kind === "profile" && sel.id === p.id;
-      const pv = profileView(p.id);
-      html += `<div class="list-item ${on ? "active" : ""} ${on && dirty ? "dirty" : ""}" data-act="sel-profile" data-id="${esc(p.id)}">
-        <span class="li-name ${p.enabled === false ? "li-off" : ""}">${esc(p.name || p.id)}</span>
-        ${pv ? badge(pv.status) : ""}</div>`;
-    }
-    const un = wifiList.filter(s => s && !used.has(String(s).trim())).sort();
-    html += `<div class="list-header">${esc(t("editor.unconfigured_networks"))}</div>`;
-    html += un.length ? un.map(s =>
-      `<div class="list-item li-off" data-act="new-from-ssid" data-ssid="${esc(s)}">
-         <span class="li-name">${esc(s)}</span><span class="badge">${esc(t("editor.new_profile"))}</span></div>`).join("")
-      : `<div class="empty">${esc(t("editor.nic_none"))}</div>`;
-    html += `<div class="list-header">${esc(t("editor.config_panel"))}</div>` +
-      `<div class="list-item ${sel && sel.kind === "fallback" ? "active" : ""} ${sel && sel.kind === "fallback" && dirty ? "dirty" : ""}" data-act="sel-fallback">
-         <span class="li-name">${esc(t("editor.global_fallback"))}</span></div>` +
-      `<div class="list-item ${sel && sel.kind === "global" ? "active" : ""} ${sel && sel.kind === "global" && dirty ? "dirty" : ""}" data-act="sel-global">
-         <span class="li-name">${esc(t("editor.allowed_scripts"))}</span></div>`;
-    $("sidebar").innerHTML = html;
-  }
-
   /* —————————————————————— 冲突与零命中提示 —————————————————————— */
-  const nameOf = (id) => { const p = cfg.profiles.find(x => x.id === id); return p ? (p.name || p.id) : id; };
-
   function refreshBanner() {
     const bar = $("conflict-bar");
     const st = view && view.state;
@@ -669,58 +883,50 @@
     $("cf-ok").onclick = () => { $("conflict-mask").hidden = true; };
   }
 
-  /// 最近一次 3B1 运行是否就是「当前这条分支」。
+  /// 最近一次 3B1 运行是否就是「这一列的这一个分支」。
   /// 必须三者都对上才显示：别的 Profile 或另一分支的结果挂在这张表单上，
   /// 读起来就像刚刚跑过一遍，是纯粹的误导。
-  function runOfThisBranch() {
+  function runOfBranch(pre) {
     const lr = view && view.last_run;
     if (!lr || !sel || sel.kind !== "profile") return null;
-    return (lr.profile_id === sel.id && lr.branch === branch) ? lr : null;
+    return (lr.profile_id === sel.id && lr.branch === pre.slice(0, -1)) ? lr : null;
   }
 
   /// 动作级实时状态：一条跑完就换色，不用等整批收尾。
   /// 只改这几颗徽标和那一行小字，表单本身一律不动。
   function refreshRun() {
-    const lr = runOfThisBranch();
-    const line = $("run-line");
-    if (line) {
-      line.hidden = !lr;
-      if (lr) {
-        const ok = (lr.outcomes || []).filter(o => o.ok).length;
-        line.textContent = `${t("popup.last_run")} · ${lr.profile} · ${ok}/${lr.total}` +
-          (lr.running ? ` · ${t("editor.action_running")}` : "");
-      }
-    }
-    if (!sel || sel.kind !== "profile") return;
-    const pre = branchPrefix() + "one_shot.";
-    const list = (editBranch() || {}).one_shot || [];
-    list.forEach((a, i) => {
-      const chip = $("achip-" + pre + i);
-      const err = $("aerr-" + pre + i);
-      if (chip) {
-        chip.className = "achip";
-        chip.textContent = "";
-        chip.title = "";
-      }
-      if (err) {
-        err.hidden = true;
-        err.textContent = "";
-      }
-      if (!lr || a.enabled === false || !chip) return;
-      const o = (lr.outcomes || []).find(x => x.id === a.id);
-      if (o) {
-        chip.textContent = o.ok ? t("editor.action_ok") : t("editor.action_failed");
-        chip.className = "achip " + (o.ok ? "ok" : "bad");
-        if (err && !o.ok && o.error) {
-          err.textContent = o.error;
-          err.hidden = false;
+    if (!sel) return;
+    for (const pre of BRANCHES()) {
+      const lr = runOfBranch(pre);
+      const line = $("run-line-" + pre.slice(0, -1));
+      if (line) {
+        line.hidden = !lr;
+        if (lr) {
+          const ok = (lr.outcomes || []).filter(o => o.ok).length;
+          line.textContent = `${t("popup.last_run")} · ${lr.profile} · ${ok}/${lr.total}` +
+            (lr.running ? ` · ${t("editor.action_running")}` : "");
         }
-      } else if (lr.running) {
-        // 报告里还没有这条：它要么还在跑，要么排在后面的批次里
-        chip.textContent = t("editor.action_running");
-        chip.className = "achip run";
       }
-    });
+      const b = scope(pre);
+      (b.one_shot || []).forEach((a, i) => {
+        const key = `${pre}one_shot.${i}`;
+        const chip = $("achip-" + key);
+        const err = $("aerr-" + key);
+        if (chip) { chip.className = "achip"; chip.textContent = ""; chip.title = ""; }
+        if (err) { err.hidden = true; err.textContent = ""; }
+        if (!lr || a.enabled === false || !chip) return;
+        const o = (lr.outcomes || []).find(x => x.id === a.id);
+        if (o) {
+          chip.textContent = o.ok ? t("editor.action_ok") : t("editor.action_failed");
+          chip.className = "achip " + (o.ok ? "ok" : "bad");
+          if (err && !o.ok && o.error) { err.textContent = o.error; err.hidden = false; }
+        } else if (lr.running) {
+          // 报告里还没有这条：它要么还在跑，要么排在后面的批次里
+          chip.textContent = t("editor.action_running");
+          chip.className = "achip run";
+        }
+      });
+    }
     refreshWorkers();
   }
 
@@ -735,50 +941,51 @@
     overdue: ["editor.worker_overdue", "run"],
   };
 
-  /// 当前这一支分支此刻的 worker 列表；不是 Active 方案的 THEN 分支就是 `null`。
+  /// 此刻真的在被维持的 worker；不满足条件时返回 null。
   ///
   /// 别的分支与别的方案**不会**有 worker（常驻动作只随 Active 的 THEN 起，见后端
   /// `automation::persistent` 规则 1）。这里返回 null 让徽标全部留空：把上一个环境的
   /// 「已恢复」挂在用户正在填的表单上，比什么都不显示误导得多。
-  function workersOfThisBranch() {
+  function liveWorkers() {
     const ws = view && view.workers;
     if (!Array.isArray(ws) || !ws.length) return null;
-    if (!sel || sel.kind !== "profile" || branch !== "then") return null;
-    const st = view.state || {};
-    return st.state === "active" && st.id === sel.id ? ws : null;
+    if (!sel || sel.kind !== "profile" || sel.id !== activeId()) return null;
+    return ws;
   }
 
-  /// 常驻 worker 的实时状态。与 3B1 一样只改徽标，重建表单会把用户正在输入的东西冲掉。
+  /// 常驻 worker 的实时状态。与 3B1 一样只改徽标，重建表单会把用户正在填的东西冲掉。
   function refreshWorkers() {
     if (!sel || sel.kind !== "profile") return;
-    const pre = branchPrefix() + "persistent.";
-    const list = (editBranch() || {}).persistent || [];
-    const ws = workersOfThisBranch();
-    list.forEach((a, i) => {
-      const chip = $("wchip-" + pre + i);
-      const err = $("werr-" + pre + i);
-      if (chip) { chip.className = "achip"; chip.textContent = ""; chip.title = ""; }
-      if (err) { err.hidden = true; err.textContent = ""; }
-      if (!ws || a.enabled === false || !chip) return;
-      const w = ws.find(x => x.id === a.id);
-      // 表单里有这条、worker 集合里却没有 = 它此刻根本没在被维持（草稿里刚加的、
-      // 或改过 id 之后还没重新应用）。留空：「起好了但还没跑完第一次核对」后端会用
-      // pending 自己说，前端不需要替它猜一个状态。
-      if (!w) return;
-      const [key, cls] = WORKER_STATE[w.state] || WORKER_STATE.pending;
-      chip.textContent = t(key);
-      chip.className = "achip" + (cls ? " " + cls : "");
-      chip.title = `${w.label} · ${t("editor.worker_every", { secs: w.interval })}` +
-        (w.repairs ? ` · ${w.repairs}×` : "");
-      if (err && w.error) { err.textContent = w.error; err.hidden = false; }
-    });
+    const ws = liveWorkers();
+    for (const pre of BRANCHES()) {
+      const list = (scope(pre).persistent) || [];
+      list.forEach((a, i) => {
+        const key = `${pre}persistent.${i}`;
+        const chip = $("wchip-" + key);
+        const err = $("werr-" + key);
+        if (chip) { chip.className = "achip"; chip.textContent = ""; chip.title = ""; }
+        if (err) { err.hidden = true; err.textContent = ""; }
+        // worker 只随 Active 的 THEN 起：ELSE 那一支的表单上永远不该有它的状态
+        if (!ws || pre !== "then." || a.enabled === false || !chip) return;
+        const w = ws.find(x => x.id === a.id);
+        // 表单里有这条、worker 集合里却没有 = 它此刻根本没在被维持（草稿里刚加的、
+        // 或改过 id 之后还没重新应用）。留空：「起好了但还没跑完第一次核对」后端会用
+        // pending 自己说，前端不需要替它猜一个状态。
+        if (!w) return;
+        const [k, cls] = WORKER_STATE[w.state] || WORKER_STATE.pending;
+        chip.textContent = t(k);
+        chip.className = "achip" + (cls ? " " + cls : "");
+        chip.title = `${w.label} · ${t("editor.worker_every", { secs: w.interval })}` +
+          (w.repairs ? ` · ${w.repairs}×` : "");
+        if (err && w.error) { err.textContent = w.error; err.hidden = false; }
+      });
+    }
   }
 
-  /// 广播驱动的轻量刷新：只换徽标与提示条，不动用户正在填的表单。
+  /// 广播驱动的轻量刷新：只换状态条、徽标与提示条，不动用户正在填的表单。
   function refreshLive() {
-    if (sel && sel.kind === "profile") $("obj-badge").innerHTML = badge((profileView(draft.id) || {}).status);
-    if (sel && sel.kind === "profile") $("branch-tabs").innerHTML = branchTabs();
-    renderSidebar();
+    renderStrip();
+    refreshBadges();
     refreshBanner();
     refreshRun();
     maybeShowConflictDialog();
@@ -798,7 +1005,7 @@
     let id = base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     if (!id || cfg.profiles.some(p => p.id === id)) id = (id || "profile") + "-" + uid("").slice(-3);
     const p = {
-      id, name: base, enabled: true,
+      id, name: base, enabled: true, quick: true,
       detection: { mode: "network_events", change_delay_secs: 5, poll_interval_secs: 30 },
       rules: ssid ? [{ id: "r1", enabled: true, conditions: [{ id: "c1", enabled: true, type: "wifi_ssid", value: ssid }] }] : [],
       then: { network: { mode: "dhcp", verify: { readback: true } } },
@@ -807,12 +1014,11 @@
     dirty = true;
     sel = { kind: "profile", id };
     draft = clone(p);
-    branch = "then";
     renderAll();
   }
 
   function addCondition(type, value) {
-    if (!draft) return;
+    if (!draft) { toast(t("editor.none_selected")); return; }
     (draft.rules ||= []);
     let r = draft.rules[draft.rules.length - 1];
     if (!r || r.enabled === false) { r = { id: uid("r"), enabled: true, conditions: [] }; draft.rules.push(r); }
@@ -825,6 +1031,12 @@
   }
 
   /* —————————————————————— 载入 —————————————————————— */
+  /// 后端给 `Vec` 还是 JSON 字符串没有统一约定（见 frontend/README.md），所以两侧都认。
+  const asArray = (v) => {
+    if (typeof v === "string") { try { return JSON.parse(v); } catch (e) { return []; } }
+    return v || [];
+  };
+
   async function loadAll(keepSelection = true) {
     const prevSel = sel && { ...sel };
     try {
@@ -833,9 +1045,12 @@
       cfg.profiles ||= [];
       globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
       wifiList = (await invoke("get_networks").catch(() => [])) || [];
+      nicList = asArray(await invoke("get_interfaces").catch(() => []));
+      printerList = asArray(await invoke("get_printers").catch(() => []));
       const rawSt = await invoke("get_status");
       const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
       view = st.engine || null;
+      langShown = st.language || langShown;
     } catch (e) {
       $("col-cond").innerHTML = `<div class="empty">invoke failed (run via cargo tauri dev): ${esc(String(e))}</div>`;
       return;
@@ -844,13 +1059,13 @@
     const stillThere = prevSel && prevSel.kind === "profile" && cfg.profiles.some(p => p.id === prevSel.id);
     if (keepSelection && stillThere) {
       sel = prevSel; draft = clone(cfg.profiles.find(p => p.id === prevSel.id));
-    } else if (keepSelection && prevSel && prevSel.kind !== "profile") {
+    } else if (keepSelection && prevSel && prevSel.kind === "fallback") {
       sel = prevSel; draft = null;
-      if (sel.kind === "fallback") globalDraft.fallback ||= { enabled: true };
+      globalDraft.fallback ||= { enabled: true };
     } else if (cfg.profiles.length) {
       sel = { kind: "profile", id: cfg.profiles[0].id }; draft = clone(cfg.profiles[0]);
     } else {
-      sel = null; draft = null;
+      sel = { kind: "fallback" }; draft = null; globalDraft.fallback ||= { enabled: true };
     }
     renderAll();
   }
@@ -879,72 +1094,93 @@
 
   document.addEventListener("input", (e) => {
     const el = e.target;
-    if (!el.dataset || isChoice(el)) return;
-    if (el.id === "scripts-box") {
-      globalDraft.allowed_scripts = el.value.split(/\s*\n\s*/).map(s => s.trim()).filter(Boolean);
-      dirty = true;
-      return;
-    }
-    if (!el.dataset.bind) return;
+    if (!el.dataset || isChoice(el) || !el.dataset.bind) return;
     onField(el);
   });
 
   document.addEventListener("change", (e) => {
     const el = e.target;
     if (!el.dataset) return;
-    if (el.dataset.act === "dns-tri") { setDnsMode(el.value); return; }
+    if (el.dataset.act === "dns-tri") { setDnsMode(el.dataset.pre || "", el.value); return; }
+    if (el.dataset.rowEn) { patchFlag(el.dataset.rowEn, "enabled", el.checked); return; }
+    if (el.dataset.rowQuick) { patchFlag(el.dataset.rowQuick, "quick", el.checked); return; }
+    if (el.dataset.rowFbEn) { patchFallbackFlag(el.checked); return; }
     if (el.dataset.bind && isChoice(el)) {
       const path = el.dataset.bind;
-      if (/__new$/.test(path)) { toggleNetwork(el.checked); return; }
-      if (/__health$/.test(path)) { toggleHealth(el.checked); return; }
+      // 合成开关的绑定路径形如 `then.network__new` / `then.network.verify__health`，
+      // 它们要定位的是**分支**，所以取 `network` 之前的那一段前缀。
+      const owner = path.slice(0, path.lastIndexOf("network"));
+      if (/__new$/.test(path)) { toggleNetwork(el.checked, owner); return; }
+      if (/__health$/.test(path)) { toggleHealth(el.checked, owner); return; }
       onField(el);
+      // 名字与勾选框在第 1 列那一行上：改了要让那一行的状态跟着变（生效描边、脏点）。
+      // 只重建第 1 列与状态条 —— 重建第 2~4 列会把用户正在输入的东西冲掉。
+      if (path === "enabled" || path === "quick") { renderProfiles(); renderStrip(); }
     }
   });
 
   /// DNS 是三态的（不改 / 清空 / 指定），而 `""` 与字段缺失在 3A 里含义不同，
   /// 所以用一个下拉决定要写什么，而不是靠输入框是不是空。
-  function setDnsMode(mode) {
-    const b = editBranch() || editRoot();
-    const net = b && b.network;
+  function setDnsMode(pre, mode) {
+    const net = scope(pre).network;
     if (!net) return;
     if (mode === "keep") delete net.dns;
     else if (mode === "auto") net.dns = "";
     else net.dns = typeof net.dns === "string" ? net.dns : "";
     dirty = true;
-    renderAll();
+    renderNetColumn();
   }
 
-  function toggleNetwork(on) {
-    const b = editBranch() || editRoot();
-    if (!b) return;
+  function toggleNetwork(on, pre) {
+    const b = scope(pre);
     if (on) b.network = { mode: "dhcp", verify: { readback: true } };
     else delete b.network;
     dirty = true;
     renderAll();
   }
-  function toggleHealth(on) {
-    const b = editBranch() || editRoot();
-    const net = b && b.network;
+  function toggleHealth(on, pre) {
+    const net = scope(pre).network;
     if (!net) return;
     net.verify ||= {};
     if (on) net.verify.health = { enabled: true, mode: "both", interval: 30, retries: 3, timeout: 5, fallback: { enabled: false } };
     else delete net.verify.health;
     dirty = true;
-    renderAll();
+    renderVerifyModal();
+  }
+
+  /// 列表里那些**没被选中**的行的勾选框：没有草稿可改，就直接改磁盘上那一份。
+  /// 「编辑器里勾着但没保存」和「系统实际的开关状态」必须是同一件事，否则用户
+  /// 按勾选框判断哪些方案在生效，判断的是空气。
+  async function patchFlag(id, field, value) {
+    const saved = savedProfile(id);
+    if (!saved) return;
+    const payload = cleanProfile({ ...clone(saved), [field]: value });
+    try {
+      await invoke("save_profile", { payload: JSON.stringify(payload) });
+      await loadAll();
+    } catch (err) {
+      toast(t("editor.save_failed", { error: String(err) }));
+      await loadAll();
+    }
+  }
+
+  async function patchFallbackFlag(value) {
+    await saveGlobal({ ...(globalDraft.fallback || {}), enabled: value });
   }
 
   document.addEventListener("click", (e) => {
     const el = e.target.closest("[data-act]");
     if (!el) return;
+    // 行里嵌着控件：点在控件上是控件的事，不能顺带把这一行选成当前编辑对象
+    const hit = e.target.closest("input,select,textarea,button,label");
+    if (hit && hit !== el) return;
     const act = el.dataset.act;
-    const b = sel ? (editBranch() || {}) : {};
-    const net = b.network;
+    const pre = el.dataset.pre || "";
     switch (act) {
       case "sel-profile": pick("profile", el.dataset.id); return;
-      case "sel-fallback": if (!globalDraft.fallback) globalDraft.fallback = { enabled: true }; pick("fallback"); return;
-      case "sel-global": pick("global"); return;
-      case "new-from-ssid": newProfile(el.dataset.ssid, el.dataset.ssid); return;
-      case "branch": branch = el.dataset.b; renderAll(); return;
+      case "sel-fallback": globalDraft.fallback ||= { enabled: true }; pick("fallback"); return;
+      case "open-verify": verifyOpen = true; renderVerifyModal(); return;
+      case "close-verify": verifyOpen = false; renderVerifyModal(); return;
       case "use-cond": addCondition(el.dataset.type, el.dataset.val); return;
       case "add-rule": (draft.rules ||= []).push({ id: uid("r"), enabled: true, conditions: [] }); renderAll(); return;
       case "del-rule": draft.rules.splice(Number(el.dataset.i), 1); renderAll(); return;
@@ -954,26 +1190,41 @@
         renderAll(); return;
       }
       case "del-cond": draft.rules[Number(el.dataset.i)].conditions.splice(Number(el.dataset.j), 1); renderAll(); return;
-      case "drop-network": delete b.network; renderAll(); return;
+      case "drop-network": delete scope(pre).network; renderAll(); return;
       case "add-route": {
+        const net = scope(pre).network;
         if (!net) return;
         (net.routes ||= []).push({ dest: "", gateway: "", metric: 0, delete: false });
-        renderAll(); return;
+        renderNetColumn(); return;
       }
-      case "del-route": net.routes.splice(Number(el.dataset.i), 1); renderAll(); return;
+      case "del-route": {
+        const net = scope(pre).network;
+        if (!net) return;
+        net.routes.splice(Number(el.dataset.i), 1);
+        renderNetColumn(); return;
+      }
       case "add-one": {
-        const run = el.dataset.t === "run_script";
-        (b.one_shot ||= []).push({ id: uid("a"), enabled: true, priority: 100,
-          action: run ? { type: "run_script", path: "", args: [] } : { type: "launch_app", app: "", args: [] } });
-        renderAll(); return;
+        const b = scope(pre);
+        const ty = el.dataset.t || "launch_app";
+        // 每种动作只带自己那几个字段：set_default_printer 没有 args，也不该长出一个空的。
+        const action = ty === "run_script" ? { type: ty, path: "", args: [] }
+          : ty === "set_default_printer" ? { type: ty, printer: "" }
+            : { type: "launch_app", app: "", args: [] };
+        (b.one_shot ||= []).push({ id: uid("a"), enabled: true, priority: 100, action });
+        renderActColumn(); refreshRun(); return;
       }
-      case "del-one": b.one_shot.splice(Number(el.dataset.i), 1); renderAll(); return;
+      case "del-one":
+        scope(pre).one_shot.splice(Number(el.dataset.i), 1);
+        renderActColumn(); refreshRun(); return;
       case "add-persist": {
+        const b = scope(pre);
         (b.persistent ||= []).push({ id: uid("p"), enabled: true, priority: 100,
           action: { type: "periodic_script", path: "", args: [], interval_secs: 30 } });
-        renderAll(); return;
+        renderActColumn(); refreshRun(); return;
       }
-      case "del-persist": b.persistent.splice(Number(el.dataset.i), 1); renderAll(); return;
+      case "del-persist":
+        scope(pre).persistent.splice(Number(el.dataset.i), 1);
+        renderActColumn(); refreshRun(); return;
       default: return;
     }
   });
@@ -1034,7 +1285,9 @@
       if (kind === "one") {
         item.action = act.type === "run_script"
           ? { type: "run_script", path: (act.path || "").trim() }
-          : { type: "launch_app", app: (act.app || "").trim() };
+          : act.type === "set_default_printer"
+            ? { type: "set_default_printer", printer: (act.printer || "").trim() }
+            : { type: "launch_app", app: (act.app || "").trim() };
       } else if (act.type === "keep_wireguard_connected") {
         item.action = { type: "keep_wireguard_connected", tunnel: (act.tunnel || "").trim() };
       } else if (act.type === "keep_vpn_connected") {
@@ -1044,7 +1297,9 @@
       }
       if (item.action.type === "keep_vpn_connected" || item.action.type === "keep_wireguard_connected" || item.action.type === "periodic_script")
         item.action.interval_secs = num(act.interval_secs, 30);
-      if ((act.args || []).length && item.action.type !== "keep_vpn_connected" && item.action.type !== "keep_wireguard_connected")
+      // 只有「跑一个程序 / 跑一个脚本」才有参数可带。按白名单挂，新增动作类型时
+      // 不会顺手把一个它根本不认的 args 字段写进配置。
+      if ((act.args || []).length && ["run_script", "launch_app", "periodic_script"].includes(item.action.type))
         item.action.args = act.args;
       if (act.elevated && item.action.type === "run_script") item.action.elevated = true;
       out.push(item);
@@ -1069,6 +1324,9 @@
       id: (p.id || "").trim(),
       name: (p.name || "").trim(),
       enabled: p.enabled !== false,
+      // 「快速切换」勾选必须一起写回：不写就等于每次保存都把老配置里的默认值覆盖掉，
+      // 用户在面板上收起的方案会因为一次无关的编辑重新冒出来。
+      quick: p.quick !== false,
       detection: {
         mode: d.mode || "network_events",
         change_delay_secs: num(d.change_delay_secs, 5),
@@ -1090,27 +1348,36 @@
     return out;
   }
 
-  $("btn-save").onclick = async () => {
-    if (!sel) { toast(t("editor.none_selected")); return; }
-    let payload;
-    if (sel.kind === "profile") {
-      payload = cleanProfile(draft);
-      if (!payload.name) { toast(t("editor.name") + " ?"); return; }
-      if (!payload.rules.length) { toast(t("editor.match_required")); return; }
-    } else {
-      const fb = globalDraft.fallback;
-      payload = {
-        fallback: fb ? { enabled: fb.enabled !== false, ...(fb.network ? { network: cleanNetwork(fb.network) } : {}) } : null,
-        allowed_scripts: globalDraft.allowed_scripts,
-      };
-    }
-    const cmd = sel.kind === "profile" ? "save_profile" : "save_global";
+  /// `save_global` 是**整份替换**：兜底与脚本白名单一起写，缺一个就等于把它清空了。
+  /// 白名单的编辑界面已经搬到软件设置里，这里必须原样带过去，不能顺手丢掉。
+  async function saveGlobal(fallback) {
+    const payload = {
+      fallback: fallback ? { enabled: fallback.enabled !== false, ...(fallback.network ? { network: cleanNetwork(fallback.network) } : {}) } : null,
+      allowed_scripts: globalDraft.allowed_scripts,
+    };
     try {
-      await invoke(cmd, { payload: JSON.stringify(payload) });
-      toast(t("editor.saved", { name: sel.kind === "profile" ? payload.name : t("editor.config_panel") }));
+      await invoke("save_global", { payload: JSON.stringify(payload) });
+      toast(t("editor.saved", { name: t("editor.global_fallback") }));
       dirty = false;
       await loadAll();
     } catch (err) { toast(t("editor.save_failed", { error: String(err) })); }
+  }
+
+  $("btn-save").onclick = async () => {
+    if (!sel) { toast(t("editor.none_selected")); return; }
+    if (sel.kind === "profile") {
+      const payload = cleanProfile(draft);
+      if (!payload.name) { toast(t("editor.name") + " ?"); return; }
+      if (!payload.rules.length) { toast(t("editor.match_required")); return; }
+      try {
+        await invoke("save_profile", { payload: JSON.stringify(payload) });
+        toast(t("editor.saved", { name: payload.name }));
+        dirty = false;
+        await loadAll();
+      } catch (err) { toast(t("editor.save_failed", { error: String(err) })); }
+      return;
+    }
+    await saveGlobal(globalDraft.fallback);
   };
 
   /* —————————————— 「立即应用」前的执行确认清单 —————————————— */
@@ -1120,16 +1387,14 @@
   /// 上一次的结果（若有）直接挂在行尾 —— 用户点「再来一次」时最想知道的就是上次哪儿没成。
   function actionLine(a, lr) {
     const act = a.action || {};
-    const run = act.type === "run_script";
     const args = (act.args || []).length ? " " + act.args.join(" ") : "";
     const o = lr && (lr.outcomes || []).find(x => x.id === a.id);
     const tag = o
       ? `<span class="achip ${o.ok ? "ok" : "bad"}">${esc(o.ok ? t("editor.action_ok") : t("editor.action_failed"))}</span>`
       : (lr && lr.running
         ? `<span class="achip run">${esc(t("editor.action_running"))}</span>` : "");
-    return `<li>${esc(run ? t("editor.action_path") : t("editor.action_app"))}: ` +
-      `${esc(run ? (act.path || "—") : (act.app || "—"))}${esc(args)}` +
-      (run && act.elevated ? ` <span class="badge">${esc(t("editor.action_elevated"))}</span>` : "") +
+    return `<li>${esc(actionWord(a))}: ${esc(actionTarget(a))}${esc(args)}` +
+      (act.type === "run_script" && act.elevated ? ` <span class="badge">${esc(t("editor.action_elevated"))}</span>` : "") +
       ` ${tag}</li>`;
   }
 
@@ -1161,7 +1426,7 @@
       const act = a.action || {};
       const secs = act.interval_secs ?? 30;
       const what = act.tunnel || act.profile || act.path || "";
-      return `<li>${esc(act.type || "")}${what ? " · " + esc(what) : ""} · ${esc(t("editor.worker_every", { secs }))}</li>`;
+      return `<li>${esc(t(persistWord(a)))}${what ? " · " + esc(what) : ""} · ${esc(t("editor.worker_every", { secs }))}</li>`;
     }).join("") + `</ul>`;
   }
 
@@ -1203,7 +1468,7 @@
 
   function renderApplyConfirm() {
     const name = (draft && (draft.name || draft.id)) || sel.id;
-    const saved = (cfg.profiles || []).find(p => p.id === sel.id);
+    const saved = savedProfile(sel.id);
     const modal = $("apply-modal");
     const btns = (ids) => `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">` +
       ids.map(([id, label, cls]) =>
@@ -1253,18 +1518,15 @@
     if (!sel) return;
     if (sel.kind === "profile") {
       const name = draft ? draft.name : sel.id;
-      if (!confirm(`${t("editor.confirm_delete")} ${name} ${t("editor.confirm_delete_hint")}`)) return;
+      if (!confirm(t("editor.confirm_delete", { name }))) return;
       try {
         await invoke("delete_profile", { id: sel.id });
         toast(t("editor.deleted", { name }));
         sel = null; draft = null;
         await loadAll(false);
       } catch (err) { toast(String(err)); }
-    } else if (sel.kind === "fallback") {
-      if (globalDraft.fallback) delete globalDraft.fallback.network;
-      renderAll();
-    } else {
-      globalDraft.allowed_scripts = [];
+    } else if (globalDraft.fallback) {
+      delete globalDraft.fallback.network;
       renderAll();
     }
   };
@@ -1272,11 +1534,21 @@
   $("btn-close").onclick = () => { invoke("close_editor").catch(() => {}); };
 
   /* —————————————————————— 广播 —————————————————————— */
+  /// 编辑器跟随全局语言：语言是在软件设置里改的，改完这个窗口必须在下一次重绘时
+  /// 就说同一种语言，而不是等用户重开窗口。
+  async function syncLanguage(code) {
+    if (!code || code === langShown) return;
+    langShown = code;
+    try { strings = await invoke("get_strings"); } catch (e) { return; }
+    renderAll();
+  }
+
   if (window.__TAURI__ && window.__TAURI__.event) {
     const L = window.__TAURI__.event.listen;
     L("netsense://status", (e) => {
       const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
       if (p && p.engine) { view = p.engine; refreshLive(); }
+      if (p) syncLanguage(p.language);
     });
     L("netsense://evaluation", (e) => {
       const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;

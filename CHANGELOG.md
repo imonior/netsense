@@ -11,7 +11,7 @@ identity rather than by interface name.
 
 ### Added
 
-- **Profile model.** A Profile is `enabled` + `detection` + `rules` + `THEN` + `ELSE`. Rules are
+- **Profile model.** A Profile is `enabled` + `quick` + `detection` + `rules` + `THEN` + `ELSE`. Rules are
   OR-ed; the enabled Conditions inside one Rule are AND-ed. Condition kinds: `wifi_ssid`,
   `gateway_mac`, `bssid`, `network_interface`. Every Condition, Rule and action carries its own
   `enabled` flag and reports a live state.
@@ -22,13 +22,16 @@ identity rather than by interface name.
 - **3A network configuration as one barrier.** IPv4 / netmask / gateway / DNS / IPv6 and static
   routes, followed by verification: read the system back and compare, optionally with an
   ICMP/HTTP health probe that reverts to DHCP on sustained failure. A 3A failure blocks 3B.
-- **3B1 one-shot actions** (`launch_app`, `run_script`) in `priority` batches — lower first, equal
+- **3B1 one-shot actions** (`launch_app`, `run_script`, `set_default_printer`) in `priority` batches — lower first, equal
   priorities concurrent, batches sequential, a failure in one batch not blocking the next. They run
   off the engine thread under a per-action timeout, and every run leaves a structured per-action
   trace that the editor and the panel render as live status. Script paths are restricted by an
   allow-list, with a relative path resolved against the configuration directory before it is
   checked; elevated scripts always go through the system authorization dialog, one prompt per
-  action.
+  action. Setting the default printer addresses the printer **by name** (the editor lists the
+  system's printers, marking the current default) and writes only the *current user's* default —
+  `lpoptions` on macOS / Linux, the per-user CIM method on Windows — so a network switch never
+  raises an authorization prompt.
 - **3B2 persistent actions** (`periodic_script`, `keep_wireguard_connected`, `keep_vpn_connected`) hold a
   desired state instead of repeating a command: one worker per enabled action, started with the Active
   Profile's THEN branch and stopped before any new configuration is applied. Each check answers
@@ -39,6 +42,11 @@ identity rather than by interface name.
   change delay so a transient reconnect does not thrash the adapter.
 - **Tray popup panel** with live status, every active interface, VPN tunnels, one-click Profile
   switching with match badges, settings, logs, DHCP/probe actions and the updater.
+- **Two configuration files, split by what they change**: `config.json` holds the automation model
+  (profiles, conditions, actions) the editor writes; `settings.json` holds how the application itself
+  behaves (interface language, log retention) and is edited in its own window. Launch at login belongs
+  to neither file - it is asked of the operating system each time that window opens, because a copy
+  stored here would be a second truth free to disagree with the system.
 - **Configuration editor** for the whole model, rendering the engine's verdicts in place, with a
   conflict dialog, a three-state DNS control, and a manual
   apply that first lists the 3A target and the batches it is about to run.
@@ -49,14 +57,17 @@ identity rather than by interface name.
 - **Online upgrade**: release check, native install and relaunch, streaming progress to the panel —
   asset download with SHA256 verification, or `brew upgrade --cask` for a Homebrew install.
 - **Five interface languages** (en / zh / zh-TW / ja / ko), English by default, with key-parity and
-  placeholder validation; daily-rotating local logs; GitHub Actions matrix build producing
+  placeholder validation, switched in the settings window — every window, the tray tooltip and the
+  native error dialogs draw from that one dictionary. Daily-rotating local logs whose retention
+  days are configured there too; GitHub Actions matrix build producing
   installers for all four targets from one tag.
 
 ### Known gaps
 
-- Reconnecting tunnels is exercised only by unit tests and by the CI compile of each platform: like the
-  rest of the platform layer it still needs one real-device pass per OS, and on macOS some VPN
-  configurations only accept `scutil --nc start` after the user has connected once by hand.
+- Reconnecting tunnels (`scutil --nc`, `rasdial`, `wireguard.exe`, `nmcli`) is exercised only by unit
+  tests and by the CI compile of each platform: like the rest of the platform layer it still needs one
+  real-device pass per OS, and on macOS some VPN configurations only accept `scutil --nc start` after
+  the user has connected once by hand.
 - Applying a configuration has no rollback beyond the blanket DHCP fallback: a 3A that lands but
   then fails its health probe reverts to automatic configuration rather than restoring the
   previous working settings.

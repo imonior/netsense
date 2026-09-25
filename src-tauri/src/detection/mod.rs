@@ -157,6 +157,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             enabled: true,
+            quick: true,
             detection: DetectionConfig {
                 mode,
                 change_delay_secs: delay,

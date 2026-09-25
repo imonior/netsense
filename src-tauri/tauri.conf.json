@@ -26,6 +26,32 @@
         "visible": false
       },
       {
+        "label": "settings",
+        "title": "NetSense",
+        "url": "settings.html",
+        "width": 620,
+        "height": 600,
+        "minWidth": 480,
+        "minHeight": 420,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "logs",
+        "title": "NetSense",
+        "url": "logs.html",
+        "width": 900,
+        "height": 620,
+        "minWidth": 620,
+        "minHeight": 420,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": false
+      },
+      {
         "label": "popup",
         "title": "NetSense",
         "url": "popup.html",

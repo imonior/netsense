@@ -1,5 +1,7 @@
 # NetSense
 
+[English](README.md) · [简体中文](README.zh.md) · **繁體中文** · [日本語](README.ja.md) · [한국어](README.ko.md)
+
 面向 macOS、Windows、Linux 的跨平台網路 **Profile** 管理器。
 
 每個 Profile 回答三個問題：*我在哪個網路上？*（`Rules` / `Conditions`）、*這個網路應該是什麼樣子？*
@@ -25,8 +27,9 @@
   顯示出來並且什麼都不下發，而不是悄悄挑一個贏家。
 - **下發是一道屏障（3A）**：IPv4 / 子網路遮罩 / 閘道 / DNS / IPv6 與靜態路由一起下發；分支設定了
   `verify` 時，再回讀系統狀態做驗證，可選再疊加一次 ICMP/HTTP 健康度探測 —— 網路持續不通就回落 DHCP。
-- **自動化（3B）只在 3A 通過之後才執行。** 一次性動作（`launch_app`、`run_script`）按 `priority`
-  分批執行 —— 數值小者先跑、同批併行、一批結束才進下一批，且某一批內失敗不會阻擋後續批次。匹配失敗
+- **自動化（3B）只在 3A 通過之後才執行。** 一次性動作（`launch_app`、`run_script`、`set_default_printer`）
+  按 `priority` 分批執行 —— 數值小者先跑、同批併行、一批結束才進下一批，且某一批內失敗不會阻擋後續批次。
+  設定預設印表機改的只是*目前使用者*的預設值，所以切換網路不會跳出授權對話框。匹配失敗
   （Conflict）與執行失敗（Error）是兩種狀態，分開呈現。
 - **偵測方式是 Profile 級的**：對網路事件作出反應、按間隔輪詢、或兩者並存，各自帶自己的變化延遲
   —— 一次不穩的重連因此不會反覆改寫網卡。
@@ -40,14 +43,18 @@
 - 每個 Profile 的靜態 IP / DHCP / 自訂 DNS / IPv6（automatic、manual、off）/ 靜態路由，並分出
   THEN 與 ELSE 兩條分支。
 - 回讀驗證與健康度監測在下發步驟裡、按分支設定：只有系統確認落地了，Profile 才報「已套用」。
-- 托盤彈出面板：即時狀態、全部使用中的網卡、VPN 通道、帶命中徽章的一鍵切換 Profile、語言切換。
-  左鍵開啟它，失焦時收起，右鍵出原生選單。
+- 托盤彈出面板：目前使用中的網路（網路介面、SSID 與訊號強度、MAC、IPv4 / 遮罩 / 閘道 / IPv6 / DNS）、
+  其餘使用中的網卡、VPN 通道、帶命中徽章的一鍵切換 Profile，以及所有入口 —— 設定、紀錄、DHCP、
+  探測、升級、結束。點圖示（左右鍵皆同）開啟，失焦時收起；沒有原生托盤選單。
 - 覆蓋整個模型的配置編輯器 —— Rules、Conditions、3A、路由、動作、ELSE 與全域 fallback —— 並把
   引擎的即時判定就地渲染出來。
+- 一個軟體設定視窗，裝的是與任何網路都無關的設定：介面語言、登入時啟動（每次開啟視窗都向作業系統讀一次，而不是取自檔案裡的副本）、`config.json` 與紀錄放在哪裡，以及紀錄保留多少天。
 - 能免密就免密：macOS 一次性安裝 `sudoers` 白名單、Windows 以管理員身分執行一次、Linux 用
   `sudo -n`。條件不具備時，NetSense 回落到系統授權對話框，而不是直接失敗。
 - 線上升級：檢查 GitHub Releases 並挑出本平台的產物。Homebrew 安裝走 `brew upgrade --cask`，全程不下載任何東西；其他方式則下載產物，只有它的 SHA256 與該 Release 的 `SHA256SUMS` 對得上才安裝 —— 這一步做不了（沒有 `SHA256SUMS`、裡面沒列這個產物、或取不到）就中止，改為把你導到發布頁。
 - 五種介面語言（English、简体中文、繁體中文、日本語、한국어），對齊情況經過校驗；English 是預設值。
+  三種平台上的每一座視窗都跟著這個選擇走 —— 托盤面板、編輯器、軟體設定、日誌視窗，連托盤提示與原生錯誤
+  對話框也是；`scripts/validate.py` 裡有一項檢查專門盯著靜態文案有沒有寫死。
 
 ## 技術堆疊
 
@@ -99,14 +106,18 @@ sh scripts/install-priv-helper.sh
 ```bash
 python3 scripts/validate.py    # 5 種語言的 JSON、i18n 對齊與佔位符、雙向檢查 key 的使用情況、
                                # PAL 邊界、三平台的 trait 覆蓋、tauri.conf.json 欄位、版本一致性、
-                               # 文件與程式碼對賬
+                               # 文件與程式碼對賬、以及介面文案是否全部取自字典
 node scripts/editor-smoke.mjs  # 無頭跑編輯器的資料繫結（需要 Node，但沒有建置步驟）
 cd src-tauri && cargo test     # 純 bin crate —— 用 `cargo test`，不是 `--lib`
 ```
 
-NetSense 常駐托盤：左鍵開啟面板，右鍵出選單（設定 · 開啟日誌目錄 · 把目前網路設為 DHCP · 立即探測 ·
-退出；這幾項之上還有唯讀的行，顯示使用中的網卡與通道）。它的配置是與 NetSense 可執行檔同目錄的單一
-`config.json`；`config.example.json` 是一份完整的示例。
+NetSense 常駐托盤：點圖示（左右鍵皆同）開啟面板，所有入口都在面板裡（設定 · 開啟日誌目錄 ·
+把目前網路設為 DHCP · 立即探測 · 結束；這些按鈕之上就是使用中的網卡與通道）。它由兩份設定檔驅動，因為這兩類設定毫無關係：哪個網路
+得到哪套處理，是自動化設定 `config.json`，在編輯器視窗裡改；應用本身怎麼表現 —— 介面語言、日誌保留天數、登入時啟動 ——
+是軟體設定 `settings.json`，在面板「設定」開啟的視窗裡改，改變它永遠不會重新下發網路設定。
+兩份檔案都在屬於目前使用者的 NetSense 目錄裡 —— macOS 為 `~/Library/Application Support/NetSense`、Windows 為
+`%APPDATA%\NetSense`、Linux 為 `~/.config/netsense`；它們不在可執行檔的同目錄：簽章過的 macOS
+應用包和唯讀的 `Program Files` 都不該被寫入。日誌放在目前使用者的 NetSense 日誌目錄。`config.example.json` 是一份完整的示例。
 
 > Windows 上首次改網路會提示一次 UAC。以管理員身分執行一次即可移除它；之後權限通道會回報「無需授權」。
 
@@ -115,7 +126,6 @@ NetSense 常駐托盤：左鍵開啟面板，右鍵出選單（設定 · 開啟�
 ```jsonc
 {
   "schema": 1,
-  "language": "en",
   "allowed_scripts": ["/opt/ops/office-init.sh"],
   "profiles": [{
     "id": "office", "name": "Office_5G", "enabled": true,

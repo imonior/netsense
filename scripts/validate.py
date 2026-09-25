@@ -18,9 +18,13 @@
      确实存在、frontend/README.md 的命令表与 main.rs 的注册表一致、事件名双向对齐
   10. 文档之间：文档写出的数量（key 数 / 命令数 / 语言数 / 检查项数）等于真实来源的数量；
      README 与 CHANGELOG 的 5 语版本小节层级同构，且英文原文里的技术记号一个都没丢
+  11. 界面文案没有被写死：前端静态标记里的文案必须挂 `data-i18n`、兜底文本必须逐字等于
+     en.json、`<script>` 里的多词字面量必须出现在 `t()`/`tf()` 实参位置；后端每条
+     `log::*` / `win_dialog::*` 必须取字典，源码里也不得出现没标 `i18n-exempt` 的中文字面量
 
-输出：每组一行「分数 [n] 名称: 通过项/检查项 = x/10」，最后一行总分（每组 10 分，共 100）。
-新增检查组请同时更新 GROUPS —— 组数对不上，总分就不是百分制，脚本会自己报。
+输出：每组一行「分数 [n] 名称: 通过项/检查项 = x/10」，最后一行把各组折算成百分制总分
+（GROUPS 决定组数，与总分无关 —— 加一组不会把满分变成 110）。
+新增检查组请同时更新 GROUPS —— 组数对不上，脚本会自己报。
 
 用法：python scripts/validate.py
 """
@@ -33,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+from html.parser import HTMLParser
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src-tauri", "src")
@@ -46,7 +51,7 @@ _failed = 0
 _groups = 0
 # 检查组数：每组 10 分 ⇒ 总分 100。新增检查组要同时改这里，并同步 DEVELOPMENT.md §12 的
 # 「N checks」—— 那行由本脚本自己检查（第 [10] 项），写漏了会直接报出来。
-GROUPS = 10
+GROUPS = 11
 _mark: tuple[int, int] = (0, 0)
 _label = ""
 _group_scores: list[tuple[str, float]] = []
@@ -698,6 +703,211 @@ def _check_path_claims(docs: dict[str, str]) -> None:
         ok(f"文档引用的 {n_paths} 个仓库路径都存在")
 
 
+# ———————————————————————————— [11] 界面文案 ————————————————————————————
+
+# 「是不是文案」用的两样东西：非拉丁文字一律算文案（我们的界面里不会出现中日韩标点之外的
+# 假阳性），而机器词白名单挡掉品牌与协议名 —— 那些五种语言里都原样写着，进字典反而是错的。
+_CJK = re.compile(r"[\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+_MACHINE = {
+    "IPv4", "IPv6", "IP", "MAC", "SSID", "DHCP", "DNS", "VPN", "WPA", "TCP",
+    "UDP", "OS", "LAN", "WAN", "URL", "ID", "OK", "3A", "3B", "3B1", "3B2",
+    "NetSense", "WireGuard", "Tauri", "Rust", "macOS", "Windows", "Linux",
+    "Wi-Fi", "JSON", "HTTP", "HTTPS",
+}
+
+
+def _fe_markup_prose(text: str) -> bool:
+    """这段静态标记里的文字是「给人读的文案」吗？
+
+    判定要宁可放过也不要误伤：闸门一旦常年误报，人就会去给它加豁免，规则就废了。
+    所以机器词（`IPv4` / `DHCP` / `WireGuard` 那批品牌与协议名，见 `_MACHINE`）先剔掉，
+    驼峰与带下划线的名字（标识符、CSS 类名）不算文案，剩下「三个字母以上的词连着两个」
+    或「单个正常单词」才认。
+    """
+    if _CJK.search(text):
+        return True
+    words = [w for w in re.split(r"[^A-Za-z]+", text) if len(w) >= 3]
+    words = [w for w in words if w not in _MACHINE and not re.search(r"[-_]", w)]
+    if not words:
+        return False
+    if re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", text):
+        return True
+    return len(words) == 1 and not re.search(r"(?<=[a-z])[A-Z]", text)
+
+
+def _fe_literal_prose(text: str) -> bool:
+    """`<script>` 里的字符串字面量是文案吗？
+
+    比标记那版多三条排除：`${…}` 插值拆开看、含尖号的是拼 HTML 的骨架、纯小写空格串是
+    class 名列表。三者都不是要进字典的东西。
+    """
+    if _CJK.search(text):
+        return True
+    text = re.sub(r"\s+", " ", re.sub(r"\$\{[^{}]*\}", " ", text)).strip()
+    if "<" in text or ">" in text:
+        return False
+    if re.fullmatch(r"[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)*", text):
+        return False
+    if not re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", text):
+        return False
+    return not re.fullmatch(r"[A-Za-z0-9._\[\]/*+-]+", text)
+
+
+class _MarkupParser(HTMLParser):
+    """扫一个 HTML：抓「没挂 data-i18n 的文案节点」+「挂了 key 的元素的兜底文本」。
+
+    兜底文本单独记下来，是因为它有一个可机械检查的等式：静态标记里的英文必须**逐字等于**
+    en.json 的那条。不等就等于两处各写了一份文案 —— 界面上先看到旧的、字典加载完才跳成
+    新的，这种漂移没人当 bug 报，只能靠闸门发现。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.stack: list[list] = []
+        self.nodes: list[tuple[int, str]] = []
+        self.defaults: list[tuple[int, str, str]] = []
+        self.exempt: set[int] = set()
+        self.in_script: set[tuple[int, int]] = set()
+
+    def handle_comment(self, data: str) -> None:
+        # 注释里写 i18n-exempt：从这里往下的 8 行不参与检查。语言选项的自称名
+        # （"日本語" / "한국어"）就属于这类「故意不翻」，得有个地方说清为什么不翻。
+        if "i18n-exempt" in data:
+            line = self.getpos()[0]
+            self.exempt.update(range(line + 1, line + 9))
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        key = next((v for k, v in attrs if k == "data-i18n"), None)
+        self.stack.append([tag, key is not None, key, self.getpos()[0], [], False])
+        if len(self.stack) > 1:
+            self.stack[-2][5] = True  # 有子元素：父元素的文字不是单一的标签文案
+        if tag == "script":
+            self._script_open = self.getpos()[0]
+
+    def handle_endtag(self, tag: str) -> None:
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] != tag:
+                continue
+            if tag == "script" and hasattr(self, "_script_open"):
+                self.in_script.add((self._script_open, self.getpos()[0]))
+                del self._script_open
+            for frame in self.stack[i:]:
+                if frame[2] and not frame[5]:
+                    self.defaults.append((frame[3], frame[2], "".join(frame[4]).strip()))
+            del self.stack[i:]
+            break
+
+    def handle_data(self, data: str) -> None:
+        if any(t in ("script", "style") for t, *_ in self.stack):
+            return
+        if self.stack and self.stack[-1][2] and not self.stack[-1][5]:
+            self.stack[-1][4].append(data)
+        if not _fe_markup_prose(data):
+            return
+        if not any(m for _, m, *_ in self.stack):
+            self.nodes.append((self.getpos()[0], data.strip()))
+
+
+def _frontend_untranslated(path: str, en: dict[str, str]) -> tuple[list[str], list[str]]:
+    """返回 (没挂 key 的文案, 兜底文本与字典不符)。"""
+    src = _read(path)
+    parser = _MarkupParser()
+    parser.feed(src)
+    lines = src.splitlines()
+    hits = [f":{n} {txt[:60]!r}" for n, txt in sorted(parser.nodes) if n not in parser.exempt]
+    # `<script>` 里的字面量：含文案就得出现在同一处 t()/tf() 的实参位置。回看三行，
+    # 因为多参数调用会换行，默认值那一行自己并没有 `t(`。
+    for lo, hi in parser.in_script:
+        for n, line in enumerate(lines[lo:hi - 1], start=lo + 1):
+            if "i18n-exempt" in line:
+                continue
+            code = re.sub(r"//.*$", "", line)
+            ctx = code + " ".join(lines[max(lo, n - 3):n - 1])
+            for lit in re.findall(
+                r"'((?:[^'\\\n]|\\.)*)'|\"((?:[^\"\\\n]|\\.)*)\"|`((?:[^`\\]|\\.)*)`", code
+            ):
+                s = "".join(x for x in lit if x)
+                if not _fe_literal_prose(s) or re.search(r"\bt[fr]?\s*\(", ctx):
+                    continue
+                hits.append(f":{n} {s[:60]!r}")
+    drift = []
+    for n, key, text in parser.defaults:
+        if key not in en:
+            drift.append(f":{n} 兜底文本挂着字典里没有的 key {key!r}")
+        elif text and text != en[key]:
+            drift.append(f":{n} {key}: 标记 {text[:40]!r} ≠ 字典 {en[key][:40]!r}")
+    return hits, drift
+
+
+def check_ui_text(dicts: dict[str, dict]) -> None:
+    """[11] 界面文案没有被写死（四种界面 + 后端两条入口）。
+
+    这一组盯的是「翻译机制在，但某句话没走它」—— 前面几组查的是 key 是否对齐，
+    而一句写死的文案根本不在 key 的视野里：中文界面能跑、字典检查全绿、英语用户看中文。
+    四条规则都能机械判定：
+      · 前端静态标记里的文案必须挂在 `data-i18n` 元素上；
+      · 前端兜底文本必须逐字等于 en.json（同一条文案不能有两份来源）；
+      · 后端 `log::*` / `win_dialog::*` 的参数必须是 `i18n::t/tf`，除非那行标了
+        `i18n-exempt`（唯一合法的例外是 i18n 自己的 parity 告警：它给的是 key 清单）；
+      · 后端源码里不出现中文字面量（同样按 `i18n-exempt` 放行：读系统输出那些是在
+        匹配机器词，不是文案）。
+
+    诚实的边界：JS 里单个英文词的裸字面量（`"Loading"`）这条规则抓不到，多词的才抓。
+    """
+    group("[11] 界面文案没有写死（前端标记/脚本 + 后端日志/对话框）")
+    en = dicts.get("en.json", {})
+
+    htmls = sorted(glob.glob(os.path.join(ROOT, "frontend", "*.html")))
+    for path in htmls:
+        hits, drift = _frontend_untranslated(path, en)
+        rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+        if hits:
+            bad(f"{rel}: {len(hits)} 处文案没挂 data-i18n / 不在 t() 里: {hits[:4]}")
+        else:
+            ok(f"{rel}: 界面文案都挂了 key")
+        if drift:
+            bad(f"{rel}: {len(drift)} 处兜底文本与字典不符: {drift[:4]}")
+        else:
+            ok(f"{rel}: 兜底文本与 en.json 逐字一致")
+
+    log_rx = re.compile(r"\b(?:crate::)?log::(info|warn|error|debug)\(&?(?:format!|\")")
+    dlg_rx = re.compile(r"\b(?:crate::)?win_dialog::(fatal|warn)\(&?(?:format!|\")")
+    offenders: list[str] = []
+    cjk_offenders: list[str] = []
+    for path in sorted(glob.glob(os.path.join(SRC, "**", "*.rs"), recursive=True)):
+        rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+        if "/i18n/" in f"/{rel}":
+            continue
+        text = _read(path)
+        lines = text.splitlines()
+        in_tests = False
+        for n, line in enumerate(lines, 1):
+            if re.match(r"^\s*#\[cfg\(test\)\]", line):
+                in_tests = True
+            if in_tests:
+                continue
+            s = line.strip()
+            if s.startswith(("//!", "///", "//", "*")):
+                continue
+            code = re.sub(r"//.*$", "", line)
+            # 豁免标记可以写在本行（尾随注释），也可以写在上面三行里 —— Rust 的日志调用
+            # 常常跨四行，硬要求同行只会逼人把注释挤成 130 字符。
+            look = " ".join(lines[max(0, n - 4):n])
+            if (log_rx.search(code) or dlg_rx.search(code)) and "i18n" not in code:
+                if "i18n-exempt" not in look:
+                    offenders.append(f"{rel}:{n}")
+            if _CJK.search(code) and "i18n-exempt" not in look:
+                cjk_offenders.append(f"{rel}:{n} {s[:60]!r}")
+    if offenders:
+        bad(f"后端有写死文案的日志/对话框调用（要走 i18n::t/tf）: {offenders}")
+    else:
+        ok("后端每条日志与每个原生对话框都取自字典")
+    if cjk_offenders:
+        bad(f"后端源码里有未标 i18n-exempt 的中文字面量: {cjk_offenders[:5]}")
+    else:
+        ok("后端源码没有中文字面量（匹配系统输出那些都标了 i18n-exempt）")
+
+
 def main() -> int:
     print("=" * 62)
     print("NetSense 静态校验")
@@ -717,6 +927,8 @@ def main() -> int:
     check_version()
     score()
     check_docs(dicts)
+    check_ui_text(dicts)
+    score()
     print("=" * 62)
     if _groups != GROUPS:
         bad(f"检查组数与 GROUPS 不符：本次跑了 {_groups} 组，声明 {GROUPS} 组（每组 10 分才凑得满 100）")

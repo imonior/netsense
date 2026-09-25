@@ -30,6 +30,7 @@ use serde::Serialize;
 
 use super::{is_script_allowed, resolve_script, AllowedScripts};
 use crate::config::{OneShotAction, OneShotActionType};
+use crate::i18n;
 use crate::log;
 use crate::platform::NetworkPlatform;
 
@@ -113,15 +114,19 @@ pub(crate) fn status_of(outcomes: &[ActionOutcome]) -> BatchStatus {
     }
 }
 
+/// 动作在留痕与界面上显示的那一行。路径与应用名是用户写的，原样拼进去。
 fn label_of(kind: &OneShotActionType) -> String {
     match kind {
-        OneShotActionType::LaunchApp { app, .. } => format!("launch {}", app),
+        OneShotActionType::LaunchApp { app, .. } => i18n::tf("act.label_launch", &[("app", app)]),
         OneShotActionType::RunScript { path, elevated, .. } => {
             if *elevated {
-                format!("run(提权) {}", path)
+                i18n::tf("act.label_run_priv", &[("path", path)])
             } else {
-                format!("run {}", path)
+                i18n::tf("act.label_run", &[("path", path)])
             }
+        }
+        OneShotActionType::SetDefaultPrinter { printer } => {
+            i18n::tf("act.label_printer", &[("printer", printer)])
         }
     }
 }
@@ -130,6 +135,9 @@ fn label_of(kind: &OneShotActionType) -> String {
 pub fn timeout_for(a: &OneShotAction) -> Duration {
     match &a.action {
         OneShotActionType::LaunchApp { .. } => LAUNCH_TIMEOUT,
+        // 换默认打印机是把一个请求交给本地的打印子系统（CUPS / 后台程序）：没有人参与、
+        // 不跑用户代码，和启动应用同属「本地系统服务答一句就完事」这一类，共用它的预算。
+        OneShotActionType::SetDefaultPrinter { .. } => LAUNCH_TIMEOUT,
         OneShotActionType::RunScript { elevated, .. } => {
             if *elevated {
                 ELEVATED_SCRIPT_TIMEOUT
@@ -148,6 +156,7 @@ fn outcome_of<P: NetworkPlatform>(
     let label = label_of(&a.action);
     let res = match &a.action {
         OneShotActionType::LaunchApp { app, args } => plat.launch_app(app, args),
+        OneShotActionType::SetDefaultPrinter { printer } => plat.set_default_printer(printer),
         OneShotActionType::RunScript {
             path,
             args,
@@ -162,10 +171,9 @@ fn outcome_of<P: NetworkPlatform>(
             } else {
                 // 报错里回显配置原文 + 解析结果：只给前者的话，用户没法知道
                 // 我们把它当成了哪个目录下的文件
-                Err(format!(
-                    "脚本不在允许列表，已拒绝执行: {}（解析为 {}）",
-                    path,
-                    script.display()
+                Err(i18n::tf(
+                    "act.script_denied",
+                    &[("path", path), ("resolved", &script.display().to_string())],
                 ))
             }
         }
@@ -237,11 +245,11 @@ fn missing_outcome(a: &OneShotAction, drained: bool) -> ActionOutcome {
         priority: a.priority,
         ok: false,
         error: Some(if drained {
-            "动作线程异常退出".to_string()
+            i18n::t("act.thread_died")
         } else {
-            format!(
-                "超过 {} 秒未完成，已不再等待（动作可能仍在运行）",
-                timeout_for(a).as_secs()
+            i18n::tf(
+                "act.timeout",
+                &[("secs", &timeout_for(a).as_secs().to_string())],
             )
         }),
     }
@@ -273,7 +281,7 @@ where
             if tx.send((idx, outcome)).is_err() {
                 // 协调者已按超时收工。结果不再计入本次运行，但必须留下痕迹 ——
                 // 否则「脚本其实跑成功了、界面却记它失败」会变成无从解释的悬案。
-                log::warn(&format!("超时后动作才结束: {}", label));
+                log::warn(&i18n::tf("act.late_result", &[("label", &label)]));
             }
         });
         budgets.push(budget);
@@ -292,6 +300,8 @@ where
                 on_step(&m);
                 Some(m)
             })
+            // i18n-exempt: panic 消息说的是内部不变量，给改代码的人看 —— 它既不进字典，
+            // 也没有任何一条路径能把它渲染到界面上。
             .expect("await_batch 之后每项要么有结果、要么补了超时记录")
         })
         .collect()
@@ -474,33 +484,60 @@ mod tests {
 
     #[test]
     fn a_missing_result_says_whether_it_timed_out_or_the_thread_died() {
+        i18n::init();
         let launch = act_with(OneShotActionType::LaunchApp {
             app: "Foo".into(),
             args: vec![],
         });
         let timed_out = missing_outcome(&launch, false);
         assert!(!timed_out.ok);
-        assert!(
-            timed_out.error.as_deref().unwrap().contains("仍在运行"),
-            "超时要说清「我们不等了」而不是「它失败了」：{:?}",
-            timed_out.error
+        // 措辞按界面语言走，能跨语言锚住的只有「等了多久」这个数字：超时那条必须报出
+        // 预算，而「线程没了」那条不报 —— 两者也因此不会是同一句话。
+        let msg = timed_out.error.as_deref().unwrap();
+        let secs = timeout_for(&launch).as_secs().to_string();
+        assert!(msg.contains(&secs), "超时要说清等了多久，而不是「它失败了」: {msg:?}");
+        assert_ne!(
+            msg,
+            missing_outcome(&launch, true).error.as_deref().unwrap(),
+            "「不等了」和「线程没了」是两回事，界面要能分开"
         );
-        assert!(missing_outcome(&launch, true)
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("异常退出"));
     }
 
     #[test]
     fn labels_show_the_target_and_whether_it_needs_privileges() {
+        i18n::init();
+        let elevated = label_of(&OneShotActionType::RunScript {
+            path: "scripts/x.sh".into(),
+            args: vec![],
+            elevated: true,
+        });
+        let plain = label_of(&OneShotActionType::RunScript {
+            path: "scripts/x.sh".into(),
+            args: vec![],
+            elevated: false,
+        });
+        // 动词取自字典（键名原样漏出来就是没翻），而提权与否必须在标签上分得开 ——
+        // 「执行确认」清单靠这一眼看出要不要弹授权框。
+        assert!(elevated.contains("scripts/x.sh"), "{elevated}");
+        assert!(!elevated.starts_with("act."), "动词该是译文: {elevated}");
+        assert_ne!(elevated, plain, "提权与普通的动作不能长成同一行");
+        // 日志与「执行确认」清单上的这一行要能看出**换成哪台**，只写打印机俩字等于没说
+        let printer = label_of(&OneShotActionType::SetDefaultPrinter {
+            printer: "HP OfficeJet 476".into(),
+        });
+        assert!(printer.contains("HP OfficeJet 476"), "{printer}");
+        assert!(!printer.starts_with("act."), "动词该是译文: {printer}");
+    }
+
+    /// 换默认打印机与启动应用是同一类开销：把请求交给本地的系统服务，等它答一句。
+    /// 它**不该**拿到脚本那种预算 —— 那条是给「用户脚本可能跑一分钟」准备的。
+    #[test]
+    fn setting_the_printer_is_budgeted_like_a_local_handoff() {
         assert_eq!(
-            label_of(&OneShotActionType::RunScript {
-                path: "scripts/x.sh".into(),
-                args: vec![],
-                elevated: true,
-            }),
-            "run(提权) scripts/x.sh"
+            timeout_for(&act_with(OneShotActionType::SetDefaultPrinter {
+                printer: "HP".into()
+            })),
+            LAUNCH_TIMEOUT
         );
     }
 

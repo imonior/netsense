@@ -32,10 +32,6 @@
       flex: none; padding: 2px 7px; font-size: 10px; border-radius: 5px;
       border: 1px solid var(--line); background: var(--bg-card); color: var(--muted);
     }
-    select {
-      background: var(--bg-card); color: var(--fg); border: 1px solid var(--line);
-      border-radius: 5px; font-size: 11px; padding: 2px 4px;
-    }
     .card {
       background: var(--bg-card); border: 1px solid var(--line);
       border-radius: 8px; margin: 10px 12px 0; padding: 9px 10px;
@@ -48,13 +44,6 @@
     .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62%; }
     .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
     .dot.on { background: var(--ok); }
-    .ssid { font-size: 13px; font-weight: 600; display: flex; align-items: center; }
-    .badge {
-      display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px;
-      background: #2f3640; color: var(--muted); margin-left: 6px;
-    }
-    .badge.sudoers { background: #1d3a22; color: #6ee08a; }
-    .badge.osascript { background: #3a3018; color: #ffc768; }
     /* Profile 状态徽标：ACTIVE / CONFLICT / ERROR 三种必须一眼分得开
        （CONFLICT 是条件层，ERROR 是执行层，混在一起就没法排障） */
     .sw .st { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #2f3640; color: var(--muted); }
@@ -141,44 +130,41 @@
   <header>
     <b>NetSense</b>
     <span class="head-right">
-      <select id="lang" title="Language">
-        <option value="zh">简体中文</option>
-        <option value="en">English</option>
-        <option value="zh-TW">繁體中文</option>
-        <option value="ja">日本語</option>
-        <option value="ko">한국어</option>
-      </select>
-      <button class="tiny" id="btn-quit">Quit</button>
+      <button class="tiny" id="btn-quit" data-i18n="tray.quit">Quit NetSense</button>
     </span>
   </header>
 
+  <div class="section"><span id="sec-info" data-i18n="popup.section_info">Current network</span><span class="dot" id="dot"></span></div>
   <div class="card">
-    <div class="row">
-      <span class="ssid"><span class="dot" id="dot"></span><span id="ssid">—</span><span class="badge" id="priv"></span></span>
-    </div>
-    <div class="row"><span class="k" id="k-profile">Profile</span><span class="v" id="v-profile">—</span></div>
-    <div class="row" id="run-row" hidden><span class="k" id="k-run">Last run</span><span class="v" id="v-run">—</span></div>
-    <div class="row" id="workers-row" hidden><span class="k" id="k-workers">Maintained</span><span class="v" id="v-workers">—</span></div>
-    <div class="row"><span class="k" id="k-ip">IPv4</span><span class="v" id="v-ip">—</span></div>
-    <div class="row"><span class="k" id="k-dns">DNS</span><span class="v" id="v-dns">—</span></div>
-    <div class="row"><span class="k" id="k-signal">Signal</span><span class="v" id="v-signal">—</span></div>
+    <div class="row"><span class="k" id="k-profile" data-i18n="popup.profile">Applied profile</span><span class="v" id="v-profile">—</span></div>
+    <div class="row" id="run-row" hidden><span class="k" id="k-run" data-i18n="popup.last_run">Last run</span><span class="v" id="v-run">—</span></div>
+    <div class="row" id="workers-row" hidden><span class="k" id="k-workers" data-i18n="popup.workers">Maintained</span><span class="v" id="v-workers">—</span></div>
+    <div class="row"><span class="k" id="k-iface" data-i18n="popup.interface">Interface</span><span class="v" id="v-iface">—</span></div>
+    <div class="row"><span class="k" id="k-ssid" data-i18n="status.ssid">SSID</span><span class="v" id="v-ssid">—</span></div>
+    <div class="row"><span class="k" id="k-signal" data-i18n="popup.signal">Signal</span><span class="v" id="v-signal">—</span></div>
+    <div class="row"><span class="k" id="k-mac" data-i18n="popup.mac">MAC</span><span class="v" id="v-mac">—</span></div>
+    <div class="row"><span class="k" id="k-ip" data-i18n="popup.ip">IPv4</span><span class="v" id="v-ip">—</span></div>
+    <div class="row"><span class="k" id="k-netmask" data-i18n="popup.netmask">Netmask</span><span class="v" id="v-netmask">—</span></div>
+    <div class="row"><span class="k" id="k-gateway" data-i18n="popup.gateway">Gateway</span><span class="v" id="v-gateway">—</span></div>
+    <div class="row"><span class="k" id="k-ipv6" data-i18n="popup.ipv6">IPv6</span><span class="v" id="v-ipv6">—</span></div>
+    <div class="row"><span class="k" id="k-dns" data-i18n="popup.dns">DNS</span><span class="v" id="v-dns">—</span></div>
   </div>
 
-  <div class="section" id="sec-nics">Active Interfaces</div>
-  <div class="cards" id="nics"></div>
+  <div class="section" id="sec-other" data-i18n="popup.other_nics" hidden>Other active interfaces</div>
+  <div class="cards" id="nics" hidden></div>
 
-  <div class="section" id="sec-vpn">VPN</div>
+  <div class="section" id="sec-vpn" data-i18n="popup.vpn">VPN / virtual adapters</div>
   <div class="cards" id="vpns"></div>
 
-  <div class="section" id="sec-switch">Quick Switch</div>
+  <div class="section" id="sec-switch" data-i18n="popup.quick_switch">Quick Switch</div>
   <div class="switches" id="switches"></div>
 
   <footer>
-    <button id="btn-settings">Settings</button>
-    <button id="btn-logs">Logs</button>
-    <button id="btn-dhcp">DHCP</button>
-    <button class="primary" id="btn-probe">Probe</button>
-    <button id="btn-update">Update</button>
+    <button id="btn-settings" data-i18n="popup.settings">Settings</button>
+    <button id="btn-logs" data-i18n="popup.logs">Logs</button>
+    <button id="btn-dhcp" data-i18n="popup.dhcp">DHCP</button>
+    <button class="primary" id="btn-probe" data-i18n="popup.probe">Probe</button>
+    <button id="btn-update" data-i18n="popup.check_update">Check for Updates</button>
   </footer>
   <div class="toast" id="toast"></div>
   <div class="modal-mask" id="update-mask" hidden>
@@ -195,7 +181,13 @@
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
     let strings = {};
+    let langShown = "";
     const t = (k, d) => strings[k] || d || k;
+    // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性，写死成 en
+    // 等于界面换成日文了还告诉辅助技术「这是英语」。
+    const syncLang = () => invoke("get_language")
+      .then((c) => { document.documentElement.lang = c; })
+      .catch(() => {});
     let nics = [];
 
     function toast(msg) {
@@ -205,39 +197,43 @@
       toast._t = setTimeout(() => el.classList.remove("show"), 1800);
     }
 
+    // 界面文案只有一份来源：后端字典。静态标记里的英文是「问不到字典时」的兜底，
+    // 由闸门要求与字典的 en 值逐字一致；真正的文本靠 data-i18n 刷出来 ——
+    // 逐个 id 手写赋值早晚会长出「界面上多了一个标签，没人给它换语言」。
     function applyI18n() {
-      document.getElementById("k-profile").textContent = t("popup.profile", "Profile");
-      document.getElementById("k-run").textContent = t("popup.last_run", "Last run");
-      document.getElementById("k-workers").textContent = t("popup.workers", "Maintained");
-      document.getElementById("k-ip").textContent = t("popup.ip", "IPv4");
-      document.getElementById("k-dns").textContent = t("popup.dns", "DNS");
-      document.getElementById("k-signal").textContent = t("popup.signal", "Signal");
-      document.getElementById("sec-nics").textContent = t("popup.networks", "Active Interfaces");
-      document.getElementById("sec-vpn").textContent = t("popup.vpn", "VPN");
-      document.getElementById("sec-switch").textContent = t("popup.quick_switch", "Quick Switch");
-      document.getElementById("btn-settings").textContent = t("popup.settings", "Settings");
-      document.getElementById("btn-logs").textContent = t("popup.logs", "Logs");
-      document.getElementById("btn-dhcp").textContent = t("popup.dhcp", "DHCP");
-      document.getElementById("btn-probe").textContent = t("popup.probe", "Probe");
-      document.getElementById("btn-update").textContent = t("popup.check_update", "Check for Updates");
-      document.getElementById("btn-quit").textContent = t("tray.quit", "Quit");
-      document.getElementById("priv").title = t("tray.priv", "Privilege");
+      const put = (n, key, set) => { const v = strings[key]; if (v) set(v); };
+      for (const n of document.querySelectorAll("[data-i18n]"))
+        put(n, n.dataset.i18n, (v) => { n.textContent = v; });
+      for (const n of document.querySelectorAll("[data-i18n-placeholder]"))
+        put(n, n.dataset.i18nPlaceholder, (v) => n.setAttribute("placeholder", v));
+      for (const n of document.querySelectorAll("[data-i18n-title]"))
+        put(n, n.dataset.i18nTitle, (v) => n.setAttribute("title", v));
+      syncLang();
     }
 
-    const kindLabel = (kind) => kind === "wireless" ? t("tray.kind_wireless", "Wi-Fi")
-      : kind === "wired" ? t("tray.kind_wired", "Wired")
-      : kind === "vpn" ? t("tray.kind_vpn", "VPN") : t("tray.kind_other", "Other");
+    const kindLabel = (kind) => kind === "wireless" ? t("popup.kind_wireless", "Wi-Fi")
+      : kind === "wired" ? t("popup.kind_wired", "Wired")
+      : kind === "vpn" ? t("popup.kind_vpn", "VPN") : t("popup.kind_other", "Other");
 
-    /// 一张网卡的卡片：名称 + 类型标签 + 关键字段（取不到的字段整行不显示）
-    function nicCard(n, showIpOnly) {
+    /// 一行明细：值为空就整行不给看（面板窄，`—` 排成一片等于没有信息）
+    const setRow = (id, v) => {
+      const el = document.getElementById("v-" + id);
+      el.textContent = v || "—";
+      const row = el.closest(".row");
+      if (row) row.hidden = !v;
+      return el;
+    };
+
+    /// 一张网卡的卡片：名称 + 类型标签 + 关键字段（取不到的字段整行不显示）。
+    /// VPN 归属软件已经写在标签上，就不再重复成一行。
+    function nicCard(n) {
       const rows = [];
-      if (n.app) rows.push(["VPN", n.app]);
       if (n.ssid) rows.push([t("status.ssid", "SSID"), n.ssid]);
-      if (!showIpOnly && n.mac) rows.push([t("tray.mac", "MAC"), n.mac]);
-      if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (showIpOnly ? "" : (n.netmask ? " / " + n.netmask : ""))]);
+      if (n.mac) rows.push([t("popup.mac", "MAC"), n.mac]);
+      if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
+      if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
       if (n.gateway) rows.push([t("popup.gateway", "Gateway"), n.gateway]);
-      if (!showIpOnly && n.gateway_mac) rows.push([t("tray.gateway_mac", "Gateway MAC"), n.gateway_mac]);
-      if (!showIpOnly && n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
+      if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
       return `<div class="nic-card">
         <div class="nic-head">
           <span class="nic-name">${esc(n.name)}</span>
@@ -247,15 +243,21 @@
       </div>`;
     }
 
+    // 后端 `get_interfaces` 保证列表第一张就是「在用的那张」（判据见 automation::primary_nic），
+    // 所以这里不需要在前端再实现一遍选主网卡的规则。
+    const primaryNic = () => nics.find(n => n.kind !== "vpn") || null;
+
     function renderNics() {
-      const live = nics.filter(n => n.kind !== "vpn");
+      const primary = primaryNic();
+      const live = nics.filter(n => n.kind !== "vpn" && n !== primary);
       const vpns = nics.filter(n => n.kind === "vpn");
-      document.getElementById("nics").innerHTML = live.length
-        ? live.map(n => nicCard(n, false)).join("")
-        : `<div class="empty">${esc(t("popup.disconnected", "Not connected"))}</div>`;
+      // 「在用网卡」不再单列一段：主网卡并进上面的明细，其余网卡才列在这里。
+      document.getElementById("sec-other").hidden = !live.length;
+      document.getElementById("nics").hidden = !live.length;
+      document.getElementById("nics").innerHTML = live.map(nicCard).join("");
       document.getElementById("vpns").innerHTML = vpns.length
-        ? vpns.map(n => nicCard(n, true)).join("")
-        : `<div class="empty">${esc(t("tray.vpn_none", "none connected"))}</div>`;
+        ? vpns.map(nicCard).join("")
+        : `<div class="empty">${esc(t("popup.vpn_none", "none connected"))}</div>`;
     }
 
     // ——————— 引擎视图：状态只在 `engine` 里，Profile 清单只是名字目录 ———————
@@ -284,13 +286,6 @@
       const st = data.status || {};
       const connected = !!st.connected;
       document.getElementById("dot").className = "dot" + (connected ? " on" : "");
-      // 「已连接但读不到 SSID」（macOS 15.6+ 的系统限制）不能显示成「未连接」——
-      // 那会与同一面板上的绿点、IP / DNS 行自相矛盾。
-      document.getElementById("ssid").textContent = st.ssid ||
-        (connected ? t("status.ssid_unknown", "SSID unavailable") : t("popup.disconnected", "Not connected"));
-      document.getElementById("v-ip").textContent = st.ipv4 || "—";
-      document.getElementById("v-dns").textContent = st.dns || "—";
-      document.getElementById("v-signal").textContent = st.rssi != null ? st.rssi + " dBm" : "—";
 
       const eng = engOf(data);
       const dec = eng.state || {};
@@ -348,16 +343,34 @@
         wv.title = "\n" + ws.map(w => `${w.label}: ${w.error || workerWord(w.state)}`).join("\n");
       }
 
-      const priv = document.getElementById("priv");
-      priv.className = "badge " + (data.priv || "");
-      priv.textContent = data.priv === "direct"
-        ? t("tray.priv_direct", "No prompt")
-        : (data.priv ? t("tray.priv_prompt", "Asks each time") : "");
+      // 「在用的那张网卡」的明细：主网卡由 Rust 侧选定（`automation::primary_nic`）并放在
+      // `get_interfaces` 首位，这里只把它的字段与状态快照合并展示，取不到的整行收起。
+      // SSID / 信号强度只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络。
+      const primary = primaryNic();
+      const wireless = !primary || primary.kind === "wireless";
+      setRow("iface", (primary && primary.name) || st.iface);
+      let ssid = st.ssid || (primary && primary.ssid) || "";
+      // 「已连接但读不到 SSID」（macOS 15.6+ 的系统限制）不能显示成「未连接」——
+      // 那会与同一面板上的绿点、IP / DNS 行自相矛盾。
+      if (!ssid) ssid = connected ? t("status.ssid_unknown", "Unknown") : t("popup.disconnected", "Not connected");
+      setRow("ssid", wireless ? ssid : "");
+      setRow("signal", wireless && st.rssi != null ? st.rssi + " dBm" : "");
+      setRow("mac", primary && primary.mac);
+      setRow("ip", st.ipv4 || (primary && primary.ipv4));
+      setRow("netmask", (primary && primary.netmask) || st.netmask);
+      setRow("gateway", st.gateway || (primary && primary.gateway));
+      setRow("ipv6", primary && primary.ipv6);
+      setRow("dns", st.dns || (primary && primary.dns));
 
+      // 快速切换区只列 Profile 上勾了「放入快速切换区」的那些（`quick`，默认勾选）。
+      // 取消勾选只是在面板收起，编辑器里它仍然存在、仍然参与条件匹配。
+      const all = data.profiles || [];
+      const rows = all.filter(p => p.quick !== false);
       const list = document.getElementById("switches");
-      const rows = data.profiles || [];
       if (!rows.length) {
-        list.innerHTML = `<div class="empty">${esc(t("popup.no_profiles", "No configured networks"))}</div>`;
+        list.innerHTML = `<div class="empty">${esc(t(
+          all.length ? "popup.quick_none" : "popup.no_profiles",
+          all.length ? "No profile marked for quick switch" : "No configured networks"))}</div>`;
         return;
       }
       // 「立即应用」不绕过条件：后端会重新评估该 Profile 自己，冲突时直接拒绝，
@@ -563,17 +576,18 @@
       try {
         const raw = await invoke("get_status");
         const data = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (data.language) {
-          document.getElementById("lang").value = data.language;
+        if (data.language && data.language !== langShown) {
+          // 语言是在软件设置窗口里改的，这里只是跟着换词表。按「变了没有」判断，
+          // 而不是每次刷新都往返拉一遍 200 多条文案。
+          langShown = data.language;
           strings = await invoke("get_strings");
         }
-        applyI18n();
-        render(data);
-        // 网卡清单单独取：多网卡 + VPN 是本次新增的展示主体，
-        // 与"主无线网卡状态"分开调用，避免拖慢状态广播。
+        // 网卡清单先取再渲染：面板第一段要显示的就是「在用的那张」的 MAC / 掩码 / IPv6，
+        // 而主网卡的判据只在 Rust 里有一份（列表首位即主网卡）。
         const rawNics = await invoke("get_interfaces");
         nics = typeof rawNics === "string" ? JSON.parse(rawNics) : (rawNics || []);
         applyI18n();
+        render(data);
         renderNics();
       } catch (e) { /* 非 Tauri 环境（浏览器直接打开）时静默 */ }
     }
@@ -590,16 +604,12 @@
       }
     }
 
-    document.getElementById("lang").addEventListener("change", async (ev) => {
-      try {
-        await invoke("set_language", { code: ev.target.value });
-        strings = await invoke("get_strings");
-        applyI18n();
-        await refresh();
-      } catch (e) { /* ignore */ }
-    });
-    document.getElementById("btn-settings").onclick = () => invoke("open_editor").catch(() => {});
-    document.getElementById("btn-logs").onclick = () => invoke("open_logs").catch(() => {});
+    // 面板上的「设置」指向**软件设置**（语言、开机启动、日志）；自动化配置的编辑器
+    // 从那个窗口里进入。两份配置各有自己的入口，面板不再兼任配置文件的管理员。
+    document.getElementById("btn-settings").onclick = () => invoke("open_settings").catch(() => {});
+    // 「日志」开的是**读日志的那个窗口**，不是文件管理器：面板上按它的人要的是看一眼
+    // 刚才发生了什么，而不是被丢进一堆 .log 文件前面。目录入口在软件设置里。
+    document.getElementById("btn-logs").onclick = () => invoke("open_log_viewer").catch(() => {});
     document.getElementById("btn-quit").onclick = () => invoke("quit_app").catch(() => {});
     // DHCP / 探测都在后台线程执行（可能触发系统授权框），这里只负责发起
     document.getElementById("btn-dhcp").onclick = async () => {
@@ -620,7 +630,7 @@
       // 后台动作（DHCP / 探测）完成后把结果 toast 出来
       window.__TAURI__.event.listen("netsense://action", (e) => {
         const p = e.payload || {};
-        toast(p.message || (p.ok ? "OK" : "Failed"));
+        toast(p.message || (p.ok ? t("editor.action_ok", "OK") : t("editor.action_failed", "Failed")));
       });
       // 在线升级进度（下载 / 刷新 / 安装阶段 + 百分比）
       window.__TAURI__.event.listen("netsense://update_progress", (e) => {

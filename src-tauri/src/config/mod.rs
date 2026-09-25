@@ -6,6 +6,8 @@ pub mod model;
 
 use std::path::Path;
 
+use crate::i18n;
+
 pub use model::{
     Branch, Condition, ConditionType, Config, DetectionMode, FallbackConfig, HealthConfig, Mode,
     NetworkConfig, OneShotAction, OneShotActionType, PersistentAction, PersistentActionType,
@@ -28,36 +30,57 @@ impl Config {
     /// 语义可能和这一版相反（多命中是自动挑一个，还是判成冲突不应用）。拿猜出来的
     /// 语义往用户的网卡上下发一份没人确认的静态 IP，比停下来危险。
     pub fn load(path: &Path) -> Result<Config, String> {
-        let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        // 带上路径：一句「读不到」不告诉用户是哪一份文件读不到，而本版本同时认用户目录
+        // 与程序目录两处，光看错误文本分不出是哪一处。
+        let data = std::fs::read_to_string(path).map_err(|e| {
+            i18n::tf("cfg.read_failed", &[("path", &path.display().to_string()), ("error", &e.to_string())])
+        })?;
         Self::from_json(&data)
     }
 
     pub fn from_json(data: &str) -> Result<Config, String> {
-        let raw: serde_json::Value =
-            serde_json::from_str(data).map_err(|e| format!("JSON 解析失败: {}", e))?;
+        // 句子的措辞随界面语言走，句中的 `schema` / `config.example.json` 这类**字段名与
+        // 文件名原样保留**：用户排查时对着的是配置文件本身，被翻译过的字段名反而找不到。
+        let raw: serde_json::Value = serde_json::from_str(data).map_err(|e| {
+            i18n::tf("cfg.json_parse", &[("error", &e.to_string())])
+        })?;
         let Some(found) = raw.get("schema").and_then(|v| v.as_u64()) else {
-            return Err(format!(
-                "config.json 顶层缺少 \"schema\" 字段（本版本需要 \"schema\": {}）。\
-                 缺省不会被猜成某个版本：请参照 config.example.json 补上。",
-                SCHEMA
-            ));
+            return Err(i18n::tf("cfg.schema_missing", &[("schema", &SCHEMA.to_string())]));
         };
         if found as u32 != SCHEMA {
-            return Err(format!(
-                "config.json 的 schema={found} 不被支持（本版本需要 schema={SCHEMA}）。\
-                 本版本把多份 Profile 同时命中判为冲突且不应用任何一支，别的 schema 未必要\
-                 这么解释，所以不做自动迁移；请参照 config.example.json 逐项核对。",
-            ));
+            return Err(i18n::tf("cfg.schema_unknown", &[
+                ("found", &found.to_string()),
+                ("schema", &SCHEMA.to_string()),
+            ]));
         }
-        serde_json::from_value(raw).map_err(|e| format!("配置结构不合法: {}", e))
+        serde_json::from_value(raw).map_err(|e| {
+            i18n::tf("cfg.bad_structure", &[("error", &e.to_string())])
+        })
     }
 
-    /// 写回磁盘（pretty JSON，并带上 schema）
+    /// 写回磁盘（pretty JSON，并带上 schema）。
+    ///
+    /// 需要时先把父目录建出来：配置现在住在用户目录（见 `paths`），首次运行时那个目录
+    /// 还不存在 —— 「第一次保存」就是它的创建时机，不能因为目录不在就报错。
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let mut me = self.clone();
         me.schema = SCHEMA;
-        let s = serde_json::to_string_pretty(&me).map_err(|e| e.to_string())?;
-        std::fs::write(path, s).map_err(|e| e.to_string())
+        let s = serde_json::to_string_pretty(&me).map_err(|e| {
+            i18n::tf("cfg.serialize_failed", &[("error", &e.to_string())])
+        })?;
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    i18n::tf("cfg.mkdir_failed", &[
+                        ("dir", &dir.display().to_string()),
+                        ("error", &e.to_string()),
+                    ])
+                })?;
+            }
+        }
+        std::fs::write(path, s).map_err(|e| {
+            i18n::tf("cfg.write_failed", &[("path", &path.display().to_string()), ("error", &e.to_string())])
+        })
     }
 
     pub fn profile_by_id(&self, id: &str) -> Option<&Profile> {
@@ -74,53 +97,50 @@ impl Config {
     /// 只是永远 `NOT MATCHED`（见 `conditions::evaluator`）。
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA {
-            return Err(format!("schema 必须为 {}", SCHEMA));
+            return Err(i18n::tf("cfg.schema", &[("schema", &SCHEMA.to_string())]));
         }
         let mut ids: Vec<&str> = Vec::new();
         for p in &self.profiles {
             if p.id.trim().is_empty() {
-                return Err(format!("profile '{}' 缺少 id", p.name));
+                return Err(i18n::tf("cfg.no_id", &[("name", &p.name)]));
             }
             if p.name.trim().is_empty() {
-                return Err(format!("profile '{}' 缺少 name", p.id));
+                return Err(i18n::tf("cfg.no_name", &[("id", &p.id)]));
             }
             if ids.contains(&p.id.as_str()) {
-                return Err(format!("profile id 重复: {}", p.id));
+                return Err(i18n::tf("cfg.dup_id", &[("id", &p.id)]));
             }
             ids.push(&p.id);
             if p.rules.is_empty() {
-                return Err(format!(
-                    "profile '{}' 没有任何 rule（无 rule 的 profile 永远不匹配，请直接禁用或删除它）",
-                    p.name
-                ));
+                return Err(i18n::tf("cfg.no_rules", &[("name", &p.name)]));
             }
             let mut rule_ids: Vec<&str> = Vec::new();
             for r in &p.rules {
                 if r.id.trim().is_empty() {
-                    return Err(format!("profile '{}' 有 rule 缺少 id", p.name));
+                    return Err(i18n::tf("cfg.rule_no_id", &[("name", &p.name)]));
                 }
                 if rule_ids.contains(&r.id.as_str()) {
-                    return Err(format!(
-                        "profile '{}' 内 rule id 重复: {}",
-                        p.name, r.id
-                    ));
+                    return Err(i18n::tf("cfg.rule_dup_id", &[
+                        ("name", &p.name),
+                        ("id", &r.id),
+                    ]));
                 }
                 rule_ids.push(&r.id);
                 if r.conditions.is_empty() {
-                    return Err(format!(
-                        "profile '{}' 的 rule '{}' 为空（空 rule 恒不匹配，请删除它或加条件）",
-                        p.name, r.id
-                    ));
+                    return Err(i18n::tf("cfg.rule_empty", &[
+                        ("name", &p.name),
+                        ("rule", &r.id),
+                    ]));
                 }
                 for c in &r.conditions {
                     validate_condition(&p.name, c)?;
                 }
             }
             if let Some(b) = &p.then {
-                validate_branch(&format!("profile '{}' then", p.name), b)?;
+                validate_branch(&branch_ctx(&p.name, "then"), b)?;
             }
             if let Some(b) = &p.else_branch {
-                validate_branch(&format!("profile '{}' else", p.name), b)?;
+                validate_branch(&branch_ctx(&p.name, "else"), b)?;
             }
         }
         if let Some(fb) = &self.fallback {
@@ -144,36 +164,41 @@ impl Config {
             };
             let live = b.persistent.iter().filter(|a| a.enabled).count();
             if live > 0 {
-                out.push(Warning(format!(
-                    "profile '{}' 的 else 分支配了 {} 个 persistent 动作：常驻动作只随 Active 的 then 分支启动，这一支不会被维持",
-                    p.name, live
-                )));
+                out.push(Warning(i18n::tf("cfg.warn_else_persistent", &[
+                    ("name", &p.name),
+                    ("count", &live.to_string()),
+                ])));
             }
         }
         out
     }
 }
 
+/// 一条分支诊断的主语。`then` / `else` 是配置里的字段名，所以它们不进字典。
+fn branch_ctx(profile: &str, branch: &str) -> String {
+    i18n::tf("cfg.ctx_branch", &[("profile", profile), ("branch", branch)])
+}
+
 fn validate_condition(profile: &str, c: &Condition) -> Result<(), String> {
     if c.id.trim().is_empty() {
-        return Err(format!("profile '{}' 有条件缺少 id", profile));
+        return Err(i18n::tf("cfg.cond_no_id", &[("name", profile)]));
     }
     if c.value.trim().is_empty() {
-        return Err(format!(
-            "profile '{}' 的条件 '{}' ({}) 值为空：禁用它，或填上比较值",
-            profile,
-            c.id,
-            c.kind.as_str()
-        ));
+        return Err(i18n::tf("cfg.cond_empty_value", &[
+            ("name", profile),
+            ("id", &c.id),
+            ("type", c.kind.as_str()),
+        ]));
     }
     let v = c.value.trim();
     match c.kind {
         ConditionType::GatewayMac | ConditionType::Bssid => {
             if !looks_like_mac(v) {
-                return Err(format!(
-                    "profile '{}' 的条件 '{}' 需要 MAC 形态的值（当前: {}）",
-                    profile, c.id, v
-                ));
+                return Err(i18n::tf("cfg.cond_not_mac", &[
+                    ("name", profile),
+                    ("id", &c.id),
+                    ("value", v),
+                ]));
             }
         }
         ConditionType::NetworkInterface | ConditionType::WifiSsid => {}
@@ -190,30 +215,28 @@ fn validate_health(what: &str, h: &HealthConfig) -> Result<(), String> {
     let has = |s: &Option<String>| {
         s.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false)
     };
+    let what1 = [("what", what)];
     if h.enabled {
         match h.mode {
             ProbeMode::Icmp if !has(&h.icmp_target) => {
-                return Err(format!("{}: 健康度探测 mode=icmp 却没填 icmp_target", what));
+                return Err(i18n::tf("cfg.health_icmp", &what1));
             }
             ProbeMode::Http if !has(&h.http_target) => {
-                return Err(format!("{}: 健康度探测 mode=http 却没填 http_target", what));
+                return Err(i18n::tf("cfg.health_http", &what1));
             }
             ProbeMode::Both if !has(&h.icmp_target) && !has(&h.http_target) => {
-                return Err(format!("{}: 健康度探测 mode=both 至少要有一个探测目标", what));
+                return Err(i18n::tf("cfg.health_both", &what1));
             }
             _ => {}
         }
         if h.interval == 0 {
-            return Err(format!("{}: 健康度探测 interval 必须大于 0", what));
+            return Err(i18n::tf("cfg.health_interval", &what1));
         }
         if h.retries == 0 {
-            return Err(format!(
-                "{}: 健康度探测 retries 必须大于 0（0 意味着永远不会判定为失败）",
-                what
-            ));
+            return Err(i18n::tf("cfg.health_retries", &what1));
         }
         if h.timeout == 0 {
-            return Err(format!("{}: 健康度探测 timeout 必须大于 0", what));
+            return Err(i18n::tf("cfg.health_timeout", &what1));
         }
     }
     Ok(())
@@ -227,10 +250,10 @@ fn claim_action_id<'a>(
     kind: &str,
 ) -> Result<(), String> {
     if id.trim().is_empty() {
-        return Err(format!("{}: {} 动作缺少 id", what, kind));
+        return Err(i18n::tf("cfg.action_no_id", &[("what", what), ("kind", kind)]));
     }
     if seen.contains(&id) {
-        return Err(format!("{}: 动作 id 重复: {}", what, id));
+        return Err(i18n::tf("cfg.action_dup_id", &[("what", what), ("id", id)]));
     }
     seen.push(id);
     Ok(())
@@ -245,17 +268,36 @@ fn validate_branch(what: &str, b: &Branch) -> Result<(), String> {
     let mut ids: Vec<&str> = Vec::new();
     for a in &b.one_shot {
         claim_action_id(what, &mut ids, &a.id, "one_shot")?;
-        match &a.action {
+        let missing = match &a.action {
             OneShotActionType::LaunchApp { app, .. } => {
                 if app.trim().is_empty() {
-                    return Err(format!("{}: 动作 '{}' 是 launch_app 却没填 app", what, a.id));
+                    Some(("launch_app", "app"))
+                } else {
+                    None
                 }
             }
             OneShotActionType::RunScript { path, .. } => {
                 if path.trim().is_empty() {
-                    return Err(format!("{}: 动作 '{}' 是 run_script 却没填 path", what, a.id));
+                    Some(("run_script", "path"))
+                } else {
+                    None
                 }
             }
+            OneShotActionType::SetDefaultPrinter { printer } => {
+                if printer.trim().is_empty() {
+                    Some(("set_default_printer", "printer"))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some((kind, field)) = missing {
+            return Err(i18n::tf("cfg.action_no_field", &[
+                ("what", what),
+                ("id", &a.id),
+                ("type", kind),
+                ("field", field),
+            ]));
         }
     }
     for a in &b.persistent {
@@ -263,36 +305,50 @@ fn validate_branch(what: &str, b: &Branch) -> Result<(), String> {
         let (kind, interval) = match &a.action {
             PersistentActionType::PeriodicScript { path, interval_secs, .. } => {
                 if path.trim().is_empty() {
-                    return Err(format!("{}: 动作 '{}' 是 periodic_script 却没填 path", what, a.id));
+                    return Err(i18n::tf("cfg.action_no_field", &[
+                        ("what", what),
+                        ("id", &a.id),
+                        ("type", "periodic_script"),
+                        ("field", "path"),
+                    ]));
                 }
                 ("periodic_script", interval_secs)
             }
             PersistentActionType::KeepWireGuardConnected { tunnel, interval_secs } => {
                 if tunnel.trim().is_empty() {
-                    return Err(format!(
-                        "{}: 动作 '{}' 是 keep_wireguard_connected 却没填 tunnel", what, a.id
-                    ));
+                    return Err(i18n::tf("cfg.action_no_field", &[
+                        ("what", what),
+                        ("id", &a.id),
+                        ("type", "keep_wireguard_connected"),
+                        ("field", "tunnel"),
+                    ]));
                 }
                 ("keep_wireguard_connected", interval_secs)
             }
             PersistentActionType::KeepVpnConnected { provider, profile, interval_secs } => {
                 if provider.trim().is_empty() || profile.trim().is_empty() {
-                    return Err(format!(
-                        "{}: 动作 '{}' 是 keep_vpn_connected，provider 与 profile 都要填", what, a.id
-                    ));
+                    return Err(i18n::tf("cfg.action_needs_both", &[
+                        ("what", what),
+                        ("id", &a.id),
+                    ]));
                 }
                 ("keep_vpn_connected", interval_secs)
             }
         };
         // 常驻动作是一根循环轮询的定时器：间隔 0 在语义上就是「无限快地检查」。
         if *interval == 0 {
-            return Err(format!("{}: 动作 '{}' ({}) 的 interval_secs 必须大于 0", what, a.id, kind));
+            return Err(i18n::tf("cfg.action_interval", &[
+                ("what", what),
+                ("id", &a.id),
+                ("type", kind),
+            ]));
         }
     }
     Ok(())
 }
 
 fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
+    let what1 = [("what", what)];
     if n.mode == Mode::Manual {
         for (field, val) in [
             ("ip", &n.ip),
@@ -300,11 +356,14 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
             ("gateway", &n.gateway),
         ] {
             if val.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(format!("{}: manual 模式需要填写 {}", what, field));
+                return Err(i18n::tf("cfg.net_manual_field", &[("what", what), ("field", field)]));
             }
         }
         if !n.ip.as_deref().map(is_ipv4).unwrap_or(false) {
-            return Err(format!("{}: ip 不是合法 IPv4: {:?}", what, n.ip));
+            return Err(i18n::tf("cfg.net_bad_ip", &[
+                ("what", what),
+                ("ip", n.ip.as_deref().unwrap_or("")),
+            ]));
         }
     }
     if let Some(dns) = &n.dns {
@@ -314,22 +373,22 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
                 continue;
             }
             if !is_ipv4(t) {
-                return Err(format!("{}: DNS 不合法: {}", what, t));
+                return Err(i18n::tf("cfg.net_bad_dns", &[("what", what), ("dns", t)]));
             }
         }
     }
     if n.v6mode == Some(V6Mode::Manual) && n.ipv6.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(format!("{}: v6mode=manual 需要 ipv6 地址", what));
+        return Err(i18n::tf("cfg.net_manual_v6", &what1));
     }
     for r in &n.routes {
         if r.dest.trim().is_empty() {
-            return Err(format!("{}: routes 里有空的 dest", what));
+            return Err(i18n::tf("cfg.net_route_no_dest", &what1));
         }
         if !r.delete && r.gateway.as_deref().unwrap_or("").trim().is_empty() {
-            return Err(format!(
-                "{}: 路由 {} 需要 gateway（删除路由才允许省略）",
-                what, r.dest
-            ));
+            return Err(i18n::tf("cfg.net_route_no_gw", &[
+                ("what", what),
+                ("dest", &r.dest),
+            ]));
         }
     }
     if let Some(h) = n.verify.as_ref().and_then(|v| v.health.as_ref()) {
@@ -356,6 +415,16 @@ fn looks_like_mac(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// 校验消息现在按界面语言生成，所以每条断言前都要保证字典已就位。
+    ///
+    /// 断言只挑**五种语言里都必须出现**的那部分：JSON 字段名、`then`/`else` 这类分支名、
+    /// 以及用户自己写的 id。这正是这条消息的全部用处 —— 用户拿它去配置文件里找那一行，
+    /// 所以「措辞可以翻译、锚点不许翻译」本身就是被测的契约。语言不由这里设定：
+    /// `i18n` 的测试会并发改全局语言，任何一侧替另一侧定语言都会让结果看线程调度。
+    fn dicts_ready() {
+        i18n::init();
+    }
+
     /// 整份示例配置必须能被加载并校验通过。
     ///
     /// 这条测试不是形式主义：示例即契约，一个字段表示与 Rust 枚举不一致就会让**整份**
@@ -376,6 +445,7 @@ mod tests {
     /// 一份本版本不认识的配置要明确拒绝，而不是回退成空配置照常跑。
     #[test]
     fn an_unrecognised_schema_is_rejected_with_an_actionable_message() {
+        dicts_ready();
         // 形状不对且没有 schema 字段：顶层直接是 profile 名的 map
         let no_schema = r#"{"__DEFAULT__":{"mode":"dhcp"},"Home":{"match":{"ssid":"Home"},"priority":5}}"#;
         let err = Config::from_json(no_schema).expect_err("缺 schema 字段必须被拒绝");
@@ -399,15 +469,17 @@ mod tests {
 
     #[test]
     fn empty_condition_value_is_rejected() {
+        dicts_ready();
         // 空值条件不是「通配」，而是配错了：放过去等于把整个 Rule 变成永不匹配
         let raw = r#"{"schema":1,"profiles":[{"id":"a","name":"A","rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":""}]}]}]}"#;
         let cfg = Config::from_json(raw).unwrap();
         let err = cfg.validate().expect_err("空值条件必须被拒绝");
-        assert!(err.contains("值为空"), "报错内容: {}", err);
+        assert!(err.contains("c1"), "报错要指向出问题的那条条件: {}", err);
     }
 
     #[test]
     fn manual_network_needs_full_ipv4_settings() {
+        dicts_ready();
         let raw = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
           "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
           "then":{"network":{"mode":"manual","ip":"10.0.0.1"}}}]}"#;
@@ -432,12 +504,14 @@ mod tests {
     }
 
     /// 一条动作载荷配错了，跑起来的表现是「什么也没发生」，比加载失败更难排查 ——
-    /// 所以空 app / 空 path / 空 tunnel / 0 间隔都在落盘前拦住。
+    /// 所以空 app / 空 path / 空 printer / 空 tunnel / 0 间隔都在落盘前拦住。
     #[test]
     fn action_payloads_must_be_complete() {
+        dicts_ready();
         let cases = [
             (r#"{"type":"launch_app","app":""}"#, "app"),
             (r#"{"type":"run_script","path":"  "}"#, "path"),
+            (r#"{"type":"set_default_printer","printer":""}"#, "printer"),
         ];
         for (action, field) in cases {
             let raw = format!(
@@ -467,6 +541,7 @@ mod tests {
     /// 常驻动作的 `interval_secs: 0` 是一根没有间隔的轮询循环。
     #[test]
     fn persistent_actions_need_a_nonzero_interval() {
+        dicts_ready();
         let raw = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
           "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
           "then":{"persistent":[{"id":"p1","action":{"type":"periodic_script","path":"scripts/k.sh","interval_secs":0}}]}}]}"#;
@@ -477,19 +552,21 @@ mod tests {
     /// 3B1 与 3B2 共用一套 id：动作结果按 id 找回卡片，跨列表撞名同样会串台。
     #[test]
     fn one_shot_and_persistent_share_one_id_namespace() {
+        dicts_ready();
         let raw = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
           "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
           "then":{"one_shot":[{"id":"x","action":{"type":"launch_app","app":"Notes.app"}}],
                   "persistent":[{"id":"x","action":{"type":"keep_wireguard_connected","tunnel":"wg0"}}]}}]}"#;
         let cfg = Config::from_json(raw).unwrap();
         let err = cfg.validate().expect_err("跨列表撞 id 必须被拒绝");
-        assert!(err.contains("重复"), "报错内容: {}", err);
+        assert!(err.ends_with("x"), "报错要以撞名的那个 id 收尾（五种语言都是）: {}", err);
     }
 
     /// 健康度探测关着时不校验内容（先把参数写好再打开是合法用法）；
     /// 开着却没目标 / 零间隔必须拦住 —— 那种配置会在 Active 期间反复触发回落 DHCP。
     #[test]
     fn enabled_health_probe_needs_a_target_and_positive_timing() {
+        dicts_ready();
         // 用占位符而不是 format!：这段 JSON 里的花括号已经够多了，再叠一层 `{{` 转义只会让测试自己出错。
         let with = |verify: &str| {
             r#"{"schema":1,"profiles":[{"id":"a","name":"A",
@@ -520,11 +597,13 @@ mod tests {
 
     #[test]
     fn duplicate_profile_ids_are_rejected() {
+        dicts_ready();
         let raw = r#"{"schema":1,"profiles":[
           {"id":"a","name":"A","rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}]},
           {"id":"a","name":"B","rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"Y"}]}]}]}"#;
         let cfg = Config::from_json(raw).unwrap();
-        assert!(cfg.validate().unwrap_err().contains("重复"));
+        let err = cfg.validate().unwrap_err();
+        assert!(err.ends_with("a"), "报错要以撞名的那个 id 收尾: {}", err);
     }
 
     /// 前端 `clean*` 序列化出来的动作标签必须能被 serde 认出来。
@@ -538,7 +617,8 @@ mod tests {
           "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
           "then":{"one_shot":[
             {"id":"a1","enabled":true,"priority":1,"action":{"type":"launch_app","app":"/Applications/X.app"}},
-            {"id":"a2","enabled":true,"priority":2,"action":{"type":"run_script","path":"scripts/x.sh"}}],
+            {"id":"a2","enabled":true,"priority":2,"action":{"type":"run_script","path":"scripts/x.sh"}},
+            {"id":"a4","enabled":true,"priority":3,"action":{"type":"set_default_printer","printer":"HP OfficeJet 476"}}],
             "persistent":[
             {"id":"p1","enabled":true,"priority":1,"action":{"type":"periodic_script","path":"scripts/keep.sh","interval_secs":10}},
             {"id":"p2","enabled":true,"priority":2,"action":{"type":"keep_wireguard_connected","tunnel":"wg0","interval_secs":15}},
@@ -547,7 +627,11 @@ mod tests {
         cfg.validate().expect("同一份配置必须通过校验");
         let p = cfg.profile_by_id("a").unwrap();
         let then = p.then.as_ref().unwrap();
-        assert_eq!(then.one_shot.len(), 2);
+        assert_eq!(then.one_shot.len(), 3);
+        assert!(matches!(
+            then.one_shot[2].action,
+            model::OneShotActionType::SetDefaultPrinter { ref printer } if printer == "HP OfficeJet 476"
+        ));
         assert!(matches!(
             then.persistent[0].action,
             model::PersistentActionType::PeriodicScript { interval_secs: 10, .. }
@@ -566,6 +650,7 @@ mod tests {
     /// 必须报出来 —— 「配了却什么都不发生」是最难查的一类反馈。
     #[test]
     fn persistent_actions_on_the_else_branch_are_reported_as_warnings() {
+        dicts_ready();
         let wg = |branch: &str| {
             format!(
                 r#"{{"schema":1,"profiles":[{{"id":"a","name":"A",

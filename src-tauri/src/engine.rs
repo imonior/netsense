@@ -505,7 +505,7 @@ impl Engine {
         let n = session.stop();
         self.workers = None;
         if n > 0 {
-            log::debug(&format!("已叫停 {} 条常驻动作 worker", n));
+            log::debug(&i18n::tf("engine.workers_stopped", &[("n", &n.to_string())]));
         }
         n
     }
@@ -526,7 +526,7 @@ impl Engine {
             return;
         }
         let Some(tx) = state.engine_tx.get().cloned() else {
-            log::error("引擎通道尚未就绪，常驻动作 worker 未启动");
+            log::error(&i18n::t("engine.channel_no_workers"));
             return;
         };
         self.worker_gen += 1;
@@ -544,11 +544,13 @@ impl Engine {
             &profile.name,
             sink,
         );
-        log::info(&format!(
-            "常驻动作 worker 已启动 {} 条: {} · gen {}",
-            session.statuses().len(),
-            profile.name,
-            self.worker_gen
+        log::info(&i18n::tf(
+            "engine.workers_started",
+            &[
+                ("n", &session.statuses().len().to_string()),
+                ("names", &profile.name),
+                ("gen", &self.worker_gen.to_string()),
+            ],
         ));
         self.workers = Some(session);
     }
@@ -655,10 +657,9 @@ impl Engine {
                 }
                 Stage3A::Applied => {
                     three_a = ThreeAOutcome::Applied;
-                    log::debug(&format!(
-                        "3A 通过: {} · {}",
-                        profile.name,
-                        which.name()
+                    log::debug(&i18n::tf(
+                        "engine.pass_3a",
+                        &[("name", &profile.name), ("branch", which.name())],
                     ));
                 }
             }
@@ -702,7 +703,7 @@ impl Engine {
             return;
         }
         let Some(tx) = state.engine_tx.get().cloned() else {
-            log::error("引擎通道尚未就绪，3B1 动作未提交");
+            log::error(&i18n::t("engine.channel_no_actions"));
             return;
         };
         let seq = self.begin_run(profile, which);
@@ -733,10 +734,12 @@ impl Engine {
     /// 记下这次提交并返回它的编号。**后一次取代前一次**（见模块头第 4 条硬规则）。
     fn begin_run(&mut self, profile: &Profile, which: Which) -> u64 {
         if let Some(old) = &self.running_run {
-            log::warn(&format!(
-                "上一次 3B1 仍未结束（{} · {}），本次提交取代其归因：旧动作不会被中止，但结果不再计入",
-                old.profile_name,
-                old.branch.name()
+            log::warn(&i18n::tf(
+                "engine.run_superseded",
+                &[
+                    ("name", &old.profile_name),
+                    ("branch", old.branch.name()),
+                ],
             ));
         }
         let seq = self.next_seq();
@@ -894,10 +897,10 @@ struct Inbox {
 fn loop_body(state: Arc<AppState>, rx: Receiver<Msg>) {
     loop {
         if crate::state::QUITTING.load(Ordering::SeqCst) {
-            // 退出前先收尾：进程正在消失，而一条「每 30 秒重连 VPN」不该在托盘菜单
+            // 退出前先收尾：进程正在消失，而一条「每 30 秒重连 VPN」不该在面板
             // 都已经关掉之后还发出最后一条命令。
             stop_background(&state);
-            log::info("引擎线程退出");
+            log::info(&i18n::t("engine.thread_exit"));
             break;
         }
         let mut inbox = Inbox::default();
@@ -954,8 +957,11 @@ fn apply_steps(state: &Arc<AppState>, steps: &[(u64, one_shot::ActionOutcome)]) 
         if eng.note_run_step(*seq, outcome) {
             attributed = true;
             match &outcome.error {
-                Some(e) => log::error(&format!("动作失败 {} : {}", outcome.label, e)),
-                None => log::debug(&format!("动作完成: {}", outcome.label)),
+                Some(e) => log::error(&i18n::tf(
+                    "engine.action_failed",
+                    &[("label", &outcome.label), ("error", e)],
+                )),
+                None => log::debug(&i18n::tf("engine.action_done", &[("label", &outcome.label)])),
             }
         }
     }
@@ -972,9 +978,7 @@ fn apply_runs(state: &Arc<AppState>, runs: &[(u64, one_shot::BatchReport)]) -> b
                 log_run(&slot, report);
                 attributed = true;
             }
-            None => log::warn(&format!(
-                "3B1 报告 #{seq} 已被后来的运行取代，只记日志不改留痕"
-            )),
+            None => log::warn(&i18n::tf("engine.stale_report", &[("seq", &seq.to_string())])),
         }
     }
     attributed
@@ -1007,9 +1011,13 @@ fn stop_background(state: &Arc<AppState>) {
 
 /// 把一次运行的收尾说清楚：谁的哪一支、成没成一半。逐条动作已在进度里记过。
 fn log_run(slot: &RunningRun, report: &one_shot::BatchReport) {
-    log::debug(&format!(
-        "3B1 结束: {} ({}) · {}",
-        slot.profile_name, slot.profile_id, slot.branch.name()
+    log::debug(&i18n::tf(
+        "engine.run_done",
+        &[
+            ("name", &slot.profile_name),
+            ("id", &slot.profile_id),
+            ("branch", slot.branch.name()),
+        ],
     ));
     if report.status == one_shot::BatchStatus::Partial
         || report.status == one_shot::BatchStatus::Failed
@@ -1029,8 +1037,11 @@ fn reload_if_changed(state: &Arc<AppState>) -> bool {
     let path = state.config_path.clone();
     let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
     {
+        // `None`（文件根本不在）也是一种状态，必须一起比较：只看 `is_some()` 的话，
+        // 首次运行那种「一直没有配置文件」的合法状态下，每一轮都会走下去读一次、
+        // 失败一次、连打两行 error —— 用户看到的就是日志被同一句 ENOENT 刷满。
         let mut last = state.config_mtime.lock().unwrap_or_else(|e| e.into_inner());
-        if mtime.is_some() && mtime == *last {
+        if mtime == *last {
             return false;
         }
         *last = mtime;
@@ -1042,15 +1053,14 @@ fn reload_if_changed(state: &Arc<AppState>) -> bool {
         }
         Err(e) => {
             log::error(&i18n::tf("notify.config_invalid", &[("error", &e)]));
-            log::error("配置重载失败，保留旧配置");
+            log::error(&i18n::t("notify.reload_kept_old"));
             return false;
         }
     };
-    if let Some(l) = &new_cfg.language {
-        i18n::set_language(i18n::Language::from_code(l));
-    }
+    // 这里**不**应用语言：语言属于软件配置，热重载一份自动化配置不该把用户的界面
+    // 语言换掉（那会让「我刚改的是 profile，怎么菜单变中文了」变成无法解释的观感）。
     for w in &warnings {
-        log::warn(&format!("配置告警: {}", w));
+        log::warn(&i18n::tf("notify.config_warning", &[("warning", w)]));
     }
     {
         let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
@@ -1113,7 +1123,7 @@ fn emit_evaluation(state: &Arc<AppState>) {
     }
 }
 
-/// 视图 + 一次完整状态广播（含托盘菜单）。会付平台采样的代价，别逐条动作进度就发一次。
+/// 视图 + 一次完整状态广播（面板是唯一的消费方）。会付平台采样的代价，别逐条动作进度就发一次。
 fn publish_view(state: &Arc<AppState>) {
     emit_evaluation(state);
     publish_status_now(state);
@@ -1348,34 +1358,7 @@ impl Engine {
     }
 }
 
-/// 托盘与状态广播用的「当前生效 Profile 名」。必须在**不持有**任何锁时调用。
-pub fn active_display_name(state: &Arc<AppState>) -> String {
-    let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-    match eng.active_id.as_deref() {
-        Some(id) => cfg
-            .profile_by_id(id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| id.to_string()),
-        None => match &eng.decision {
-            Decision::Conflict { ids } => {
-                let names: Vec<String> = ids
-                    .iter()
-                    .map(|i| {
-                        cfg.profile_by_id(i)
-                            .map(|p| p.name.clone())
-                            .unwrap_or_else(|| i.clone())
-                    })
-                    .collect();
-                i18n::tf("status.conflict", &[("names", &names.join(", "))])
-            }
-            Decision::NoActiveProfile => i18n::t("status.no_profile"),
-            Decision::Active { id } => id.clone(),
-        },
-    }
-}
-
-/// 托盘/IPC 的两个后台动作。都在引擎线程执行：都涉及提权或秒级等待。
+/// 面板/IPC 的两个后台动作。都在引擎线程执行：都涉及提权或秒级等待。
 fn run_action(state: &Arc<AppState>, kind: ActionKind) {
     match kind {
         ActionKind::SetDhcp => set_dhcp(state),

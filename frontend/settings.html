@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NetSense</title>
+  <style>
+    :root {
+      --bg: #1c1c1e;
+      --bg-card: #26262a;
+      --line: #34343a;
+      --fg: #ededf0;
+      --muted: #8e8e97;
+      --accent: #2f81f7;
+      --ok: #34c759;
+      --warn: #ff9f0a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg); color: var(--fg);
+      font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px 10px; border-bottom: 1px solid var(--line);
+    }
+    header b { font-size: 14px; letter-spacing: .2px; }
+    main { flex: 1; overflow-y: auto; padding: 0 16px 16px; }
+    .card {
+      background: var(--bg-card); border: 1px solid var(--line);
+      border-radius: 10px; margin-top: 12px; padding: 12px 14px;
+    }
+    .card > h3 {
+      margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .8px;
+    }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .row + .row { margin-top: 8px; }
+    .row .k { flex: 1; min-width: 0; }
+    select, input[type=number] {
+      background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px;
+    }
+    textarea {
+      display: block; width: 100%; margin-top: 8px; resize: vertical;
+      background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 6px; padding: 6px 8px;
+      font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    input[type=number] { width: 78px; }
+    button {
+      padding: 5px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+      font-family: inherit;
+    }
+    button.tiny { padding: 3px 9px; font-size: 11px; color: var(--muted); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:active { transform: translateY(1px); }
+    label.chk { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 —— 允许换行、允许选中复制 */
+    .path {
+      margin-top: 6px; padding: 6px 8px; background: #1a1a1d; border: 1px solid var(--line);
+      border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: #9ecbff; word-break: break-all; user-select: text;
+    }
+    .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
+    .err { margin-top: 6px; color: #ff6b6b; font-size: 11px; word-break: break-word; }
+    .err[hidden], .hint[hidden] { display: none; }
+    .val { color: var(--muted); }
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      background: rgba(0,0,0,.82); border: 1px solid var(--line); color: #fff;
+      padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
+      transition: opacity .18s; pointer-events: none; white-space: nowrap;
+    }
+    .toast.show { opacity: 1; }
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-thumb { background: #45454d; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <b id="hd-title" data-i18n="sett.title">Settings</b>
+    <button class="tiny" id="btn-close" data-i18n="sett.close">Close</button>
+  </header>
+
+  <main>
+    <div class="card">
+      <h3 id="sec-language" data-i18n="sett.section_language">Language</h3>
+      <div class="row">
+        <span class="k" id="k-language" data-i18n="sett.interface_language">Interface language</span>
+        <!-- i18n-exempt 语言选项用自称名：每种语言写自己的名字，翻成当前界面语言就没法认了 -->
+        <select id="sel-lang">
+          <option value="en">English</option>
+          <option value="zh">简体中文</option>
+          <option value="zh-TW">繁體中文</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+        </select>
+      </div>
+      <div class="hint" id="hint-language" data-i18n="sett.language_hint">Applies to every window at once.</div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-startup" data-i18n="sett.section_startup">Startup</h3>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chk-autostart"><span id="k-autostart" data-i18n="sett.autostart">Launch at login</span></label>
+      </div>
+      <div class="hint" id="hint-autostart" data-i18n="sett.autostart_hint">Takes effect the next time you sign in.</div>
+      <div class="err" id="err-autostart" hidden></div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-automation" data-i18n="sett.section_automation">Automation configuration</h3>
+      <div class="hint" id="hint-automation" data-i18n="sett.automation_hint">Profiles, match conditions and actions live in this file. The editor writes it.</div>
+      <div class="path" id="p-config">—</div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-config-dir" data-i18n="sett.open_folder">Open folder</button>
+        <button class="primary" id="btn-editor" data-i18n="sett.open_editor">Open editor</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-scripts" data-i18n="sett.section_scripts">Allowed scripts</h3>
+      <div class="hint" id="hint-scripts" data-i18n="sett.scripts_hint">run_script only executes the paths listed here, plus everything under the scripts folder next to config.json. One path per line.</div>
+      <textarea id="in-scripts" rows="4" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:8px">
+        <span class="k"></span>
+        <button class="primary" id="btn-scripts" data-i18n="sett.save">Save</button>
+      </div>
+      <div class="err" id="err-scripts" hidden></div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-logs" data-i18n="sett.section_logs">Logs</h3>
+      <div class="hint" id="hint-logs" data-i18n="sett.logs_hint">One file per day; files older than the retention window are removed at startup.</div>
+      <div class="path" id="p-logdir">—</div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-logs" data-i18n="sett.open_folder">Open folder</button>
+        <button class="primary" id="btn-view-logs" data-i18n="logs.open">Open log window</button>
+        <span class="k"></span>
+        <span id="k-retention" data-i18n="sett.retention">Keep logs (days)</span>
+        <input type="number" id="in-retention" min="1" max="365" step="1">
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-settings" data-i18n="sett.section_settings">Software settings file</h3>
+      <div class="hint" id="hint-settings" data-i18n="sett.settings_hint">Only interface language and log retention live here - changing them never applies a network setting.</div>
+      <div class="path" id="p-settings">—</div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-about" data-i18n="sett.section_about">Runtime</h3>
+      <div class="row"><span class="k" id="k-platform" data-i18n="sett.platform">Platform</span><span class="val" id="v-platform">—</span></div>
+      <div class="row"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
+      <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
+    const invoke = (cmd, args) => {
+      if (!hasTauri()) return Promise.reject(new Error("no tauri bridge"));
+      return window.__TAURI__.core.invoke(cmd, args);
+    };
+    const el = (id) => document.getElementById(id);
+    const show = (id, text) => { const n = el(id); n.textContent = text || ""; n.hidden = !text; };
+
+    let strings = {};
+    const t = (k, d) => strings[k] || d || k;
+    const tf = (k, d, vars) =>
+      Object.entries(vars || {}).reduce((s, [a, b]) => s.replace("{" + a + "}", b), t(k, d));
+    // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。
+    const syncLang = () => invoke("get_language")
+      .then((c) => { document.documentElement.lang = c; })
+      .catch(() => {});
+
+    function toast(msg) {
+      const n = el("toast");
+      n.textContent = msg; n.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => n.classList.remove("show"), 1800);
+    }
+
+    // 界面文案只有一份来源：后端字典（静态标记里的英文只是问不到字典时的兜底，
+    // 闸门要求它和字典的 en 值逐字一致）。逐个 id 手写赋值会长出「界面上多了一个
+    // 标签，没人给它换语言」，所以标签和 key 写在同一个元素上，这里只做一遍循环。
+    function applyI18n() {
+      const put = (n, key, set) => { const v = strings[key]; if (v) set(v); };
+      for (const n of document.querySelectorAll("[data-i18n]"))
+        put(n, n.dataset.i18n, (v) => { n.textContent = v; });
+      for (const n of document.querySelectorAll("[data-i18n-placeholder]"))
+        put(n, n.dataset.i18nPlaceholder, (v) => n.setAttribute("placeholder", v));
+      for (const n of document.querySelectorAll("[data-i18n-title]"))
+        put(n, n.dataset.i18nTitle, (v) => n.setAttribute("title", v));
+      syncLang();
+    }
+
+    function render(d) {
+      el("sel-lang").value = d.language || "en";
+      el("chk-autostart").checked = !!d.autostart;
+      show("err-autostart", d.autostart_error
+        ? tf("sett.autostart_error", "The system state could not be read: {error}", { error: d.autostart_error })
+        : "");
+      el("p-config").textContent = d.config_path || "—";
+      el("p-logdir").textContent = d.log_dir || "—";
+      el("p-settings").textContent = d.settings_path || "—";
+      const inRet = el("in-retention");
+      inRet.min = d.min_retention_days || 1;
+      inRet.max = d.max_retention_days || 365;
+      inRet.value = d.log_retention_days || "";
+      el("v-platform").textContent = d.platform || "—";
+      el("v-priv").textContent = d.priv === "direct"
+        ? t("sett.priv_direct", "Elevated access configured: changes apply without a system prompt")
+        : t("sett.priv_prompt", "Each change asks the system for authorization");
+      el("v-version").textContent = d.version || "—";
+    }
+
+    async function load() {
+      try {
+        const raw = await invoke("get_app_settings");
+        render(typeof raw === "string" ? JSON.parse(raw) : raw);
+      } catch (e) { /* 浏览器直接打开时静默：没有后端可问 */ }
+    }
+
+    // 语言：换完立刻重取词表并 repaint。这是这个窗口存在的理由 —— 切换必须
+    // 在一次操作内可见，而不是「下一次点击才显示新语言」。
+    el("sel-lang").onchange = async (ev) => {
+      try {
+        await invoke("set_language", { code: ev.target.value });
+        strings = await invoke("get_strings");
+        applyI18n();
+        await load();
+      } catch (e) { toast(String(e)); }
+    };
+
+    el("chk-autostart").onchange = async (ev) => {
+      const want = ev.target.checked;
+      ev.target.disabled = true;
+      try {
+        const on = await invoke("set_autostart", { enable: want });
+        ev.target.checked = !!on;
+        toast(t("sett.saved", "Saved"));
+      } catch (e) {
+        ev.target.checked = !want;   // 系统没答应，勾选框就不许看起来答应了
+        toast(String(e));
+      } finally {
+        ev.target.disabled = false;
+      }
+    };
+
+    el("in-retention").onchange = async (ev) => {
+      try {
+        const days = await invoke("set_log_retention", { days: Number(ev.target.value) });
+        ev.target.value = days;
+        toast(t("sett.saved", "Saved"));
+      } catch (e) { toast(String(e)); await load(); }
+    };
+
+    // 脚本白名单住在自动化配置里，和「零命中兜底」由同一条命令写回。那条命令是整体
+    // 替换，所以读的时候必须把兜底一起留着 —— 否则保存白名单会静默清空兜底。
+    let scriptsFallback = null;
+    let scriptsDirty = false;
+    async function loadScripts() {
+      if (scriptsDirty) return;   // 用户正在编辑，不许被刷新覆盖
+      try {
+        const raw = await invoke("get_config");
+        const cfg = typeof raw === "string" ? JSON.parse(raw) : raw;
+        scriptsFallback = cfg.fallback ?? null;
+        el("in-scripts").value = (cfg.allowed_scripts || []).join("\n");
+      } catch (e) { /* 浏览器直接打开时静默：没有后端可问 */ }
+    }
+
+    el("in-scripts").oninput = () => { scriptsDirty = true; };
+    el("btn-scripts").onclick = async () => {
+      const list = el("in-scripts").value.split("\n").map(s => s.trim()).filter(Boolean);
+      try {
+        await invoke("save_global", {
+          payload: JSON.stringify({ fallback: scriptsFallback, allowed_scripts: list }),
+        });
+        scriptsDirty = false;
+        show("err-scripts", "");
+        toast(t("sett.saved", "Saved"));
+      } catch (e) { show("err-scripts", String(e)); }
+      await loadScripts();
+    };
+
+    el("btn-config-dir").onclick = () => invoke("open_config_folder").catch(e => toast(String(e)));
+    el("btn-logs").onclick = () => invoke("open_logs").catch(e => toast(String(e)));
+    el("btn-view-logs").onclick = () => invoke("open_log_viewer").catch(e => toast(String(e)));
+    el("btn-editor").onclick = () => invoke("open_editor").catch(e => toast(String(e)));
+    el("btn-close").onclick = () => invoke("close_settings").catch(() => {});
+
+    // 每次获得焦点都重问一遍：开机启动的真相在操作系统里，用户可能刚从
+    // 系统设置 / 注册表里动过它，读缓存会让这个勾选框说谎。
+    const refresh = () => { load(); loadScripts(); };
+    window.addEventListener("focus", refresh);
+
+    applyI18n();
+    (async () => {
+      try { strings = await invoke("get_strings"); } catch (e) {}
+      applyI18n();
+      refresh();
+    })();
+  </script>
+</body>
+</html>

@@ -220,4 +220,42 @@ mod tests {
             assert_eq!(s, "已应用配置：Office");
         });
     }
+
+    /// `{name}` 这类占位符是句子的一部分，不是可译内容：漏掉一个，界面就把花括号原样
+    /// 交给用户，多出来的那个又永远填不上。校验脚本第 [3] 组对着 JSON 查同一条，这里是
+    /// 它在构建期的镜像 —— 改字典的人未必跑脚本，但会跑 `cargo test`。
+    #[test]
+    fn every_language_keeps_ens_placeholders() {
+        fn placeholders(s: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = s;
+            while let Some(open) = rest.find('{') {
+                let tail = &rest[open + 1..];
+                let Some(close) = tail.find('}') else { break };
+                out.push(tail[..close].to_string());
+                rest = &tail[close + 1..];
+            }
+            out.sort();
+            out
+        }
+        with_dicts(|| {
+            let dicts = DICTS.get().expect("with_dicts 已装好字典");
+            let en = &dicts[&Language::En];
+            let mut drift: Vec<String> = Vec::new();
+            for lang in [Language::Zh, Language::ZhTw, Language::Ja, Language::Ko] {
+                let Some(d) = dicts.get(&lang) else {
+                    drift.push(format!("{}: 整个字典缺失", lang.code()));
+                    continue;
+                };
+                for (k, v) in en {
+                    if let Some(got) = d.get(k) {
+                        if placeholders(got) != placeholders(v) {
+                            drift.push(format!("{}.{}", lang.code(), k));
+                        }
+                    }
+                }
+            }
+            assert!(drift.is_empty(), "{} 条译文的占位符与 en 不一致: {:?}", drift.len(), drift);
+        });
+    }
 }

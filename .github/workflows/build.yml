@@ -78,18 +78,26 @@ jobs:
 
       # Release notes default to English: extracted from the current version's section of the
       # English CHANGELOG.md, so Chinese commits can't leak into the published notes.
+      # The body gets a language switch line on top, mirroring the READMEs. It has to use absolute
+      # blob URLs pinned to this tag: a Release page has no document base, so a relative
+      # `README.zh.md` would resolve against .../releases and 404.
       - name: Generate release notes (English, from CHANGELOG.md)
         shell: bash
         run: |
+          set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}"
           echo "extracting changelog section for v${VER}"
-          awk -v v="## [${VER}]" '
-            substr($0,1,4)=="## [" {
-              if (p) exit
-              if (substr($0,1,length(v))==v && substr($0,length(v)+1,1)==" ") { p=1; next }
-            }
-            p { print }
-          ' CHANGELOG.md > release-notes.md
+          {
+            printf '%s\n\n' "**English** · [简体中文](${BASE}/README.zh.md) · [繁體中文](${BASE}/README.zh-TW.md) · [日本語](${BASE}/README.ja.md) · [한국어](${BASE}/README.ko.md)"
+            awk -v v="## [${VER}]" '
+              substr($0,1,4)=="## [" {
+                if (p) exit
+                if (substr($0,1,length(v))==v && substr($0,length(v)+1,1)==" ") { p=1; next }
+              }
+              p { print }
+            ' CHANGELOG.md
+          } > release-notes.md
           echo "---- preview ----"; head -20 release-notes.md
 
       - name: Create Draft Release

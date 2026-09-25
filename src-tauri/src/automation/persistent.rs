@@ -29,6 +29,7 @@ use serde::Serialize;
 use super::provider::{self, Tick, TickOutcome};
 use super::AllowedScripts;
 use crate::config::PersistentAction;
+use crate::i18n;
 use crate::log;
 use crate::platform::NetworkPlatform;
 
@@ -158,7 +159,7 @@ pub(crate) fn await_tick(tick: Arc<dyn Tick>, budget: Duration, busy: &Arc<Atomi
         // sender 消失而没交回结果 = tick 线程 panic 了。闸已由 Gate 打开。
         Err(RecvTimeoutError::Disconnected) => TickWait {
             started: true,
-            outcome: Some(TickOutcome::Faulted("检查线程异常退出".to_string())),
+            outcome: Some(TickOutcome::Faulted(i18n::t("act.check_thread_died"))),
         },
     }
 }
@@ -218,9 +219,9 @@ fn run_worker(
         let (state, error) = if !wait.started {
             (
                 WorkerState::Overdue,
-                Some(format!(
-                    "上一次检查（预算 {} 秒）仍未结束，本次核对已跳过",
-                    budget.as_secs()
+                Some(i18n::tf(
+                    "act.tick_overlap",
+                    &[("secs", &budget.as_secs().to_string())],
                 )),
             )
         } else {
@@ -230,9 +231,9 @@ fn run_worker(
                 Some(TickOutcome::Faulted(e)) => (WorkerState::Faulted, Some(e)),
                 None => (
                     WorkerState::Overdue,
-                    Some(format!(
-                        "超过 {} 秒未完成，已不再等待（检查可能仍在进行）",
-                        budget.as_secs()
+                    Some(i18n::tf(
+                        "act.check_timeout",
+                        &[("secs", &budget.as_secs().to_string())],
                     )),
                 ),
             }
@@ -265,14 +266,20 @@ fn run_worker(
 fn log_transition(profile: &str, label: &str, state: WorkerState, error: Option<&str>) {
     let who = format!("{} · {}", profile, label);
     match state {
-        WorkerState::Repaired => log::info(&format!("常驻动作已恢复目标状态: {}", who)),
-        WorkerState::Faulted => log::warn(&format!(
-            "常驻动作未能恢复目标状态: {} : {}",
-            who,
-            error.unwrap_or("未知原因")
+        WorkerState::Repaired => {
+            log::info(&i18n::tf("act.worker_repaired", &[("who", &who)]))
+        }
+        WorkerState::Faulted => {
+            let why = error
+                .map(str::to_string)
+                .unwrap_or_else(|| i18n::t("act.unknown_reason"));
+            log::warn(&i18n::tf("act.worker_faulted", &[("who", &who), ("error", &why)]));
+        }
+        WorkerState::Overdue => log::warn(&i18n::tf(
+            "act.worker_overdue",
+            &[("who", &who), ("error", error.unwrap_or(""))],
         )),
-        WorkerState::Overdue => log::warn(&format!("常驻动作检查超期: {} : {}", who, error.unwrap_or(""))),
-        WorkerState::Satisfied => log::info(&format!("常驻动作恢复正常: {}", who)),
+        WorkerState::Satisfied => log::info(&i18n::tf("act.worker_satisfied", &[("who", &who)])),
         WorkerState::Pending => {}
     }
 }

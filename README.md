@@ -1,5 +1,7 @@
 # NetSense
 
+**English** · [简体中文](README.zh.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
+
 A cross-platform network **Profile** manager for macOS, Windows and Linux.
 
 Each Profile answers three questions: *which network am I on?* (`Rules` / `Conditions`), *what
@@ -29,11 +31,12 @@ network ──▶ │  Rule = enabled Conditions ANDed         │ ──▶ 1 m
 - **Applying is one barrier (3A)**: IPv4 / netmask / gateway / DNS / IPv6 and static routes go out
   together, and — when the branch configures `verify` — come back verified by reading the system
   state, optionally plus an ICMP/HTTP health probe that reverts to DHCP if the network keeps failing.
-- **Automation (3B) runs only after 3A passed.** One-shot actions (`launch_app`, `run_script`)
-  execute in `priority` batches — lower first, equal priorities concurrent, a batch finishes
-  before the next starts, and a failure inside one batch does not block the later ones. A match
-  failure (Conflict) and an execution failure (Error) are two different states and are reported
-  separately.
+- **Automation (3B) runs only after 3A passed.** One-shot actions (`launch_app`, `run_script`,
+  `set_default_printer`) execute in `priority` batches — lower first, equal priorities concurrent,
+  a batch finishes before the next starts, and a failure inside one batch does not block the later
+  ones. Setting a default printer touches only *your* default, so switching networks never raises an
+  authorization prompt. A match failure (Conflict) and an execution failure (Error) are two different
+  states and are reported separately.
 - **Detection is per Profile**: react to network events, poll on an interval, or both, each with
   its own change delay — so a flaky reconnect does not rewrite the adapter repeatedly.
 - **Persistent actions hold a state instead of repeating a command.** Each enabled one gets its own
@@ -48,20 +51,27 @@ network ──▶ │  Rule = enabled Conditions ANDed         │ ──▶ 1 m
   a separate THEN and ELSE branch.
 - Read-back verification and health monitoring, configured per branch inside the apply step, so a
   Profile only reports "applied" when the system agrees it did.
-- Tray popup panel: live state, every active interface, VPN tunnels, one-click Profile switching
-  with match badges, language switch. Left-click opens it, it collapses on blur, right-click gives
-  the native menu.
+- Tray popup panel: the network actually in use (interface, SSID + signal, MAC,
+  IPv4 / netmask / gateway / IPv6 / DNS), the other active interfaces, VPN tunnels, one-click
+  Profile switching with match badges, and every entry point - settings, logs, DHCP, probe,
+  update, quit. Any click on the icon opens it, blur collapses it; there is no native tray menu.
 - A configuration editor covering the whole model — Rules, Conditions, 3A, routes, actions, ELSE
   and the global fallback — with the engine's live verdicts rendered in place.
+- A software settings window, holding the settings that are not about any network: interface language,
+  launch at login (read from the operating system every time the window opens, never from a copy in a
+  file), where `config.json` and the logs live, and how many days of logs to keep.
 - Passwordless where it can be: a macOS `sudoers` allow-list installed once, an elevated Windows
   run, or `sudo -n` on Linux. Where it cannot, NetSense falls back to the system authorization
   dialog instead of failing.
 - Online upgrade: checks GitHub Releases and picks this platform's asset. A Homebrew install
   upgrades through `brew upgrade --cask` and never downloads anything; otherwise NetSense downloads
-  the asset and installs it only once its SHA256 matches this release's `SHA256SUMS` — if that check
-  cannot be made, the update stops and you are pointed at the release page instead.
+  the asset and installs it only once its SHA256 matches this release's `SHA256SUMS` — when that check
+  cannot be made (the release has no `SHA256SUMS`, this asset is not listed in it, or it cannot be
+  fetched), the update stops and you are pointed at the release page instead.
 - Five interface languages (English, 简体中文, 繁體中文, 日本語, 한국어), validated for parity;
-  English is the default.
+  English is the default. Every window on every platform follows the selection — tray panel, editor,
+  settings, log viewer, the tray tooltip and the native error dialogs included — and a static-text
+  check in `scripts/validate.py` keeps it that way.
 
 ## Tech stack
 
@@ -116,14 +126,23 @@ sh scripts/install-priv-helper.sh
 ```bash
 python3 scripts/validate.py    # JSON, i18n parity and placeholders in 5 languages, key usage in both
                                # directions, PAL boundary, trait coverage on all 3 platforms,
-                               # tauri.conf.json fields, version consistency, docs↔code alignment
+                               # tauri.conf.json fields, version consistency, docs↔code alignment,
+                               # and that every UI string comes from the dictionary
 node scripts/editor-smoke.mjs  # the editor's data binding, headlessly (needs Node, no build step)
 cd src-tauri && cargo test     # pure bin crate — use `cargo test`, not `--lib`
 ```
 
-NetSense lives in the tray: left-click for the panel, right-click for the menu (settings · open log
-folder · set current network to DHCP · probe now · quit, under read-only rows that show the live
-interfaces and tunnels). Its configuration is a single `config.json` next to the NetSense executable;
+NetSense lives in the tray: click the icon - either button - for the panel, which carries every entry
+point (settings · open log folder · set current network to DHCP · probe now · quit) above the live
+interfaces and tunnels it shows. It is configured by two files, because the two kinds of setting have
+nothing in common. Which network gets which treatment is the automation configuration, a single
+`config.json` you edit in the editor window. How the application itself behaves - interface language,
+log retention, launch at login - is the software configuration, `settings.json`, edited in the settings
+window that the panel's "Settings" button opens; changing it never re-applies a network setting.
+`config.json` and `settings.json` both sit in NetSense's own per-user directory —
+`~/Library/Application Support/NetSense` on macOS, `%APPDATA%\NetSense` on Windows,
+`~/.config/netsense` on Linux — and never next to the executable: a signed macOS bundle and a
+read-only `Program Files` must not be written to. Logs go to NetSense's per-user log directory.
 `config.example.json` is a complete worked example.
 
 > On Windows the first network change prompts for UAC once. Running as administrator once removes
@@ -134,7 +153,6 @@ interfaces and tunnels). Its configuration is a single `config.json` next to the
 ```jsonc
 {
   "schema": 1,
-  "language": "en",
   "allowed_scripts": ["/opt/ops/office-init.sh"],
   "profiles": [{
     "id": "office", "name": "Office_5G", "enabled": true,

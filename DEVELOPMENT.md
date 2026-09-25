@@ -25,7 +25,7 @@
 
 ```
 ┌─────────────────────────────────────────────┐
-│ Frontend  popup.html（状态面板）· editor.html（配置编辑器）
+│ Frontend  popup.html（状态面板）· settings.html（软件设置）· editor.html（自动化配置编辑器）· logs.html（日志窗口）
 ├─────────────────────────────────────────────┤
 │ App Shell  Tauri: window + system tray + event loop + IPC (ipc.rs / state.rs / tray.rs)
 ├─────────────────────────────────────────────┤
@@ -43,7 +43,7 @@
 │   3B1 automation/one_shot: 过滤 disabled → 按 priority 分批（同批并发，批完才下一批）
 │   3B2 automation/persistent: 期望状态 worker，随 Active 的 THEN 起停（automation/provider 出语义）
 ├─────────────────────────────────────────────┤
-│ PAL  platform.rs: trait NetworkPlatform（15 方法）+ 编译期选平台
+│ PAL  platform.rs: trait NetworkPlatform（18 方法）+ 编译期选平台
 ├───────────────────┬────────────────┬────────────┤
 │ macOS             │ Windows        │ Linux      │
 │ networksetup      │ PowerShell CIM │ nmcli      │
@@ -56,7 +56,7 @@
 Runtime flow：`detection` 决定「什么时候重新采样并求值」（每个 Profile 自带 mode / change_delay / poll_interval），
 `engine::pass` 做一次全量求值，`reconcile` 负责 0/1/2+ 三种结果的落地，`manual_apply` 是「立即应用」的唯一入口
 （它**同样**先评估该 Profile 自己的条件，冲突时直接拒绝）。所有平台 I/O 都在引擎线程或
-`#[tauri::command(async)]` 的线程上跑，主线程只负责建窗口与托盘菜单。
+`#[tauri::command(async)]` 的线程上跑，主线程只负责建窗口与托盘图标。
 
 ---
 
@@ -72,9 +72,11 @@ netsense/
 │   └── src/
 │       ├── main.rs            # entry: build window/tray/popup/register commands, start the engine thread
 │       ├── popup.rs           # status-bar popup panel: position / show-hide / blur-collapse + debounce
-│       ├── tray.rs            # tray menu (rebuilt via run_on_main_thread; shows Active / Conflict / None)
+│       ├── tray.rs            # tray icon only: any button click toggles the popup panel (no native menu)
 │       ├── state.rs           # AppState（config/engine 锁、config_path、广播）+ status_payload
-│       ├── ipc.rs             # 20 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── paths.rs           # 用户级数据目录（配置/日志）解析；exe 同级只作兜底来源
+│       ├── appconfig.rs       # 软件配置 settings.json（语言 / 日志保留）+ 三平台开机启动（问系统，不猜文件）
+│       ├── ipc.rs             # 32 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -107,6 +109,8 @@ netsense/
 ├── frontend/
 │   ├── popup.html             # status-bar popup panel (window label = popup)
 │   ├── editor.html            # config editor (window label = main)
+│   ├── settings.html          # 软件设置窗口（窗口 label = settings）：语言 / 开机启动 / 配置与日志位置
+│   ├── logs.html              # 日志窗口（窗口 label = logs）：按天文件下拉 / 尾部行 / 级别上色 / 过滤 / 跟随
 │   ├── README.md              # frontend notes + IPC command table
 │   └── serve.sh               # dev static server on :1420
 ├── scripts/
@@ -123,7 +127,7 @@ netsense/
 │   └── sandbox-bootstrap.sh   # gnu-target cross-compile verification in MSVC-less env (dev-only)
 ├── .github/workflows/build.yml# ★ three-platform matrix build: push a tag → win/mac/linux installers
 ├── app-icon.png               # ★ icon artwork master (1024², square, opaque) — edit this + rerun gen_icons.py
-├── config.example.json        # config template (with new fields)
+├── config.example.json        # config template (schema 1)
 ├── DEVELOPMENT.md             # this file
 ├── README.md
 ├── LICENSE
@@ -141,6 +145,10 @@ pub trait NetworkPlatform: Send + Sync {
     fn get_current_ssid(&self) -> Option<String>;
     fn get_status(&self) -> InterfaceStatus;
 
+    /// 3A 读回校验用的快照：默认转 `get_status`，做了进程级缓存的实现**必须**覆盖它 ——
+    /// 校验每 800ms 采一次样，比快照的 TTL 短，不覆盖就等于四次采样只有两次真的去问系统。
+    fn fresh_status(&self) -> InterfaceStatus { self.get_status() }
+
     /// 下发 3A 网络配置（IP/掩码/网关/DNS/IPv6）。参数是 `NetworkConfig` 而**不是**整个
     /// Profile —— 否则「下发」这层就看得见匹配条件与动作，跨层依赖又长回来了。
     /// `dns` 是三态的：缺失 = 不产生任何 DNS 操作，空串 = 清空。三份实现都得守住。
@@ -150,7 +158,7 @@ pub trait NetworkPlatform: Send + Sync {
     fn set_dhcp(&self) -> Result<(), String>;
 
     /// 枚举当前在用的全部网卡（有线 / 无线 / VPN）。实现必须经 `cached_nics` 包一层
-    /// TTL 缓存：托盘菜单刷新调它很频繁，而 macOS 15.6+ 枚举一次要 1–4 秒。
+    /// TTL 缓存：面板刷新调它很频繁，而 macOS 15.6+ 枚举一次要 1–4 秒。
     fn list_interfaces(&self) -> Vec<NicInfo>;
     /// 按**设备名**切回 DHCP；默认回落到 `set_dhcp()`（主无线网卡语义），
     /// 能定位适配器/连接的平台应覆盖它，否则改动会落到另一张网卡上。
@@ -172,6 +180,14 @@ pub trait NetworkPlatform: Send + Sync {
     fn launch_app(&self, app: &str, args: &[String]) -> Result<(), String>;
     /// 受 allow-list 约束（automation 层先校验再调用）；elevated 走提权通道
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String>;
+
+    /// 本机打印机清单（编辑器「设为默认打印机」的候选，含当前默认的那台）。
+    /// 枚举不到就返回空表 —— 没装打印系统的机器是正常状态，不是错误。
+    fn list_printers(&self) -> Vec<PrinterInfo>;
+    /// ⚠️ 三个平台都只改**当前用户**的默认打印机（macOS/Linux 写 `~/.cups/lpoptions`，
+    /// Windows 走 `Win32_Printer` 的 `SetDefaultPrinter` 方法），不提权：切网络是高频事件，
+    /// 每切一次弹一次授权框不可接受。理由同 `tunnel_connect`。
+    fn set_default_printer(&self, printer: &str) -> Result<(), String>;
 
     /// 系统已保存的无线网络列表（编辑器「尚未配置的网络」用）。不支持则 `None`。
     fn list_known_ssids(&self) -> Option<Vec<String>>;
@@ -195,14 +211,30 @@ Cross-platform implementation notes:
 | ICMP probe | system `ping -c 1 -t <s>` | system `ping -n 1 -w <ms>` | system `ping -c 1 -W <s>` |
 | Add route | `route -n add -net` | `New-NetRoute` / `Remove-NetRoute` (CIM) | `ip route add` / `ip route del` |
 | Launch app | `open -a` (`--args` after the app) | `Start-Process -FilePath` | direct exec, else `xdg-open` |
+| List printers (3B1) | `lpstat -e` + `lpstat -d` (CUPS client) | `Get-CimInstance Win32_Printer` (`Name`, `Default`) | `lpstat -e` + `lpstat -d` (same parser as macOS) |
+| Set default printer (3B1) | `lpoptions -d <name>` → `~/.cups/lpoptions` | `Invoke-CimMethod -MethodName SetDefaultPrinter` | `lpoptions -d <name>` → `~/.cups/lpoptions` |
 | Tunnel state (3B2) | `scutil --nc list` (WireGuard for macOS registers each tunnel as a NEVPN config, so it shows up there too) | `Get-NetAdapter` (CIM; the adapter **description** carries the provider hint) | `nmcli -t connection show` → fall back to `ip link show <dev>` |
 | Connect tunnel (3B2) | `scutil --nc start <label>` | `wireguard.exe /installtunnelservice <conf>` for WireGuard, `rasdial <name>` for system VPN | `nmcli connection up <name>` → `ip link set <name> up` |
 
-⚠️ The last row never goes through the elevation channel. A worker calls it every
+⚠️ The two tunnel rows never go through the elevation channel. A worker calls them every
 `interval_secs`; an authorization prompt on that path means the user is interrupted every N seconds,
 which is exactly what §8 rule "persistent workers never elevate" exists to prevent. When the system
 refuses for permission reasons the platform layer returns the error verbatim and the editor surfaces it —
 the user decides whether to grant a passwordless channel or connect manually.
+
+`set_default_printer` holds the same line for the same reason, and CUPS makes it easy: `lpoptions -d`
+writes the **per-user** default into `~/.cups/lpoptions`, and Windows' `SetDefaultPrinter` CIM method is
+per-user too, so no leg needs admin. The "which one is default" marker in the editor's candidate list
+comes from `lpstat -d`, i.e. the destination CUPS resolves for this user — it is display only, the
+action itself always targets the printer **by name**, so a disagreement there can never send the write
+to the wrong machine.
+
+Two parser details carry weight. The default's name is taken from the text **after the last colon** in
+`lpstat -d`, never by matching its English label: CUPS translates that sentence, and a locale-dependent
+parse would quietly report "no default" on a localized system. On Windows the name is compared with
+`Where-Object { $_.Name -eq $want }` rather than a WQL `-Filter`, which keeps the user-supplied name
+inside a single PowerShell string literal — one less layer of quoting for a value that comes from a
+config file.
 
 One Linux trap worth keeping in the docs: `ip link show` prints `state UNKNOWN` for a **working**
 WireGuard interface (the kernel classifies it as non-broadcast / no-carrier). Readiness is decided from
@@ -227,7 +259,7 @@ Rule    = (all *enabled* Conditions ANDed)
   simply `NOT MATCHED` forever; `Config::validate()` rejects such a Profile at load time instead.
 - Exactly one match → that Profile is Active. Zero matches → No Active Profile (+ top-level `fallback`).
   Two or more → **Conflict**: no Profile is applied, the engine broadcasts `netsense://conflict`, and the
-  tray/popup/editor all show CONFLICT badges. Nothing in the codebase may auto-pick a winner; the
+  popup and editor both show CONFLICT badges. Nothing in the codebase may auto-pick a winner; the
   regression test `engine::tests::conflict_never_picks_a_winner` is there to keep it that way.
 - Manual "Apply now" (`engine::manual_apply`) re-evaluates *that Profile's own* conditions — it is not a
   bypass. It refuses a disabled Profile, and refuses during a conflict with `engine.conflict_blocked`.
@@ -254,14 +286,18 @@ different is rejected with an actionable error, **not** migrated: the loader can
 file means when two Profiles match at once, and guessing would push a static IP nobody confirmed onto
 the user's NIC. Rewriting by hand against `config.example.json` is the documented path.
 
+这份文件里只有**自动化配置**。界面语言与日志保留天数属于软件配置，存在同一目录下的 `settings.json`
+（`appconfig.rs`），判据是一句话：「改了它会改变自动化行为吗？」—— 不会的都不进 `config.json`。
+因此改语言既不会触发热重载，也不会让引擎重新评估一次网络；反过来，编辑器保存 `config.json`
+也不会顺手改掉用户的界面语言。
+
 ```jsonc
 {
   "schema": 1,
-  "language": "en",
   "allowed_scripts": ["/opt/ops/office-init.sh"],   // security boundary: global, not per-Profile
   "profiles": [
     {
-      "id": "office", "name": "Office_5G", "enabled": true,
+      "id": "office", "name": "Office_5G", "enabled": true, "quick": true,  // quick: shows up in the panel's Quick Switch
       "detection": {                                  // per Profile, not global
         "mode": "network_events_and_polling",         // | network_events | polling_only
         "change_delay_secs": 5, "poll_interval_secs": 30
@@ -290,7 +326,10 @@ the user's NIC. Rewriting by hand against `config.example.json` is the documente
             "action": { "type": "launch_app", "app": "/Applications/Slack.app" } },
           { "id": "a2", "enabled": true, "priority": 1,
             // relative → resolved against the config dir, then allow-listed (see §8)
-            "action": { "type": "run_script", "path": "scripts/office-vpn.sh", "elevated": false } }
+            "action": { "type": "run_script", "path": "scripts/office-vpn.sh", "elevated": false } },
+          { "id": "a3", "enabled": true, "priority": 2,
+            // the printer's *name* as the system knows it — the editor lists them (see §8)
+            "action": { "type": "set_default_printer", "printer": "Office LaserJet" } }
         ],
         "persistent": [                               // 3B2 — one worker each, started with Active's THEN
           { "id": "p1", "enabled": true, "priority": 1,
@@ -328,7 +367,7 @@ Key modelling points, each of which is easy to get wrong:
   non-IPv4 DNS, routes without a gateway unless `delete`). It also checks the 3B/health **payloads**, because a
   half-filled action fails as "nothing happened" rather than as an error: action `id`s must be unique across a
   branch's `one_shot` **and** `persistent` together (`EngineView.last_run` and `EngineView.workers` find their
-  card by id, so a collision would report two actions as one), `launch_app.app` / `run_script.path` / `periodic_script.path` /
+  card by id, so a collision would report two actions as one), `launch_app.app` / `run_script.path` / `set_default_printer.printer` / `periodic_script.path` /
   `keep_wireguard_connected.tunnel` / `keep_vpn_connected.provider` + `profile` must be non-empty,
   `interval_secs > 0`, and an **enabled** `verify.health` must have a target for its `mode` plus non-zero
   `interval`/`retries`/`timeout` (a disabled health block is left alone — writing the parameters before
@@ -419,14 +458,16 @@ triggers zero commands, the allow-list refusal, labels / budgets).
 
 **Per-platform action semantics** — the trait doc in `platform.rs` is the contract
 (`launch_app` = *hand it off*, never wait for the app to exit; `run_script` = *wait*, its exit code is the
-result; `elevated` always goes through the system's own authorization UI, exactly once per action). How
+result; `elevated` always goes through the system's own authorization UI, exactly once per action;
+`set_default_printer` = a **per-user** preference write, so it never touches the elevation channel — a
+network switch happens without the user asking, and a dialog on that path is unacceptable). How
 each backend meets it, since each divergence here has already cost one bug:
 
-| | `launch_app` | `run_script` | `run_script` + `elevated` |
-|---|---|---|---|
-| macOS | `open -a App` (`--args` when there are arguments); returns once LaunchServices accepted, so an app that is **already running** ignores the arguments | `exec` the path, wait | one `osascript … with administrator privileges` dialog |
-| Windows | `Start-Process -FilePath` without `-Wait`: "process created" is all it can claim | by extension: `.ps1` → `powershell -File`, `.bat`/`.cmd` → `cmd /c`, anything else executed directly | one UAC prompt for the target itself (`run_elevated_target`) |
-| Linux | executable → detached `spawn`; otherwise `xdg-open`, which takes **one** argument and cannot pass any | `exec` the path, wait | `sudo -n`, falling back to `pkexec` |
+| | `launch_app` | `run_script` | `run_script` + `elevated` | `set_default_printer` |
+|---|---|---|---|---|
+| macOS | `open -a App` (`--args` when there are arguments); returns once LaunchServices accepted, so an app that is **already running** ignores the arguments | `exec` the path, wait | one `osascript … with administrator privileges` dialog | `lpoptions -d <name>`: CUPS writes the **per-user** default to `~/.cups/lpoptions`; an unknown name exits 1 and its stderr becomes the failure text |
+| Windows | `Start-Process -FilePath` without `-Wait`: "process created" is all it can claim | by extension: `.ps1` → `powershell -File`, `.bat`/`.cmd` → `cmd /c`, anything else executed directly | one UAC prompt for the target itself (`run_elevated_target`) | `Invoke-CimMethod -MethodName SetDefaultPrinter` on the `Win32_Printer` row whose `Name` matches exactly; no such row or `ReturnValue ≠ 0` → a non-zero exit plus a message |
+| Linux | executable → detached `spawn`; otherwise `xdg-open`, which takes **one** argument and cannot pass any | `exec` the path, wait | `sudo -n`, falling back to `pkexec` | same CUPS client command as macOS (`lpoptions -d <name>`), so the same per-user semantics |
 
 Three details that are not guessable from the outside:
 - `open -a App X` means "open file X *with* App", and an X starting with `-` is eaten by `open` itself →
@@ -539,20 +580,22 @@ unsigned package replacing an installed *signed* one.
 
 ## 9.5 Status-Bar Popup Panel (primary interaction entry)
 
-The standard menu-bar app interaction: **left-click the icon to pop the panel, auto-collapse on blur, right-click for the native menu**.
+The standard menu-bar app interaction: **click the icon (either button) to toggle the panel, auto-collapse on blur**. There is no native tray menu - see §3 `tray.rs`.
 
 ### Window layout (`tauri.conf.json`)
 
 | label | file | key config |
 |-------|------|------------|
 | `popup` | `popup.html` | `360×620`, `decorations: false`, `alwaysOnTop`, `skipTaskbar`, `visible: false` |
-| `main` (editor) | `editor.html` | `1180×700`（`minWidth 980 / minHeight 560`）, `center`, `visible: false` (shown on demand, no window at startup) |
+| `main` (editor) | `editor.html` | `1180×700`（`minWidth 980 / minHeight 560`）, `center`, `visible: false`（以隐藏态创建，`setup` 里紧接着 `popup::show_main` 把它显示出来 —— 启动就能看到编辑器） |
+| `settings` | `settings.html` | `620×600`（`minWidth 480 / minHeight 420`）, `center`, `visible: false`（面板的「设置」打开它；关闭 = 隐藏，同编辑器） |
+| `logs` | `logs.html` | `900×620`（`minWidth 620 / minHeight 420`）, `center`, `visible: false`（面板的「日志」打开它；关闭 = 隐藏，同上） |
 
-Both windows are created at startup and only shown/hidden — the webview is **not rebuilt on every click** (guarantees instant open).
+All four windows are created at startup and only shown/hidden — the webview is **not rebuilt on every click** (guarantees instant open). 四个 label 都必须在 `capabilities/default.json` 的 `windows` 里登记，否则那扇窗口的每一次 `invoke` 都被 ACL 拒掉、界面永远空白。
 
 ### Show/hide & positioning (`src-tauri/src/popup.rs`)
 
-1. **Trigger**: `TrayIconBuilder::show_menu_on_left_click(false)` makes left-click stop popping the native menu and instead dispatch `TrayIconEvent::Click{Left, Up}` → `popup::toggle()`; right-click still shows the menu.
+1. **Trigger**: the tray has **no native menu** — `TrayIconEvent::Click{Left|Right, Up}` always dispatches to `popup::toggle()`. One icon, one behavior, identical on all three platforms (macOS would otherwise wait for a menu on right-click, and there is none).
 2. **Positioning**: take the event's `rect` (physical icon rectangle) → anchor = icon horizontal center + vertical bottom edge, then shift `y` down 6px; finally `clamp` using `current_monitor()`'s position/size to prevent the panel from going off-screen on edges or external displays.
 3. **Blur-collapse**: in `Builder::on_window_event`, watch `WindowEvent::Focused(false)` with label `popup` → `popup::hide()`.
 4. **Debounce (key detail)**: when clicking the icon to collapse the panel, blur fires a hide first, then the tray click opens it again — appearing as "one click flickers". `popup.rs` records the collapse moment with `LAST_HIDE: Mutex<Option<Instant>>` and ignores tray clicks within 300ms.
@@ -560,18 +603,42 @@ Both windows are created at startup and only shown/hidden — the webview is **n
 
 ### Panel content (`frontend/popup.html`)
 
-Connection status dot + SSID, current-profile line (three-way: Active name / **Conflict: names** in amber /
-"No profile applied"), IPv4 / DNS / signal, privilege-channel badge (passwordless / per-auth), VPN and NIC
-cards from `get_interfaces`, and a quick-switch list of Profiles **with live status badges**
-(`ACTIVE` / `NOT MATCH` / `CONFLICT` / `DISABLED` / `ERROR`) — clicking a row calls `apply_profile({id})`,
-which re-evaluates that Profile's own conditions rather than forcing anything. Bottom:
-"open editor / logs / DHCP / probe / check for updates / quit".
+Three sections, all fed by `get_status` + `get_interfaces` (rows whose value is missing collapse, so
+nothing shows a wall of `—`):
+1. **Current network** — status dot in the header, then applied profile (three-way: Active name /
+   **Conflict: names** in amber / "No profile applied"), last 3B1 run, maintained 3B2 workers, and the
+   details of *the NIC actually in use*: interface, SSID + signal (only when it is wireless), MAC, IPv4,
+   netmask, gateway, IPv6, DNS. `get_interfaces` guarantees the primary NIC is `nics[0]`
+   (the single judge is `automation::primary_nic`), so the frontend never re-implements "which NIC is mine".
+   Below it, "Other active interfaces" lists the remaining non-VPN NICs as cards.
+2. **VPN / virtual adapters** — one card per VPN NIC (owning app shown as the tag).
+3. **Quick Switch** — only Profiles whose `quick` flag is set (a per-profile editor checkbox), each row **with a live status badge**
+   (`ACTIVE` / `NOT MATCH` / `CONFLICT` / `DISABLED` / `ERROR`) — clicking a row calls `apply_profile({id})`,
+   which re-evaluates that Profile's own conditions rather than forcing anything.
+Bottom: "settings / logs / DHCP / probe / check for updates"; the header keeps quit only. The
+privilege channel is **not** shown here: it is troubleshooting info, and next to an unreadable SSID it read
+as if *reading* the SSID needed authorization —— 它现在显示在软件设置窗口的「运行信息」里。
 On each focus (when opened) it auto-refreshes via `get_status`, and also passively refreshes by subscribing to the `netsense://status` event.
+
+### Software settings window (`frontend/settings.html`, label `settings`)
+
+面板的「设置」打开的是**软件设置**，不是编辑器 —— 两份配置各有一个入口，编辑器从这座窗口里再进去
+（`open_settings` → 窗口内 `open_editor`）。窗口内容一次问一次：`get_app_settings` 返回语言、开机启动的
+**系统实况**、`config.json` / `settings.json` / 日志目录三个路径、日志保留天数与其上下限、提权通道、平台、版本。
+
+- **语言切换必须一次点击就看得见**：`set_language` 之后立刻重拉 `get_strings` 并重绘本窗口，其余窗口靠
+  `netsense://status` 广播跟随（面板比较 `status_payload.language`，只在真的变了时才重取词表）。托盘 tooltip
+  是建托盘时当场求值的字符串，广播到不了它，所以同一条命令里还要显式重设（`tray::refresh_tooltip`）；已经写进
+  日志和动作历史的那些句子保持写下时的语言，见 §10.1。
+- **开机启动**勾选框每次窗口获得焦点都重问一次系统：用户可能刚从系统设置或注册表里动过它，读缓存会让这个
+  勾选框说谎。写失败时把勾选框回滚到原值，而不是让它显示一个系统没答应的状态。
+- **保留天数**由 `set_log_retention` 落盘并立刻按新窗口清一次；命令回的是**夹紧后**的值，输入框按回显走，
+  所以「填 9999」不会在界面上留下一个系统其实没有的值。
 
 ### Points needing real-device verification (cannot verify locally)
 
 - After `ActivationPolicy::Accessory` takes effect, whether `window.set_focus()` can give the panel keyboard focus, thus reliably triggering blur-collapse. If clicking outside on macOS does not collapse, append an "activate app" call after show.
-- `show_menu_on_left_click` is named `menu_on_left_click` in some Tauri 2.x versions; rename per the compiler hint if it errors.
+- Whether right-click on the macOS menu-bar icon delivers `TrayIconEvent::Click` at all (without a menu attached it can fall through to the system's own behavior); if it does not, left-click alone opens the panel — acceptable, not a fallback menu.
 - The `rect` field of `TrayIconEvent::Click` exists only in newer versions; if absent, use the same event's `position` (click coordinates) as the anchor — `popup::toggle`'s parameters are unchanged.
 - The tray `rect` is physical pixels under Retina; anchor conversion already handles physical pixels. If the panel is offset by half an icon width, the platform returned logical coordinates — convert by scale factor instead.
 
@@ -636,8 +703,8 @@ Rules that follow from it:
 4. **`connected` must not be derived from the SSID alone.** When SSID is unreadable (15.6+,
    or an unauthorized process) the UI would claim "not connected" while holding an IP, and
    SSID-keyed profiles would never match. It is `ssid.is_some() || ipv4.is_some()`.
-5. **Nothing that samples status may run on the main thread**: the tray menu is built there,
-   so `publish_status()` samples once and passes the snapshot in, and the commands that
+5. **Nothing that samples status may run on the main thread**: the tray icon and the windows are
+   built there, so `publish_status()` samples once per broadcast, and the commands that
    sample (`get_status`, `get_interfaces`, `check_update`, `run_update`, and every command that
    posts to the engine) carry `#[tauri::command(async)]` — in Tauri, a *non-async* command runs on
    the main thread.
@@ -660,7 +727,7 @@ Rules that follow from it:
 4. **Never slice a `&str` by byte offset — command output is *lossily* decoded.**
    CP936 Chinese becomes 3-byte `U+FFFD` (the `�` in logs), so `&line[i..i + 17]` panics the instant `i` lands inside one (`byte index N is not a char boundary`).
    `platform.rs::extract_mac` therefore scans `line.as_bytes()`, skips any window containing a non-ASCII byte, and only then builds the `&str`; the regression test uses the bytes captured from a real Chinese Windows box.
-   This is the failure mode that kills the app **before the window ever opened**: `build_tray` samples `get_status()` inside `setup()` (main thread), and `arp -a`'s Chinese interface header 「接口: 192.168.1.10 --- 0x10」 reached the scanner only because the gateway lookup used `line.contains(gw)` — and `"192.168.1.10"` contains `"192.168.1.1"`.
+   This is the failure mode that kills the app **before the window ever opened**: anything that samples `get_status()` inside `setup()` pays for it on the main thread, and `arp -a`'s Chinese interface header 「接口: 192.168.1.10 --- 0x10」 reached the scanner only because the gateway lookup used `line.contains(gw)` — and `"192.168.1.10"` contains `"192.168.1.1"`.
    Corollary: match IPs as **whole tokens**, never substrings (`has_ip_token`). Otherwise the row for `10.0.0.10` answers for gateway `10.0.0.1`, and you get a *different neighbour's* MAC.
 
 > **Status cache**: `resolve_current_name()` asks SSID + gateway MAC + BSSID at once, but each read on Windows spawns a PowerShell process (hundreds of ms).
@@ -680,30 +747,35 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 ### 10.1 i18n (`src-tauri/src/i18n.rs` + `i18n/*.json`)
 
 - 5 languages (zh / en / zh-TW / ja / ko), **`en.json` is the baseline**; dictionaries are embedded into the binary at compile time via `include_str!`, so no file is read at runtime and no packaging omission can occur.
-- Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` supports `{name}` placeholder substitution.
+- **English is the default on every platform, and any other language is a user choice** — nothing depends on a locale guess. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary.
+- Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`pal`/`act`/`net`/`upd`/`dlg` today, **455 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
-  `cargo test` includes three cases guarding parity: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace`.
-- Language switch: IPC `set_language` → write back to `config.language`; frontend `get_strings` pulls all strings at once, avoiding per-key invoke round-trips.
+  `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
+- Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
+  所以换语言不会触发热重载、更不会让引擎重新下发一次网络。前端 `get_strings` 一次拉走当前语言的全部文案，避免逐 key 往返 invoke。
 - Add new copy to all 5 languages together; delete from all 5 together.
-- **Current scale: 211 keys × 5 languages**, and every one of them is referenced. All copy in
-  `popup.html` / `editor.html` comes from the backend dictionary (templates embed no
-  i18n objects at all), so parity covers all UI copy.
-  `scripts/validate.py` checks key parity, that each key's `{placeholder}` set matches across
+- **界面文案只有一份来源。** Static markup carries `data-i18n` / `data-i18n-placeholder` / `data-i18n-title`, and one loop in each window maps them onto textContent / `placeholder` / `title`; `get_strings` pulls the whole dictionary once, while `get_language` only feeds `<html lang>` —— 那个属性是给读屏软件和 CJK 字形选择看的，不是查表用的。The English left in the markup is the *no-bridge fallback*, and it must equal `en.json` byte for byte: two copies of one sentence is how a UI starts showing text that then jumps when the dictionary lands.
+- **A string keeps the language it was written in.** Log lines, action-result chips, the tray tooltip and startup dialogs are point-in-time text: each is rendered once from whatever the current language was at that moment and is never re-translated afterwards. Switching language changes what comes next, not what is already on screen —— that is the invariant, not a bug. Which is also why `set_language` re-sets the tray tooltip through `tray::refresh_tooltip` instead of pretending the existing one can follow along.
+- `scripts/validate.py` checks key parity, that each key's `{placeholder}` set matches across
   languages, **and** the reference relation in both directions: a cited key must exist, and an
   existing key must be cited somewhere. The citation scan includes the frontend on purpose — before
   it did, a typo in `t("wrong.key", "fallback")` rendered the fallback and nothing complained, and
   the same blind spot is what lets dead keys pile up after their UI is gone.
-  The scan counts a dotted literal as a key only when its first segment is a known namespace
-  (`app/editor/engine/notify/popup/status/tray`), which is what keeps the editor's data-bind paths
-  (`"then.network.mode"`) out of the results; backtick-quoted text is ignored entirely, because the
-  frontend uses backticks for bind paths and Rust doc comments use them for identifiers.
+  The scan counts a dotted literal as a key only when its first segment is one of the namespaces above
+  (which is what keeps the editor's data-bind paths, `"then.network.mode"`, out of the results);
+  backtick-quoted text is ignored entirely, because the frontend uses backticks for bind paths and
+  Rust doc comments use them for identifiers.
+- Group [11] asks the opposite question: *is there copy that never entered the dictionary at all?* Four mechanical rules — prose in static markup must hang on a `data-i18n` element; the markup fallback must equal `en.json`; a multi-word string literal inside `<script>` must sit in a `t()`/`tf()` argument position; backend `log::*` / `win_dialog::*` calls must take `i18n::t`/`tf`, and no CJK literal may sit in Rust code. `i18n-exempt` (a `//` comment in Rust, an HTML comment that covers the following 8 lines) is how a file says *this is deliberately not copy*: the language options in settings show their own names (日本語 stays 日本語), the macOS code matches the Chinese hardware-port label a zh-CN system prints, and an `.expect(...)` message is for whoever reads the panic rather than for the UI.
+  Honest limitation: a **single** English word written bare in JS (`"Loading"`) is indistinguishable from an identifier, so that one case is not caught mechanically; multi-word prose is.
 
 ### 10.2 Logging (`src-tauri/src/log.rs`)
 
-- Path: `<same dir as config>/logs/netsense-YYYY-MM-DD.log`, **daily rotation, keep 7 days**, cleaned at startup and at day boundaries.
+- Path: the **user log dir** from `paths::user_log_dir()` — `~/Library/Logs/NetSense` (macOS) · `%LOCALAPPDATA%\NetSense\logs` (Windows) · `$XDG_STATE_HOME/netsense/logs`, defaulting to `~/.local/state/netsense/logs` (Linux). File name `netsense-YYYY-MM-DD.log`, **daily rotation**，保留天数由软件配置决定（默认 7 天，可设 1–365，见 §10.4），清理发生在启动时、跨天时、以及用户改动保留天数的那一刻。
+- A dir is only chosen if a write probe succeeds (`log::is_writable`), so a read-only location can't swallow the logs silently; the fallback is `<temp>/NetSense/logs`, and if even that fails `init()` returns `false` and everything degrades to stderr.
 - Global `OnceLock<Mutex<Logger>>` serializes writes, thread-safe; four levels `error/warn/info/debug`, and all four are written (the level is a line label, not a filter).
 - Logs before `init()` degrade to stderr, so early-startup failures are not lost.
-- `init(dir, true)`: the second arg is `to_stderr` — `true` in dev (terminal visible), can be `false` in release.
+- `init(dir, true, days)`: 第二个参数是 `to_stderr`（dev 为 `true`，终端里看得见；release 可为 `false`），第三个是保留天数。保留天数的后续变更走 `set_retention_days`，它立刻按新窗口清一次 —— 用户把 30 天改成 3 天时，期待的是「现在就少一些」，不是「下次启动再说」。
 
 ### 10.3 Config hot-reload (`engine.rs::reload_if_changed`)
 
@@ -714,9 +786,32 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - After a successful reload the scheduler's per-Profile timers are reset and the warnings are re-published
   into the engine view; the next pass re-evaluates everything. Whether 3A is re-pushed is decided by the
   **content fingerprint** (`Engine::is_blocked` / `applied_fp`): if the Profile's config didn't change, a
-  re-evaluation keeps Active without touching the NIC and **without re-running 3B1** (switching UI language
-  must not re-open Slack). If it did change, the engine logs `engine.reconfigure` and re-applies network
-  only.
+  re-evaluation keeps Active without touching the NIC and **without re-running 3B1**. If it did change, the engine logs `engine.reconfigure` and re-applies network
+  only. 界面语言不是这个文件的字段（它在 `settings.json`），所以「改菜单语言结果把 IP 重新下发了一遍」这条路径
+  在结构上就不存在，而不是靠 reload 里记得跳过某个字段。
+
+### 10.4 Software settings (`src-tauri/src/appconfig.rs`)
+
+`config.json` 决定网络怎么配，`settings.json` 决定这个应用怎么表现。两者的分界不是「哪些字段碰巧放在
+哪里」，而是一句判据：**改了它会改变自动化行为吗？** 不会的（语言、日志保留天数）才进软件配置。
+这条分界换来两个可验证的性质：编辑器保存不会改掉用户的界面语言，换语言也不会让引擎 Wake 重评估一次。
+
+- **位置**：`paths::settings_path()`，即用户配置目录下的 `settings.json`。与 `config_path()` 的差别是刻意的 ——
+  这里**没有**「可执行文件同级」那一档。那份兜底是为「仓库里带一份自动化配置跑一跑」准备的；语言与保留天数是
+  这台机器上这个用户的偏好，从源码树里带一份出来，等于让仓库替每个用户决定他的界面语言。
+- **读取时机**：主流程最开始（在 `log::init` 之前），因为日志要用它里面的保留天数；读不出来时不终止进程，
+  用默认值起界面并记一条 `app.settings_failed`。文件不存在 = 全部默认值；格式错误 = 一条会写进日志的 `Err`。
+- **只有两个字段**是故意的。第三个字段该不该进来，先问上面那句判据。
+- **开机启动不在文件里**：它的真相在操作系统里 —— macOS 是 `~/Library/LaunchAgents/com.netsense.app.plist`
+  （`RunAtLoad`），Linux 是 `$XDG_CONFIG_HOME/autostart/netsense.desktop`（变量未设时即
+  `~/.config/autostart/netsense.desktop`，桌面环境只按这个变量找条目），Windows 是
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的一个值。存一份布尔到 `settings.json` 只会造出
+  两个会说不同话的真相来源（用户可以在系统设置里把它关掉）。所以勾选框每次显示时都**问一次系统**：
+  读文件存在性，或跑一次 `reg.exe query`。问不出来时给 `autostart: false` + `autostart_error`，界面因此
+  不会显示一个假的关闭态还不给解释。生效后移是这一功能的定义而非缺陷：下次登录起生效，界面上写清楚。
+- **平台分支用运行时的 `std::env::consts::OS`**，不是 `#[cfg]`：三条分支因此在同一台 macOS 上就能
+  编译、lint、测试（含生成的 plist / `.desktop` / 注册表参数这些纯函数），而 `NetworkPlatform` trait 不必
+  为这一个功能长出一个方法。注册表值里的引号一律剥掉，路径不能把自己的值闭合出去再拼参数。
 
 ---
 
@@ -783,12 +878,17 @@ Inside the flow it first runs `python3 scripts/validate.py` (JSON / i18n parity 
 
 ### First run
 
-The **editor window opens at launch** — the unambiguous "the app actually started" signal. Closing it (`CloseRequested` → `prevent_close` + `hide`) returns the app to the tray *without* quitting; only the tray menu's **Quit** / the panel's quit button really exits (`request_quit` → `QUITTING`).
-Afterwards the app lives in the tray: **left-click the icon** opens the popup panel, right-click opens the menu (show editor / open log folder / privilege channel / quit).
+The **editor window opens at launch** — the unambiguous "the app actually started" signal. Closing it (`CloseRequested` → `prevent_close` + `hide`) returns the app to the tray *without* quitting; only the panel's **Quit** button really exits (`request_quit` → `QUITTING`).
+Afterwards the app lives in the tray: **click the icon** (either button) toggles the popup panel, which carries every entry point - software settings, logs, DHCP, probe, update, quit.
 On Windows a fresh tray icon usually starts in the **"hidden icons" overflow** (`^`) — pin it there if you want it always visible.
 On Windows the installers do not bundle the WebView2 runtime (`bundle.windows.webviewInstallMode = skip`), which keeps `setup.exe` down to a few MB. Windows 10 1803+ and Windows 11 already ship it; if it is genuinely missing, the app shows a dialog with the official download link rather than exiting silently.
-Config location: **`config.json` next to the exe** (falls back to the working directory if absent); copy `config.example.json` and rename to use.
-Logs: `<exe>/logs/` when that directory is writable, otherwise a user-writable fallback — `%LOCALAPPDATA%\NetSense\logs` (Windows), `~/Library/Logs/NetSense` (macOS), `$XDG_STATE_HOME/netsense/logs` (Linux), finally the system temp dir. The tray menu's **Open logs** always points at the directory actually in use. A panic hook writes panics into that same file, so a silent exit is never silent any more.
+两份文件都在**用户配置目录**里。自动化配置 `config.json`：由 `paths::config_path()` 解析 —— 先看用户配置目录那份
+（macOS `~/Library/Application Support/NetSense/config.json`、Windows `%APPDATA%\NetSense\config.json`、
+Linux `$XDG_CONFIG_HOME/netsense/config.json`，默认 `~/.config/netsense/`），那里还没有文件时退到**可执行文件同级**那份
+（开发期，或手工放进去的种子），两处都没有时仍返回用户目录那条路径，好让编辑器的第一次保存把目录建出来。
+软件配置 `settings.json`：只有用户目录这一档，**没有** exe 同级兜底（见 §10.4）。
+按用户存放意味着重装不掉配置，而签过名的 macOS `.app` 与只读的 `Program Files` 都不该被写入。把 `config.example.json` 复制一份改名即用。
+Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writable, otherwise `<temp>/NetSense/logs`. `scripts/` is resolved against the directory that actually holds the chosen `config.json`, so the README's "relative path = next to config.json" stays true wherever the config lives. The panel's **Logs** button opens the log window, and that window prints the directory it is really reading —— 目录可能被后端换过（用户目录不可写时退到临时目录），界面自己拼的那个路径会说谎。 A panic hook writes panics into that same file, so a silent exit is never silent any more.
 
 > **Windows prompts UAC once on the first network change.** To remove it: launch once as administrator (after that the in-process privilege channel shows "no authorization needed"). If you don't want to stay admin, accept one UAC per network change — this is the peer design of macOS's `osascript` fallback channel.
 
@@ -797,16 +897,20 @@ Logs: `<exe>/logs/` when that directory is writable, otherwise a user-writable f
 ## 12. Testing
 
 - **Platform-independent, run anytime**: `python3 scripts/validate.py`
-  10 checks: JSON validity of the 5 dictionaries, key parity, `{placeholder}` parity, i18n key references
+  11 checks: JSON validity of the 5 dictionaries, key parity, `{placeholder}` parity, i18n key references
   in **both** directions (a cited key must exist; an existing key must be cited — see §10.1), the PAL
   boundary (no concrete platform type outside `platform*`), trait
   coverage on all three platforms (by method name), `tauri.conf.json` field sanity, version consistency
   across VERSION / `tauri.conf.json` / `Cargo.toml` / the CHANGELOG's first numbered section (§13),
   **docs ↔ code** (§3's repository tree against the disk in both directions, every repo path a doc
-  quotes, the command table in `frontend/README.md` against `main.rs`, event names both ways) and
+  quotes, the command table in `frontend/README.md` against `main.rs`, event names both ways),
   **docs ↔ docs** (every number a doc states — key count, command count, language count, check count —
   equals its source, and the five README / CHANGELOG language copies stay structurally identical with
-  their technical tokens intact). Each check group is worth 10 points and the run prints a total out of
+  their technical tokens intact) and **UI text** (every string the interface can render comes from the
+  dictionary: a `data-i18n` reference must resolve, an unbound prose node is a failure, the English
+  markup must equal `en.json` byte for byte, backend `log::*` / `win_dialog::*` calls must not carry a
+  literal, and no CJK literal may sit in backend source — both rules accept an `i18n-exempt` marker).
+  Each check group is worth 10 points and the run prints a total out of
   100; CI treats anything below full marks as a failure.
 - **Unit**: `cargo test` — all pure std (no tokio, no real system commands); the exact count differs
   slightly per OS because a handful of PAL tests are `#[cfg]`-gated, so it is deliberately not pinned here:
@@ -826,12 +930,15 @@ Logs: `<exe>/logs/` when that directory is writable, otherwise a user-writable f
   `network` + `network::readback` (Failed carries the reason that blocks 3B; each readback expectation
   including "cleared DNS must not be compared against DHCP servers"),
   `automation` (allow-list trust rules incl. which directory a relative script path is anchored to,
-  batch grouping),
+  batch grouping, and what each action reports on the UI — label text, and the printer action being
+  budgeted like a local handoff rather than like a script),
   `automation::provider` (an up tunnel issues no connect, labels/budgets come from the action, a script
   outside the allow-list is reported rather than run),
   `automation::persistent` (the self-overlap gate opens on both the panic and the finish path, a stop ends
   the sliced sleep, one report per state change, a superseded generation is not attributed, start order),
-  `platform` (MAC parsing, `sh_q` shell-escaping
+  `platform` (MAC parsing, `printers_from_lpstat` — one default marked, and that default taken from the
+  text after the last colon rather than from an English label, so a localized CUPS cannot silently read
+  as "no default" — `sh_q` shell-escaping
   round-trip, the op list a `NetworkConfig` compiles to — an absent `dns` key emits no DNS operation
   while `dns: ""` still emits the clear), `update` (https-only urls; an occupied temp name failing
   instead of being reused; a same-named symlink not being followed; the private file / dir / script
@@ -879,7 +986,10 @@ Logs: `<exe>/logs/` when that directory is writable, otherwise a user-writable f
   has to be numbered before the tag goes out. `scripts/validate.py` check [8] compares VERSION / tauri.conf.json /
   Cargo.toml against the CHANGELOG's first **numbered** section, and tolerates a `## [Unreleased]` top: it skips
   the comparison only when no numbered section exists at all, which never happens in a released state.
-- **Commit-message red line**: `release: vX.Y.Z <brief>`, **must not** contain any AI tool name/credit (WorkBuddy / CodeBuddy / Cursor, etc.).
+- **Commit-message red line**: `release: vX.Y.Z <brief>`, **must not** contain any AI tool name or credit.
+  The token list the guard matches against lives in `scripts/check-no-ai.sh` and nowhere else — this doc
+  deliberately does not reproduce it, since copying it here would put the very names the rule forbids into a
+  published file.
 - Pushing a `vX.Y.Z` tag triggers CI cross-platform build/sign/release (see §11).
 
 ### 13.1 Publish-hygiene guard (`scripts/check-no-ai.sh`)
@@ -900,11 +1010,11 @@ or makes the guard useless:
 
 - `.gitignore` / `.git/info/exclude` — listing assistant-tool directories there *is* the
   hygiene rule, not a leak (the block at the end of `.gitignore`).
-- `DEVELOPMENT.md` — §13 states this rule and therefore names the tools. Without the
-  exemption the guard blocks the commit that documents the guard.
+- `DEVELOPMENT.md` — §13 states this rule, so it necessarily contains the standalone token the guard
+  searches for. Without the exemption the guard blocks the commit that documents the guard.
 - `scripts/check-no-ai.sh`, `scripts/git-hooks/*`, `scripts/setup-hooks.sh`,
   `.github/workflows/publish-hygiene.yml` — self-reference (`skip_file()`).
-- `cursor` is excluded from the **content** scan only (it is a CSS property: all three
+- `cursor` is excluded from the **content** scan only (it is a CSS property: all four
   `frontend/*.html` files contain `cursor: pointer`). It stays in the commit-message scan.
 - The standalone-token scan strips the guard's **own filename** before matching
   (`SELF_REF`): `check-no-ai.sh` contains the literal `-ai.`, so without this every
@@ -999,7 +1109,6 @@ and in-app upgrade.
 |------|---------|
 | 3A **rollback** | restore the previous working configuration instead of the blanket DHCP fallback (§7) |
 | More condition kinds | IPv4 / gateway / connectivity / VPN state beyond what `conditions/` matches today |
-| In-app log viewer | today the tray and popup only have **Open logs**, which hands the live log directory to the system file manager; reading the file back in-window needs a new command, and until then tailing the file is the supported path |
 | Stronger privilege isolation | if the passwordless sudoers / UAC channel is not enough: a signed helper (SMJobBless-style), see §9.2 |
 | Code signing / notarization | unsigned builds cost every user an accept-the-warning step on each OS |
 | Signed release checksums | `SHA256SUMS` travels the same HTTPS path as the asset it describes, so it proves integrity, not provenance; an Ed25519/minisign signature checked against a key baked into the app would (§9.3) |
@@ -1013,7 +1122,7 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 
 | Term | Means |
 |------|-------|
-| **Profile** | A named bundle of detection + rules + a 3A network configuration + 3B actions, with `enabled`. |
+| **Profile** | A named bundle of detection + rules + a 3A network configuration + 3B actions, with `enabled` and `quick` (the tray panel's one-click switch). |
 | **Rule / Condition** | Rules are ORed; the **enabled** Conditions inside one Rule are ANDed. Each has its own `enabled`, and disabled never counts as a match. |
 | **No Active Profile / Active / Conflict** | The 0 / 1 / 2+ outcome of `decide()`. Conflict applies nothing and names the candidates — there is no tie-break. |
 | **ERROR** | The *execution* verdict: 3A failed. Distinct from Conflict, which is a *condition*-layer verdict. |
@@ -1071,7 +1180,7 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 | Layer | Covered by | Still open |
 |---|---|---|
 | Config model, conditions, detection, engine decisions, 3A readback expectations, 3B1 scheduling, 3B2 workers, PAL utils, i18n | `cargo test` (pure std — no tokio, no real system commands), §12 | the PAL commands themselves, against real adapters |
-| Docs ↔ code ↔ docs, i18n parity, PAL boundary, version consistency | `scripts/validate.py` (10 scored checks) | nothing mechanical: whether a translated paragraph still *means* the English one stays a review task (§13) |
+| Docs ↔ code ↔ docs, i18n parity, PAL boundary, version consistency, UI text sourcing | `scripts/validate.py` (11 scored checks) | nothing mechanical: whether a translated paragraph still *means* the English one stays a review task (§13) |
 | Editor data binding, and the payloads it sends | `scripts/editor-smoke.mjs` + the fixture replay test (§12) | rendering in a real WebView |
 | Rust lints that `cargo check` cannot see | `cargo clippy --all-targets -- -D warnings` in every build leg (§12) | a Windows- or Linux-only lint — a macOS host never compiles that code, which is why the gate is per-leg instead of once |
 | Compile + package on four targets | CI — a dispatched run proves compilation, a tag produces installers (§11) | — |
@@ -1079,8 +1188,12 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 What no automated gate can reach, and therefore what needs a real machine per OS:
 
 - **Three-platform real-device passes**: the engine loop, 3A readback verification (is the settle window
-  long enough on a slow switch?), the conflict flow, and the 3B2 tunnel control — including whether
-  `scutil --nc start` brings a macOS tunnel up without the elevation channel we deliberately refuse to use.
+  long enough on a slow switch?), the conflict flow, the 3B2 tunnel control — including whether
+  `scutil --nc start` brings a macOS tunnel up without the elevation channel we deliberately refuse to
+  use — and the 3B1 printer action: `list_printers` / `set_default_printer` are built on commands whose
+  output and exit codes were captured and checked by hand (`lpstat -e`, `lpstat -d`, `lpoptions -d` on a
+  throwaway `HOME`), but the write was never run against real printers, because that would change the
+  user's own default as a side effect of a test.
 - **Popup panel**: keyboard focus / the blur-collapse rule and Retina coordinate conversion (§9.5).
 - **Privilege channel**: a first install of `scripts/install-priv-helper.sh`, and the UAC prompt count for
   a non-admin Windows user.

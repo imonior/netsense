@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-compile_error!("NetSense 仅支持 macOS / Windows / Linux 三个平台");
+compile_error!("NetSense 仅支持 macOS / Windows / Linux 三个平台"); // i18n-exempt: 编译期消息，只有构建者看得到，永远不会渲染进界面
 
 /// 网卡/网络状态快照。会被 IPC 直接 JSON 化返回给前端，故需 `Serialize`。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -42,7 +42,7 @@ pub struct InterfaceStatus {
     pub iface: Option<String>,
 }
 
-/// 网卡种类。用于托盘菜单与设置面板「网络硬件信息」列的分组展示。
+/// 网卡种类。用于面板与设置窗口「网络硬件信息」列的分组展示。
 ///
 /// 序列化成小写（`wired` / `wireless` / `vpn` / `other`），前端按字符串直接分组。
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub enum NicKind {
 }
 
 /// 单张网卡的快照。与 [`InterfaceStatus`]（"主无线网卡"视角）互补：
-/// 这里回答的是"这台机器上**同时**连着哪些网"，托盘菜单与设置面板的硬件列都基于它。
+/// 这里回答的是"这台机器上**同时**连着哪些网"，面板的两段网卡列表与设置窗口的硬件列都基于它。
 ///
 /// 字段取不到一律为 `None` —— 前端按缺省显示「—」，不允许用占位文本造假值。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -74,6 +74,9 @@ pub struct NicInfo {
     pub mac: Option<String>,
     pub ipv4: Option<String>,
     pub netmask: Option<String>,
+    /// 该网卡上的**全局** IPv6 地址（不含 `fe80::` 链路本地地址：它每台机器都长一样，
+    /// 既没有识别价值，也不代表这台机器真的能走 IPv6）。取不到即为 `None`。
+    pub ipv6: Option<String>,
     /// 该网卡上的默认网关（多网卡时只有走默认路由的那张有值）
     pub gateway: Option<String>,
     /// 该网关 IP 对应的 MAC
@@ -86,7 +89,7 @@ pub struct NicInfo {
 /// NIC 列表缓存 TTL。
 ///
 /// `list_interfaces()` 一次要拉起若干子进程（macOS 上每个设备两次 `ipconfig`），
-/// 而托盘菜单每次状态广播都要一份快照、SSID 监视线程每 2~5s 也会间接触发一次 ——
+/// 而面板每次开合都要一份快照、SSID 监视线程每 2~5s 也会间接触发一次 ——
 /// 不缓存会把后台线程长时间钉在等子进程上（与 `system_profiler` 缓存同理）。
 const NIC_LIST_TTL: Duration = Duration::from_secs(2);
 
@@ -112,6 +115,47 @@ pub(crate) fn cached_nics<F: FnOnce() -> Vec<NicInfo>>(sample: F) -> Vec<NicInfo
     let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some((Instant::now(), fresh.clone()));
     fresh
+}
+
+/// [`cached_status`] 的 TTL，取值与 [`NIC_LIST_TTL`] 一致（同一类快照、同一类刷新频率）。
+const STATUS_TTL: Duration = Duration::from_secs(2);
+
+/// [`cached_status`] 与 [`invalidate_status`] 共用的那一个缓存。
+///
+/// 必须是**模块级** static：函数内各自 `static C` 是两个互不相干的存储，
+/// 那样 `invalidate_status()` 会清掉一份没人读的空缓存，而下发后读回校验照旧读到
+/// 旧快照 —— 3A 屏障静默失效，这比不加缓存更糟。
+static STATUS_CACHE: OnceLock<Mutex<Option<(Instant, InterfaceStatus)>>> = OnceLock::new();
+
+/// [`NetworkPlatform::get_status`] 结果的进程级 TTL 缓存，理由与 [`cached_nics`] 相同：
+/// 一次快照要拉起若干系统子进程，而面板每次刷新、SSID 监视每一轮都要一份。
+///
+/// ⚠️ 任何**改动本机网络**的路径都必须调 [`invalidate_status`]，否则 3A 的
+/// 「下发 → 读回校验」会读到下发之前那份快照 —— 校验屏障会当场失效（读回的值永远是
+/// 旧的那份，既可能假通过，也可能假失败）。
+#[allow(dead_code)] // 目前只有 macOS 走它；Windows 有自己的 status_cached
+pub(crate) fn cached_status<F: FnOnce() -> InterfaceStatus>(sample: F) -> InterfaceStatus {
+    let cell = STATUS_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, st)) = guard.as_ref() {
+            if at.elapsed() < STATUS_TTL {
+                return st.clone();
+            }
+        }
+    }
+    let fresh = sample();
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
+/// 丢掉 [`cached_status`] 里的快照（网络被本进程改动之后）。
+#[allow(dead_code)] // 调用方同上
+pub(crate) fn invalidate_status() {
+    if let Some(cell) = STATUS_CACHE.get() {
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 /// 网卡名是否属于典型的隧道/VPN 设备。
@@ -323,11 +367,33 @@ impl PrivChannel {
     }
 }
 
+/// 一台打印机的快照：名字，以及它现在是不是默认打印机。
+///
+/// `name` 是**系统里那台打印机的队列名**（macOS/Linux 的 CUPS 目的地名、Windows 的
+/// `Win32_Printer.Name`），也正是 `set_default_printer` 要写回配置的那个值 —— 中间不留
+/// 第二套标识（显示名 / 驱动名 / 设备 URI），否则「界面上选的」和「下发时找的」就不是
+/// 同一个东西了。
+#[derive(Debug, Clone, Serialize)]
+pub struct PrinterInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
 /// PAL 契约：Core Engine 只依赖此 trait，不直接碰系统命令。
 pub trait NetworkPlatform: Send + Sync {
     fn watch_ssid(&self, cb: Box<dyn Fn(Option<String>) + Send + Sync>) -> WatcherHandle;
     fn get_current_ssid(&self) -> Option<String>;
     fn get_status(&self) -> InterfaceStatus;
+
+    /// 供 3A 读回校验使用的快照：必须是**这一秒**的实际情况，不能是缓存。
+    ///
+    /// 默认实现直接走 [`get_status`]：本来就不缓存的平台没有可绕的东西。做了缓存的平台
+    /// 必须覆盖它 —— 校验循环每 800ms 采样一次，而快照的 TTL 比这个间隔长，不覆盖的话
+    /// 四次采样里会有两次拿到同一份快照，屏障还在（值确实是下发之后的），只是网卡慢慢
+    /// 稳定下来的情形会更早被判成失败。
+    fn fresh_status(&self) -> InterfaceStatus {
+        self.get_status()
+    }
 
     /// 下发网络配置（IP/掩码/网关/DNS/IPv6）。
     ///
@@ -347,8 +413,8 @@ pub trait NetworkPlatform: Send + Sync {
     /// 枚举**当前在用**的全部网卡（有线 / 无线 / VPN），每张一张 [`NicInfo`]。
     ///
     /// 与 `get_status()` 的分工：`get_status` 只回答"主无线网卡现在什么参数"（供
-    /// profile 匹配），本方法回答"这台机器同时连着哪些网"（供托盘菜单与设置面板展示）。
-    /// 实现必须经 [`cached_nics`] 包一层 —— 调用方（托盘菜单刷新）频率很高。
+    /// profile 匹配），本方法回答"这台机器同时连着哪些网"（供面板与设置窗口展示）。
+    /// 实现必须经 [`cached_nics`] 包一层 —— 调用方（面板开合、状态广播）频率很高。
     fn list_interfaces(&self) -> Vec<NicInfo>;
 
     /// 把**指定设备名**的网卡切回 DHCP。
@@ -407,6 +473,21 @@ pub trait NetworkPlatform: Send + Sync {
     /// 区别对待的安全决策，不要为了少弹一个框而把它并进免密通道。
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String>;
 
+    /// 本机打印机清单，含「现在哪台是默认」（3B1 `set_default_printer` 的候选来源）。
+    ///
+    /// 空列表**不是**错误：这台机器可能没有打印机，也可能那套打印子系统没在跑。界面据此
+    /// 显示「没有候选，请手输」；真正下发时的成败由 [`NetworkPlatform::set_default_printer`]
+    /// 说话。取不到时不要把「取不到」伪装成「没有」以外的任何东西 —— 但也别为它弹框。
+    fn list_printers(&self) -> Vec<PrinterInfo>;
+
+    /// 把 named 打印机设为**当前用户**的默认打印机。
+    ///
+    /// ⚠️ 三个平台都只动用户级默认（macOS/Linux 写 CUPS 的 `~/.cups/lpoptions`，Windows 调
+    /// `Win32_Printer.SetDefaultPrinter`），都**不需要**管理员。系统级默认要提权，而这个动作
+    /// 每次进入 Active 都会跑一遍 —— 提权等于每换一次网络弹一次授权框，与
+    /// [`NetworkPlatform::tunnel_connect`] 那条是同一个理由。名字在本机不存在时照实 `Err`。
+    fn set_default_printer(&self, printer: &str) -> Result<(), String>;
+
     /// 已保存的无线网络列表（编辑器下拉填充）。平台不支持时返回 `None`。
     fn list_known_ssids(&self) -> Option<Vec<String>>;
 }
@@ -425,13 +506,18 @@ pub(crate) fn run(program: &str, args: &[&str]) -> Result<String, String> {
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let out = cmd
         .output()
-        .map_err(|e| format!("spawn {}: {}", program, e))?;
+        .map_err(|e| {
+            crate::i18n::tf("pal.spawn_failed", &[("program", program), ("error", &e.to_string())])
+        })?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if err.is_empty() {
-            format!("{} 退出码 {:?}", program, out.status.code())
+            crate::i18n::tf("pal.cmd_failed", &[
+                ("program", program),
+                ("code", &out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+            ])
         } else {
             err
         })
@@ -497,6 +583,35 @@ pub(crate) fn parse_kv(text: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 由 CUPS 的两条命令输出拼出打印机清单（macOS 与 Linux 共用同一套客户端命令）。
+///
+/// - `names` —— `lpstat -e`：一行一个目的地名，**没有**任何标签文字，所以与系统语言无关。
+/// - `default_out` —— `lpstat -d`：形如 `system default destination: HP_Office`。这里取
+///   **最后一个冒号之后**的那段，而不是去匹配那句英文：`lpstat` 的消息会被 CUPS 翻译成
+///   系统本地语言，而目的地名本身不含冒号。没有默认打印机时 CUPS 打印的是
+///   「no system default destination」这类句子（不含冒号），于是取到 `None` —— 正好是对的。
+#[allow(dead_code)] // Windows 那一腿走 CIM，不解析 lpstat
+pub(crate) fn printers_from_lpstat(names: &str, default_out: &str) -> Vec<PrinterInfo> {
+    let def = lpstat_default(default_out);
+    names
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|name| PrinterInfo {
+            name: name.to_string(),
+            is_default: def.as_deref() == Some(name),
+        })
+        .collect()
+}
+
+/// 见 [`printers_from_lpstat`]：`lpstat -d` 那一行里的目的地名。
+#[allow(dead_code)] // 调用方同上
+fn lpstat_default(out: &str) -> Option<String> {
+    let line = out.lines().find(|l| l.contains(':'))?;
+    let tail = line.rsplit(':').next()?.trim();
+    (!tail.is_empty()).then(|| tail.to_string())
 }
 
 /// 是否是 `aa:bb:cc:dd:ee:ff` / `aa-bb-cc-dd-ee-ff` 形态的 MAC（6 组双位十六进制）。
@@ -600,7 +715,12 @@ pub fn open_path(path: &str) -> Result<(), String> {
         .arg(path)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("explorer {}: {}", path, e))
+        .map_err(|e| {
+            crate::i18n::tf(
+                "pal.open_path_failed",
+                &[("path", path), ("error", &e.to_string())],
+            )
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -662,7 +782,7 @@ pub use linux::{priv_channel, LinuxPlatform as Platform};
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_in, sh_q, tunnel_name_eq, TunnelTarget};
+    use super::{printers_from_lpstat, provider_in, sh_q, tunnel_name_eq, TunnelTarget};
 
     #[test]
     fn sh_q_neutralises_shell_metacharacters() {
@@ -807,5 +927,52 @@ mod tests {
         };
         assert_eq!(wg.provider(), None);
         assert_eq!(wg.name(), "office-wg");
+    }
+
+    /// `lpstat -e` 与 `lpstat -d` 的真实输出（macOS 上抓的，Linux 同形状）。
+    /// 名字里带下划线与前缀点号是这台机器上真实存在的队列名，不是编出来的。
+    #[test]
+    fn the_cups_printer_list_marks_only_the_default() {
+        let names = "_10_20_20_30\n_10_30_30_30\nCanonG3860\nHP_LaserJet_M104w_01502A_\n";
+        let list = printers_from_lpstat(names, "system default destination: CanonG3860\n");
+        let flags: Vec<(&str, bool)> = list
+            .iter()
+            .map(|p| (p.name.as_str(), p.is_default))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("_10_20_20_30", false),
+                ("_10_30_30_30", false),
+                ("CanonG3860", true),
+                ("HP_LaserJet_M104w_01502A_", false),
+            ]
+        );
+    }
+
+    /// 没有默认打印机时 CUPS 打印的是「no system default destination」这一类句子。
+    /// 它不含冒号，所以按「取最后一个冒号之后」的规则会得到 `None` —— 清单上一台都不该亮。
+    #[test]
+    fn an_absent_default_printer_lights_up_nothing() {
+        for out in [
+            "no system default destination\n",
+            "system default destination: \n",
+            "",
+        ] {
+            let list = printers_from_lpstat("HP\n", out);
+            assert_eq!(list.len(), 1);
+            assert!(!list[0].is_default, "默认行 {:?} 不该点亮任何打印机", out);
+        }
+    }
+
+    /// 冒号前那句标签会被 CUPS 翻译，所以解析只能看冒号之后。
+    /// 这条钉住的是**规则**（不匹配英文句子），标签文字本身只是示意。
+    #[test]
+    fn the_default_is_taken_from_after_the_colon_not_from_an_english_label() {
+        let list = printers_from_lpstat("Büro-HP\n", "Systemstandardziel: Büro-HP\n");
+        assert!(list[0].is_default);
+        // 默认指向一台已经不在清单里的打印机时，没有人该亮（宁可少亮，不猜）
+        let list = printers_from_lpstat("Büro-HP\n", "system default destination: Gone\n");
+        assert!(!list[0].is_default);
     }
 }

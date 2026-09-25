@@ -24,6 +24,7 @@ use std::time::Duration;
 use super::one_shot::SCRIPT_TIMEOUT;
 use super::{is_script_allowed, resolve_script, AllowedScripts};
 use crate::config::{PersistentAction, PersistentActionType};
+use crate::i18n;
 use crate::platform::{NetworkPlatform, TunnelTarget};
 
 /// 隧道类动作的一次检查愿意等多久。
@@ -117,10 +118,12 @@ fn tunnel_decision(
 
 /// 这条常驻动作的展示标签（日志与界面都用它认「是哪件事在维持」）。
 ///
-/// 刻意保持简短且**不含待翻译的句子**：状态词由前端按 `state` 本地化，这里只放目标。
+/// 刻意保持简短：前半是随界面语言变的动词，后半是目标本身。`wireguard:` 与 `vpn:`
+/// 是目标标识符的前缀而不是句子，所以不进字典；状态词由前端按 `state` 本地化。
+/// 与日志同理，标签在创建那一刻按当时的语言定下，之后切换语言不会改写历史记录。
 pub fn label_for(action: &PersistentAction) -> String {
     match &action.action {
-        PersistentActionType::PeriodicScript { path, .. } => format!("run {}", path),
+        PersistentActionType::PeriodicScript { path, .. } => i18n::tf("act.label_run", &[("path", path)]),
         PersistentActionType::KeepWireGuardConnected { tunnel, .. } => {
             format!("wireguard:{}", tunnel)
         }
@@ -164,10 +167,9 @@ where
             // 先解析再校验：喂给校验和喂给执行的必须是同一条路径（与 3B1 同一条规矩）
             let script = resolve_script(path, allowed);
             let denied = (!is_script_allowed(&script, allowed)).then(|| {
-                format!(
-                    "脚本不在允许列表，已拒绝执行: {}（解析为 {}）",
-                    path,
-                    script.display()
+                i18n::tf(
+                    "act.script_denied",
+                    &[("path", path), ("resolved", &script.display().to_string())],
                 )
             });
             Arc::new(ScriptTick {
@@ -228,15 +230,16 @@ mod tests {
     }
 
     #[test]
-    fn labels_name_the_target_without_baking_in_a_language() {
-        assert_eq!(
-            label_for(&action(PersistentActionType::PeriodicScript {
-                path: "scripts/keep.sh".into(),
-                args: vec![],
-                interval_secs: 30,
-            })),
-            "run scripts/keep.sh"
-        );
+    fn labels_carry_the_target_and_only_the_verb_is_localized() {
+        i18n::init();
+        let script = label_for(&action(PersistentActionType::PeriodicScript {
+            path: "scripts/keep.sh".into(),
+            args: vec![],
+            interval_secs: 30,
+        }));
+        assert!(script.contains("scripts/keep.sh"), "标签要认得出是哪件事: {script}");
+        assert!(!script.starts_with("act."), "动词取自字典，不是键名: {script}");
+        // 隧道目标本身就是标识符，五种语言里都不该被翻译
         assert_eq!(
             label_for(&action(PersistentActionType::KeepWireGuardConnected {
                 tunnel: "office-wg".into(),
@@ -287,6 +290,7 @@ mod tests {
     /// 漏一次就等于给了来路不明的脚本一个自我修复的立足点。
     #[test]
     fn a_script_outside_the_allow_list_is_reported_and_never_run() {
+        i18n::init();
         let allowed = AllowedScripts {
             scripts_dir: std::env::temp_dir().join(format!("ns-never-{}", std::process::id())),
             explicit: vec![],
@@ -301,9 +305,10 @@ mod tests {
             let out = tick.tick();
             match out {
                 TickOutcome::Faulted(e) => {
-                    assert!(e.contains("允许列表"), "实际报错: {}", e);
-                    // 报错里必须同时有配置原文与解析结果，否则用户无从知道我们把它当成了谁
-                    assert!(e.contains("/etc/ppp/peers/wvdial"));
+                    // 措辞随界面语言走，所以这里锚的是「句子里必须有原文路径」这一条：
+                    // 只给解析结果的话，用户无从知道我们把它当成了谁。
+                    assert!(e.contains("/etc/ppp/peers/wvdial"), "实际报错: {}", e);
+                    assert!(!e.starts_with("act."), "报错该是一句译文而不是键名: {}", e);
                 }
                 other => panic!("被拒绝的脚本不该报成功: {:?}", other),
             }

@@ -4,7 +4,7 @@
 //!
 //! 1. **会做 I/O 或可能阻塞的命令一律标 `async`**。不带 async 的 Tauri 命令跑在
 //!    **主线程**上，而这里几乎每个命令都要采样网络或落盘；主线程一卡，整个 UI
-//!    （连同正在展开的托盘菜单）就冻住。
+//!    （连同正在展开的面板）就冻住。
 //! 2. **命令不改引擎状态，也不直接碰网卡**。写配置只落盘 + 往引擎投消息；
 //!    「立即应用 / 设为 DHCP / 立即探测」都投给引擎线程串行执行 —— 否则 IPC 工作线程、
 //!    托盘回调和引擎会同时抢同一张网卡，出现「新环境的配置被旧环境的动作覆盖」。
@@ -18,7 +18,7 @@ use crate::engine::{ActionKind, Msg};
 use crate::i18n;
 use crate::log;
 // `list_known_ssids` 是 PAL trait 方法，需把 trait 引入作用域
-use crate::platform::NetworkPlatform as _;
+use crate::platform::{platform_name, priv_channel, NetworkPlatform as _, PrinterInfo};
 use crate::state::{self, AppState};
 
 /// 前端读取当前网络状态 + 引擎视图（Active / Conflict / 每个 Profile 的三态）+ 语言 + 提权通道。
@@ -43,22 +43,33 @@ pub fn get_engine_status(state: State<'_, std::sync::Arc<AppState>>) -> String {
 
 /// 前端读取全部在用网卡（有线 / 无线 / VPN），供面板与设置窗口的「网络硬件信息」列展示。
 ///
+/// **返回列表的第一张一定是「在用的那张」**：判据只在 Rust 里有一份
+/// （`automation::primary_nic` =
+/// 走默认路由的非 VPN 网卡），这里把它转到首位，前端取 `nics[0]` 就行。让 JS 再实现一遍
+/// 选主网卡的规则，会得到一份和「设为 DHCP」不一致的副本。
+///
 /// `async` 的理由同 `get_status`：枚举网卡要拉起子进程（平台层内有 TTL 缓存，
 /// 但缓存缺失的那一次仍是 I/O），不能占住主线程。
 #[tauri::command(async)]
 pub fn get_interfaces(state: State<'_, std::sync::Arc<AppState>>) -> String {
-    let nics = state.plat.list_interfaces();
+    let mut nics = state.plat.list_interfaces();
+    let primary = crate::automation::primary_nic(&nics)
+        .map(|p| p.name.clone())
+        .and_then(|name| nics.iter().position(|n| n.name == name));
+    if let Some(i) = primary {
+        nics.rotate_left(i);
+    }
     serde_json::to_string(&nics).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// 前端触发「将当前网络设置成 DHCP」（与托盘菜单同一入口）。
+/// 前端触发「将当前网络设置成 DHCP」（与面板按钮同一入口）。
 #[tauri::command(async)]
 pub fn force_dhcp(state: State<'_, std::sync::Arc<AppState>>) -> Result<(), String> {
     state::post(&state, Msg::Action { kind: ActionKind::SetDhcp });
     Ok(())
 }
 
-/// 前端触发「强制探测当前网络」（与托盘菜单同一入口）。
+/// 前端触发「强制探测当前网络」（与面板按钮同一入口）。
 ///
 /// 结果不在这里返回：探测要几秒，完成后由 `netsense://action` 广播给前端做 toast。
 #[tauri::command(async)]
@@ -73,7 +84,6 @@ pub fn get_config(state: State<'_, std::sync::Arc<AppState>>) -> String {
     let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
     let payload = json!({
         "schema": cfg.schema,
-        "language": cfg.language,
         "profiles": cfg.profiles,
         "fallback": cfg.fallback,
         "allowed_scripts": cfg.allowed_scripts,
@@ -95,7 +105,8 @@ pub fn save_profile(
 ) -> Result<(), String> {
     let profile: Profile = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
     if profile.id.trim().is_empty() {
-        return Err("profile 缺少 id".to_string());
+        // 与校验器同一条文案：这里能报出 name，比校验器那条还具体一点。
+        return Err(i18n::tf("cfg.no_id", &[("name", &profile.name)]));
     }
     let id = profile.id.clone();
     {
@@ -165,7 +176,7 @@ pub fn delete_profile(
         let before = next.profiles.len();
         next.profiles.retain(|p| p.id != id);
         if next.profiles.len() == before {
-            return Err(format!("unknown profile: {}", id));
+            return Err(i18n::tf("engine.unknown_profile", &[("name", &id)]));
         }
         next.save(&state.config_path)?;
         *cfg = next;
@@ -206,6 +217,24 @@ pub fn close_editor(state: State<'_, std::sync::Arc<AppState>>) {
     }
 }
 
+/// 显示软件配置窗口（面板的「设置」按钮调用）。
+#[tauri::command]
+pub fn open_settings(state: State<'_, std::sync::Arc<AppState>>) {
+    if let Some(app) = state.app.get() {
+        crate::popup::show_settings(app);
+    }
+}
+
+/// 隐藏软件配置窗口（收回菜单栏常驻，不退出应用）。
+#[tauri::command]
+pub fn close_settings(state: State<'_, std::sync::Arc<AppState>>) {
+    if let Some(app) = state.app.get() {
+        if let Some(w) = app.get_webview_window(crate::popup::SETTINGS_LABEL) {
+            let _ = w.hide();
+        }
+    }
+}
+
 /// 退出应用（同时停掉 SSID 监视线程与引擎线程）。
 #[tauri::command]
 pub fn quit_app(state: State<'_, std::sync::Arc<AppState>>) {
@@ -216,12 +245,55 @@ pub fn quit_app(state: State<'_, std::sync::Arc<AppState>>) {
     }
 }
 
-/// 用系统默认程序打开日志目录（与托盘菜单「查看日志」同一入口）。
-#[tauri::command]
+/// 用系统默认程序打开日志目录（面板与软件配置窗口都有这个入口）。
+#[tauri::command(async)]
 pub fn open_logs() -> Result<(), String> {
     let dir = crate::log::log_dir();
-    crate::platform::open_path(&dir.display().to_string())
-        .map_err(|e| format!("打开日志目录失败 {}: {}", dir.display(), e))
+    let text = dir.display().to_string();
+    // 回给前端的是**已翻译**的一句：这条会被原样弹成 toast，界面并不会再替它套模板。
+    crate::platform::open_path(&text)
+        .map_err(|e| i18n::tf("notify.open_failed", &[("path", &text), ("error", &e)]))
+}
+
+/// 日志窗口：列出目录里的日志文件（新→旧）连同目录本身。
+///
+/// 目录一并返回，是因为它可能不是配置里写的那个：日志目录不可写时 `log::init` 会退到
+/// 系统临时目录，界面若自己拼路径就会把人引到一个根本没有日志的地方。
+#[tauri::command(async)]
+pub fn get_log_files() -> serde_json::Value {
+    json!({
+        "log_dir": crate::log::log_dir().display().to_string(),
+        "files": log::list_files(),
+        "max_lines": log::MAX_TAIL_LINES,
+    })
+}
+
+/// 读取某个日志文件的尾部若干行。
+///
+/// 界面只能给文件名，不能给路径 —— 名字的形状在 `log::read_tail` 里重新校验一次，
+/// 所以这条命令没有「把任意文件内容读进界面」的入口。
+#[tauri::command(async)]
+pub fn read_log(name: String, lines: Option<usize>) -> Result<serde_json::Value, String> {
+    let content = log::read_tail(&name, lines.unwrap_or(500).min(log::MAX_TAIL_LINES))?;
+    serde_json::to_value(content).map_err(|e| e.to_string())
+}
+
+/// 显示日志窗口。
+#[tauri::command]
+pub fn open_log_viewer(state: State<'_, std::sync::Arc<AppState>>) {
+    if let Some(app) = state.app.get() {
+        crate::popup::show_logs(app);
+    }
+}
+
+/// 隐藏日志窗口（收回菜单栏常驻，不退出应用）。
+#[tauri::command]
+pub fn close_log_viewer(state: State<'_, std::sync::Arc<AppState>>) {
+    if let Some(app) = state.app.get() {
+        if let Some(w) = app.get_webview_window(crate::popup::LOGS_LABEL) {
+            let _ = w.hide();
+        }
+    }
 }
 
 /// 前端读取已保存无线网络列表（填充编辑器下拉）。
@@ -234,28 +306,135 @@ pub fn get_networks(state: State<'_, std::sync::Arc<AppState>>) -> Vec<String> {
     state.plat.list_known_ssids().unwrap_or_default()
 }
 
-/// 切换 UI 语言并写回配置（language 字段）。
+/// 本机打印机清单（编辑器里「设为默认打印机」的候选，含现在哪台是默认）。
 ///
-/// 不在这里广播：落盘后引擎会因为 mtime 变化重新加载（语言偏好本就存在配置里），
-/// 由那一次重载统一广播。
-/// 另外语言变化不会触发网络重设 —— 「立即应用」与匹配都按内容指纹幂等。
+/// 空数组是合法答案：这台机器可能没有打印机，也可能打印子系统没在跑。界面因此把这一栏
+/// 留成可手输，而不是转成「加载失败」。`async` 的理由同 `get_networks` —— 枚举要拉子进程。
+#[tauri::command(async)]
+pub fn get_printers(state: State<'_, std::sync::Arc<AppState>>) -> Vec<PrinterInfo> {
+    state.plat.list_printers()
+}
+
+/// 切换 UI 语言并写回软件配置（`language` 字段）。
+///
+/// 与自动化配置无关，所以它**不**经过 `Config`：换语言不该让热重载引擎、更不该让
+/// 一次网络重评估被触发（那是「改菜单语言，结果 IP 被重新下发了一遍」的来源）。
+/// 这里显式广播一次状态，是因为没有别的路径会替我们广播 —— 前端靠 `status_payload`
+/// 里的 `language` 判断要不要重拉 `get_strings`。
 #[tauri::command(async)]
 pub fn set_language(
     state: State<'_, std::sync::Arc<AppState>>,
     code: String,
 ) -> Result<(), String> {
     let lang = i18n::Language::from_code(&code);
-    i18n::set_language(lang);
+    // 先落盘，再切字典。反过来的话，一次写失败（只读目录、权限）会在 `?` 处提前返回，
+    // 而全局字典已经换好了：托盘不重设、广播不发、设置也没存住 —— 同一份界面停在两种
+    // 语言里，且再点一次也修不回来（字典没法回退）。存不上就当这次没发生。
     {
-        let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = cfg.clone();
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = s.clone();
         next.language = Some(lang.code().to_string());
-        next.save(&state.config_path)?;
-        *cfg = next;
+        next.save(&state.settings_path)?;
+        *s = next;
     }
+    i18n::set_language(lang);
     log::info(&i18n::tf("notify.language_set", &[("lang", lang.code())]));
-    state::post(&state, Msg::Wake);
+    // 托盘 tooltip 是 `build_tray` 当场求值出来的字符串，字典换了它不会自己换 ——
+    // 面板文案走广播（下面那条），托盘只能在这里重设。
+    if let Some(app) = state.app.get() {
+        crate::tray::refresh_tooltip(app);
+    }
+    crate::state::publish_status(state.inner());
     Ok(())
+}
+
+/// 软件配置窗口的一次性快照：能改的、只能看的、以及它们在各平台上的真实位置。
+///
+/// `autostart` 是**问操作系统**问出来的，不是读配置文件读出来的（见 `appconfig` 模块头）；
+/// 问不出来时 `autostart` 给 `false`、原因放进 `autostart_error`，界面因此不会显示一个
+/// 假的关闭态而不给解释。
+#[tauri::command(async)]
+pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
+    let (language, log_retention_days) = {
+        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            i18n::current().code().to_string(),
+            s.log_retention_days,
+        )
+    };
+    let (autostart_on, autostart_error) = match crate::appconfig::autostart_enabled() {
+        Ok(on) => (on, None),
+        Err(e) => (false, Some(e)),
+    };
+    let config_dir = state
+        .config_path
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let payload = json!({
+        "language": language,
+        "autostart": autostart_on,
+        "autostart_error": autostart_error,
+        "config_path": state.config_path.display().to_string(),
+        "config_dir": config_dir,
+        "settings_path": state.settings_path.display().to_string(),
+        "log_dir": crate::log::log_dir().display().to_string(),
+        "log_retention_days": log_retention_days,
+        "min_retention_days": crate::appconfig::MIN_LOG_RETENTION_DAYS,
+        "max_retention_days": crate::appconfig::MAX_LOG_RETENTION_DAYS,
+        "priv": priv_channel().code(),
+        "platform": platform_name(),
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    serde_json::to_string(&payload).unwrap_or_default()
+}
+
+/// 打开 / 关闭「登录时启动」。返回系统里**实际**的状态，界面按它回显。
+///
+/// 不要 `State`：这项设置的真相在操作系统那边，本进程的内存态里没有它的位置。
+#[tauri::command(async)]
+pub fn set_autostart(enable: bool) -> Result<bool, String> {
+    let now = crate::appconfig::set_autostart(enable)?;
+    // 两条 key 而不是一条带 `{state}` 的：占位符里塞 "on"/"off" 会让日志在
+    // 中文界面下变成「开机启动已设置为 on」这种半截翻译。
+    log::info(&i18n::t(if now {
+        "notify.autostart_on"
+    } else {
+        "notify.autostart_off"
+    }));
+    Ok(now)
+}
+
+/// 设置日志保留天数：写软件配置 + 立刻按新值清一次。
+#[tauri::command(async)]
+pub fn set_log_retention(
+    state: State<'_, std::sync::Arc<AppState>>,
+    days: u32,
+) -> Result<u32, String> {
+    let days = crate::appconfig::clamp_retention(days);
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = s.clone();
+        next.log_retention_days = days;
+        next.save(&state.settings_path)?;
+        *s = next;
+    }
+    crate::log::set_retention_days(days);
+    log::info(&i18n::tf("notify.retention_set", &[("days", &days.to_string())]));
+    Ok(days)
+}
+
+/// 在系统文件管理器里打开自动化配置所在的那个目录。
+///
+/// 目录由 `config_path` 的父目录现算，界面不自己拼 —— 用户看到的和真正打开的必须是同一个位置。
+#[tauri::command(async)]
+pub fn open_config_folder(state: State<'_, std::sync::Arc<AppState>>) -> Result<(), String> {
+    let text = match state.config_path.parent() {
+        Some(p) => p.display().to_string(),
+        None => return Err(i18n::t("notify.no_config_dir")),
+    };
+    crate::platform::open_path(&text)
+        .map_err(|e| i18n::tf("notify.open_failed", &[("path", &text), ("error", &e)]))
 }
 
 /// 前端一次性拉取当前语言的全部文案，避免逐 key 往返 invoke。
@@ -264,9 +443,16 @@ pub fn get_strings() -> std::collections::HashMap<String, String> {
     i18n::all_strings()
 }
 
+/// 当前界面语言的代码（`en` / `zh` / `zh-TW` / `ja` / `ko`）。前端拿它写
+/// `<html lang>`：那是给读屏软件和字形选择的，不是给文案查表用的。
+#[tauri::command]
+pub fn get_language() -> String {
+    i18n::current().code().to_string()
+}
+
 /// 用系统默认程序打开一个 URL（Release 页 / 下载链接 / 文档）。
 /// 直接复用平台层的 `open_path`，与「查看日志」走同一套系统打开器。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_url(url: String) -> Result<(), String> {
     crate::platform::open_path(&url)
 }
@@ -284,7 +470,8 @@ pub fn open_url(url: String) -> Result<(), String> {
 pub fn check_update() -> Result<serde_json::Value, String> {
     let url = "https://api.github.com/repos/imonior/netsense/releases/latest";
     let body = fetch_url(url)?;
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("bad json: {}", e))?;
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| i18n::tf("upd.bad_json", &[("error", &e.to_string())]))?;
     let latest = v["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
     let current = env!("CARGO_PKG_VERSION");
     let html_url = v["html_url"].as_str().unwrap_or("").to_string();
@@ -505,8 +692,8 @@ fn token_anchored(n: &str, token: &str) -> bool {
 /// 回退到「打开发布页」。
 #[tauri::command(async)]
 pub fn run_update(app: tauri::AppHandle, target: String) -> Result<(), String> {
-    let t: crate::update::UpdateTarget =
-        serde_json::from_str(&target).map_err(|e| format!("bad update target: {e}"))?;
+    let t: crate::update::UpdateTarget = serde_json::from_str(&target)
+        .map_err(|e| i18n::tf("upd.bad_target", &[("error", &e.to_string())]))?;
     crate::update::run_update(&app, &t)
 }
 

@@ -2,9 +2,12 @@
 //!
 //! 装配顺序（每一项都有理由，顺序不能随意换）：
 //!
-//! 1. 日志 + panic hook —— 必须最先，否则后面的失败没有任何痕迹；
+//! 1. 字典（i18n）→ 软件配置 → 日志 + panic hook —— 日志最先起，否则后面的失败没有任何
+//!    痕迹；字典在日志之前，因为启动那几行日志本身就是要翻译的；软件配置在两者之间，
+//!    因为它决定的正是「用什么语言说」和「留几天」；
 //! 2. Windows 的 WebView2 预检 —— 缺运行时则创建窗口必然失败，且 release 版没有控制台；
-//! 3. 解析配置路径 → 加载校验 → 建 [`AppState`]（读不出来时带着告警继续跑，见 `state`）；
+//! 3. 解析两份配置的路径 → 加载校验自动化配置 → 建 [`AppState`]（读不出来时带着告警继续跑，
+//!    见 `state`）；
 //! 4. 托盘 + 编辑器窗口 —— 先给用户「应用活着」的信号；
 //! 5. [`engine::start`] —— 起引擎线程，之后所有网络变化都由它串行处理；
 //!    启动时的首次匹配就发生在引擎的第一轮 pass，这里不再自己 apply 一次。
@@ -14,6 +17,7 @@
 // Windows 上发布版不要弹出附着控制台窗口（debug 版保留，方便看日志）
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appconfig;
 mod automation;
 mod conditions;
 mod config;
@@ -23,6 +27,7 @@ mod i18n;
 mod ipc;
 mod log;
 mod network;
+mod paths;
 mod platform;
 mod popup;
 mod state;
@@ -30,7 +35,7 @@ mod tray;
 mod update;
 mod win_dialog;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::Manager;
@@ -39,30 +44,57 @@ use i18n::Language;
 use platform::{priv_channel, platform_name};
 
 fn main() {
-    // 1) 日志 + panic hook 必须**最先**装好。
+    // 0) 字典先于第一条日志。
+    //
+    //    日志文案是用户看的（也是远程定位时唯一看的），而 `i18n::t` 在字典装好之前
+    //    只会把 key 原样返回 —— 所以 `init` 必须排在 `log::init` 前面。
+    i18n::init();
+
+    // 0.5) 软件配置：语言与日志保留天数都要在**第一条日志之前**拿到。
+    //
+    //    这两样都不是日志模块自己的事：留几天由用户说，用什么语言说也由用户说。
+    //    读不出来时不终止进程 —— 一份写坏的 `settings.json` 影响的是界面语言，
+    //    不该让用户连网络都切不了；但一定要在日志里留一条，否则「我明明设成中文」
+    //    就成了一个查不到原因的抱怨。
+    let settings_path = paths::settings_path();
+    let (settings, settings_error) = match appconfig::AppConfig::load(&settings_path) {
+        Ok(s) => (s, None),
+        Err(e) => (appconfig::AppConfig::default(), Some(e)),
+    };
+    if let Some(l) = &settings.language {
+        i18n::set_language(Language::from_code(l));
+    }
+
+    // 1) 日志 + panic hook 必须排在其余装配之前。
     //
     //    这一步一旦排到 setup() 里，setup 之前的失败（窗口 / WebView 创建）就没有
     //    日志、也没有任何可见提示 —— release 版在 Windows 上是 GUI 子系统（无控制台），
     //    最终表现为「点了一下，什么都没发生」。这类「装完无法运行」之所以迟迟定位不到，
     //    根源就在这里：不是没有原因，而是原因无处可见。
     //
-    //    首选 **exe 同级** logs（便携运行时就地写日志）；不可写时由 log::init 回退到
-    //    用户目录（%LOCALAPPDATA% / ~/Library/Logs / ~/.local/state）或临时目录。
-    //    这里刻意不用 config_path.parent()：config.json 未随包发布时 config_path 会退化
-    //    成相对路径，日志便落到 CWD 下 —— perMachine 安装的 CWD 常在 Program Files，
-    //    普通用户写不进去，日志会彻底消失。
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
-    let preferred_log_dir = exe_dir
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("logs");
-    log::init(&preferred_log_dir, true);
-    log::info(&format!(
-        "NetSense v{} 启动（平台后端: {}，日志目录: {}）",
-        env!("CARGO_PKG_VERSION"),
-        platform_name(),
-        log::log_dir().display()
+    //    目录取**用户级日志目录**（见 [`paths`]）：程序目录在 perMachine 安装与 macOS
+    //    的 .app 包里都可能是只读或被签名保护的，写进去等于改自己的安装包。
+    //    用户目录万一也不可写时（漫游配置被禁用之类），由 log::init 退到系统临时目录 ——
+    //    日志宁可在临时目录里，也不能没有。
+    let preferred_log_dir = paths::user_log_dir().unwrap_or_else(|| PathBuf::from("logs"));
+    log::init(
+        &preferred_log_dir,
+        true,
+        settings.log_retention_days,
+    );
+    if let Some(e) = &settings_error {
+        log::error(&i18n::tf(
+            "app.settings_failed",
+            &[("path", &settings_path.display().to_string()), ("error", e)],
+        ));
+    }
+    log::info(&i18n::tf(
+        "app.startup",
+        &[
+            ("version", env!("CARGO_PKG_VERSION")),
+            ("backend", platform_name()),
+            ("dir", &log::log_dir().display().to_string()),
+        ],
     ));
 
     // 2) Windows：WebView2 运行时缺失 → 给出可操作的下载提示，而不是静默退出。
@@ -72,77 +104,94 @@ fn main() {
     //    否则 Tauri 创建 WebView 失败、进程静默结束，用户只会看到「装完打不开」。
     #[cfg(target_os = "windows")]
     if !platform::webview2_available() {
-        log::error("未检测到 WebView2 运行时，无法创建界面");
+        log::error(&i18n::t("app.webview2_missing"));
         win_dialog::fatal(
-            "NetSense 缺少运行组件",
-            &format!(
-                "NetSense 需要 Microsoft Edge WebView2 运行时才能显示界面，当前系统未检测到该组件。\n\n\
-                 请安装后重新启动 NetSense（下载 Evergreen Bootstrapper 即可，安装很快）：\n  {}\n\n\
-                 下载页（需要其它版本或离线安装包时）：\n  {}\n\n\
-                 提示：Windows 10 1803 及以上、Windows 11 通常已自带该组件。\
-                 若你看到此提示，多为精简版系统，或该组件被安全软件移除。",
-                platform::WEBVIEW2_BOOTSTRAPPER_URL,
-                platform::WEBVIEW2_DOWNLOAD_URL
+            &i18n::t("dlg.webview2_title"),
+            &i18n::tf(
+                "dlg.webview2_body",
+                &[
+                    ("bootstrapper", platform::WEBVIEW2_BOOTSTRAPPER_URL),
+                    ("download", platform::WEBVIEW2_DOWNLOAD_URL),
+                ],
             ),
         );
         std::process::exit(2);
     }
 
     tauri::Builder::default()
-        .setup(|app| {
-            // 配置路径：与可执行文件同目录的 config.json，回退到工作目录
-            let config_path = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("config.json")))
-                .filter(|p| p.exists())
-                .unwrap_or_else(|| PathBuf::from("config.json"));
-
-            // i18n（默认 en，随后应用配置语言偏好）
-            i18n::init();
-
-            let shared = Arc::new(match state::AppState::load(config_path.clone()) {
-                Ok(s) => s,
+        .setup(move |app| {
+            // 配置文件：用户目录里那份优先，其次才是同目录那份（见 `paths::config_path`）
+            let config_path = paths::config_path();
+            // 软件配置在主流程里已经读过（语言、日志保留要用），这里只把那份结果带进状态
+            let shared = Arc::new(match state::AppState::load(
+                config_path.clone(),
+                settings_path.clone(),
+                settings.clone(),
+            ) {
+                Ok(s) => {
+                    // 「加载成功」只在真的成功时打。此前这行是无条件执行的，于是
+                    // 一份根本没读起来的配置也能在日志里留下 "Config loaded from …"，
+                    // 紧跟着一串 "Config invalid" —— 排障时最先看到的反而是假信号。
+                    log::info(&i18n::tf(
+                        "app.config_loaded",
+                        &[("path", &config_path.display().to_string())],
+                    ));
+                    s
+                }
                 Err(e) => {
-                    // 带着错误继续跑：配置是本版本拒绝自动迁移的旧文件时，
-                    // 用户仍然要能看到界面、看到该改什么 —— 静默退出只会变成「程序坏了」。
-                    log::error(&format!("配置加载失败: {}", e));
-                    win_dialog::warn("NetSense 配置无法读取", &e);
-                    state::AppState::fallback(config_path.clone(), e)
+                    if !config_path.is_file() {
+                        // 首次运行：磁盘上还没有配置。这不是故障 —— 界面照常起来，
+                        // 由用户在编辑器里建第一个 Profile，第一次保存会写出这个文件。
+                        log::warn(&i18n::tf(
+                            "app.config_absent",
+                            &[("path", &config_path.display().to_string())],
+                        ));
+                        state::AppState::no_config_yet(
+                            config_path.clone(),
+                            settings_path.clone(),
+                            settings.clone(),
+                        )
+                    } else {
+                        // 带着错误继续跑：配置是本版本拒绝自动迁移的旧文件时，
+                        // 用户仍然要能看到界面、看到该改什么 —— 静默退出只会变成「程序坏了」。
+                        log::error(&i18n::tf("app.config_failed", &[("error", &e)]));
+                        // 正文直接用 e：那已经是字典里取出的本地化句子（见 cfg.* / app.*），
+                        // 再包一层只会把两种语言缝在同一句里。
+                        win_dialog::warn(&i18n::t("dlg.config_unreadable_title"), &e);
+                        state::AppState::fallback(
+                            config_path.clone(),
+                            settings_path.clone(),
+                            settings.clone(),
+                            e,
+                        )
+                    }
                 }
             });
 
-            // 应用配置文件里的语言偏好
-            {
-                let cfg = shared.config.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(l) = &cfg.language {
-                    i18n::set_language(Language::from_code(l));
-                }
-            }
-
-            // i18n key parity 校验（仅告警，不阻断启动）
+            // i18n key parity 校验（仅告警，不阻断启动）。
             let (missing, extra, empty) = i18n::check_parity();
             if !(missing.is_empty() && extra.is_empty() && empty.is_empty()) {
+                // i18n-exempt: 这条不翻译。它给的是 `Debug` 输出的 key 清单，只有对着
+                // 字典才读得懂 —— 翻成任何一种语言，读的仍然是那批英文标识符。
                 log::error(&format!(
-                    "i18n parity 异常: missing={:?} extra={:?} empty={:?}",
+                    "i18n parity mismatch: missing={:?} extra={:?} empty={:?}",
                     missing, extra, empty
                 ));
             }
 
             // 平台标识打进日志，便于跨平台排障时一眼确认跑的是哪个后端
-            log::info(&format!(
-                "NetSense v{} 平台后端: {} (提权通道: {})",
-                env!("CARGO_PKG_VERSION"),
-                platform_name(),
-                priv_channel().code()
-            ));
             log::info(&i18n::tf(
-                "app.config_loaded",
-                &[("path", &config_path.display().to_string())],
+                "app.backend",
+                &[
+                    ("version", env!("CARGO_PKG_VERSION")),
+                    ("backend", platform_name()),
+                    ("channel", priv_channel().code()),
+                ],
             ));
 
             app.manage(shared.clone());
 
-            // 保存 AppHandle 供后续事件广播 / 托盘菜单刷新使用
+            // 保存 AppHandle 供后续事件广播 / 面板刷新使用
             let _ = shared.app.set(app.handle().clone());
 
             // 菜单栏应用（macOS）：不占 Dock，只有状态栏图标 + 弹窗面板
@@ -156,11 +205,8 @@ fn main() {
             // 托盘创建失败不该让整个应用陪葬：托盘只是交互入口，而 setup 返回 Err 会让
             // run() 返回 Err → 末尾 .expect() panic → release 版静默退出（无控制台）。
             // 记一条 error 后继续，至少编辑器窗口还能打开，日志里也能看到原因。
-            if let Err(e) = tray::build_tray(app, &shared) {
-                log::error(&format!(
-                    "托盘创建失败（应用继续运行，请检查图标与托盘菜单配置）: {}",
-                    e
-                ));
+            if let Err(e) = tray::build_tray(app) {
+                log::error(&i18n::tf("app.tray_failed", &[("error", &e.to_string())]));
             }
 
             // 启动即显示**编辑器窗口** —— 唯一无歧义的「应用已启动」信号。
@@ -189,9 +235,11 @@ fn main() {
                 let _ = window.hide();
                 popup::mark_hidden();
             }
-            // 关掉编辑器窗口 = 收回菜单栏常驻，而不是退出应用
+            // 关掉编辑器 / 设置 / 日志窗口 = 收回菜单栏常驻，而不是退出应用
             tauri::WindowEvent::CloseRequested { api, .. }
-                if window.label() == popup::MAIN_LABEL =>
+                if window.label() == popup::MAIN_LABEL
+                    || window.label() == popup::SETTINGS_LABEL
+                    || window.label() == popup::LOGS_LABEL =>
             {
                 api.prevent_close();
                 let _ = window.hide();
@@ -210,9 +258,21 @@ fn main() {
             ipc::force_dhcp,
             ipc::probe_network,
             ipc::get_networks,
+            ipc::get_printers,
             ipc::open_logs,
+            ipc::get_log_files,
+            ipc::read_log,
+            ipc::open_log_viewer,
+            ipc::close_log_viewer,
             ipc::set_language,
+            ipc::get_app_settings,
+            ipc::set_autostart,
+            ipc::set_log_retention,
+            ipc::open_config_folder,
+            ipc::open_settings,
+            ipc::close_settings,
             ipc::get_strings,
+            ipc::get_language,
             ipc::open_editor,
             ipc::close_editor,
             ipc::quit_app,
@@ -224,13 +284,15 @@ fn main() {
         .unwrap_or_else(|e| {
             // 走到这里 = 连应用都建不起来（窗口 / WebView 创建失败等）。release 版没有
             // 控制台，不弹窗就又是「装完打不开」；日志里留下完整错误供远程定位。
-            log::error(&format!("创建应用失败: {}", e));
+            log::error(&i18n::tf("app.create_failed", &[("error", &e.to_string())]));
             win_dialog::fatal(
-                "NetSense 启动失败",
-                &format!(
-                    "NetSense 无法创建应用窗口，进程即将退出。\n\n错误: {}\n\n日志目录:\n{}",
-                    e,
-                    log::log_dir().display()
+                &i18n::t("dlg.fatal_title"),
+                &i18n::tf(
+                    "dlg.create_failed_body",
+                    &[
+                        ("error", &e.to_string()),
+                        ("dir", &log::log_dir().display().to_string()),
+                    ],
                 ),
             );
             std::process::exit(1);
@@ -246,7 +308,7 @@ fn main() {
             }
             // 事件循环真的结束了（正常只会在用户显式退出时走到）。
             // 记一条，让日志能区分「用户自己退的」和「它自己死了」。
-            tauri::RunEvent::Exit => log::info("事件循环结束，进程正常退出"),
+            tauri::RunEvent::Exit => log::info(&i18n::t("app.exited")),
             _ => {}
         });
 }

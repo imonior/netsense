@@ -1,6 +1,5 @@
 {
   "schema": 1,
-  "language": "en",
   "allowed_scripts": [
     "/opt/ops/office-init.sh"
   ],
@@ -9,6 +8,7 @@
       "id": "home",
       "name": "HomeWiFi",
       "enabled": true,
+      "quick": true,
       "detection": {
         "mode": "network_events",
         "change_delay_secs": 5
@@ -54,6 +54,7 @@
       "id": "office",
       "name": "Office_5G",
       "enabled": true,
+      "quick": true,
       "detection": {
         "mode": "network_events_and_polling",
         "change_delay_secs": 5,
@@ -105,7 +106,8 @@
         "one_shot": [
           { "id": "a1", "enabled": true, "priority": 1, "action": { "type": "launch_app", "app": "/Applications/Slack.app" } },
           { "id": "a2", "enabled": true, "priority": 1, "action": { "type": "run_script", "path": "scripts/office-vpn.sh", "elevated": false } },
-          { "id": "a3", "enabled": false, "priority": 2, "action": { "type": "launch_app", "app": "/Applications/Test.app" } }
+          { "id": "a3", "enabled": false, "priority": 2, "action": { "type": "launch_app", "app": "/Applications/Test.app" } },
+          { "id": "a4", "enabled": true, "priority": 2, "action": { "type": "set_default_printer", "printer": "Office LaserJet" } }
         ],
         "persistent": [
           { "id": "p1", "enabled": true, "priority": 1, "action": { "type": "keep_wireguard_connected", "tunnel": "wg0", "interval_secs": 15 } }

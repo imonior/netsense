@@ -13,6 +13,10 @@
 //!
 //! 零命中时的网络处置是顶层 `fallback`：它不是一个可匹配的
 //! Profile（它没有条件），因此不该占用 Profile 名额。
+//!
+//! 这里**没有**界面语言、日志保留天数之类的软件配置 —— 它们住在同一目录的
+//! `settings.json`（见 [`crate::appconfig`]）。两份的判据是「改了它会改变自动化行为吗」：
+//! 会 → 这份；不会 → 那份。混在一起的代价是每次换语言都惊动配置热重载与网络重评估。
 
 use serde::{Deserialize, Serialize};
 
@@ -25,10 +29,7 @@ pub struct Config {
     /// schema 版本；**必须**等于 [`SCHEMA`]，缺失也视为不合法（见 `Config::load`）。
     #[serde(default)]
     pub schema: u32,
-    /// 当前 UI 语言（zh/en/zh-TW/ja/ko）；缺省回退 en。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
-    /// 有序：托盘与设置面板按此顺序展示，不再有「谁优先级高」的隐含排序。
+    /// 有序：面板的「快速切换」与编辑器按此顺序展示，不再有「谁优先级高」的隐含排序。
     #[serde(default)]
     pub profiles: Vec<Profile>,
     /// 零命中时的网络处置（不是 Profile，故不参与匹配与冲突判定）。
@@ -102,6 +103,13 @@ pub struct Profile {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 是否出现在托盘面板的「快速切换」区。
+    ///
+    /// 默认 `true`：这个字段是后加的，若「未配置 = 不显示」，老配置里的 Profile 会一夜
+    /// 之间从面板上消失，而面板是唯一不用开窗就能切换的入口。判据只有一条：面板列出
+    /// `quick == true` 的那些；取消勾选只是从面板收起，编辑器里它仍然存在。
+    #[serde(default = "default_true")]
+    pub quick: bool,
     /// 检测方式属于**每个 Profile 自己**：家里希望切了 SSID 立刻生效，
     /// 办公室那套静态 IP 宁可多等几秒也不要漫游抖动时反复下发。
     #[serde(default)]
@@ -124,6 +132,7 @@ impl Default for Profile {
             id: String::new(),
             name: String::new(),
             enabled: true,
+            quick: true,
             detection: DetectionConfig::default(),
             rules: Vec::new(),
             then: None,
@@ -361,6 +370,11 @@ pub enum OneShotActionType {
         args: Vec<String>,
         #[serde(default)]
         elevated: bool,
+    },
+    /// 把某台打印机设为默认。`printer` 是**系统里那台打印机的名字**（编辑器下拉里列出的
+    /// 就是它），不是驱动名、也不是队列 URI —— 三个平台都按名字找它，名字对不上就报失败。
+    SetDefaultPrinter {
+        printer: String,
     },
 }
 

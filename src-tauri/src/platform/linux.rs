@@ -5,12 +5,15 @@
 //!
 //! 提权策略与 macOS 对称：优先 `sudo -n`（配合 sudoers 免密规则 → 无弹窗），
 //! 不可用时回落 `pkexec`（图形授权框）。
+//!
+//! 打印机走 CUPS 客户端命令（`lpstat` / `lpoptions`），与 macOS 共用同一套解析。
 
 use super::{
-    extract_mac, poll_ssid_watch, run, timeout_secs, Health, InterfaceStatus, NetworkPlatform,
-    PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
+    extract_mac, poll_ssid_watch, printers_from_lpstat, run, timeout_secs, Health, InterfaceStatus,
+    NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
+use crate::i18n;
 use std::sync::OnceLock;
 
 /// `launch_app` 到底该执行什么。单独成函数是为了把「选路」这件事测到 ——
@@ -23,12 +26,10 @@ fn launch_plan(app: &str, args: &[String], is_exec: bool) -> Result<(String, Vec
         return Ok((app.to_string(), args.to_vec()));
     }
     if !args.is_empty() {
-        return Err(format!(
-            "{} 不是可执行文件，只能交给 xdg-open，而它无法向应用传参（收到 {} 个参数）。\
-             要给应用传参就把 app 写成可执行文件的绝对路径。",
-            app,
-            args.len()
-        ));
+        return Err(i18n::tf("pal.xdg_no_args", &[
+            ("app", app),
+            ("count", &args.len().to_string()),
+        ]));
     }
     Ok(("xdg-open".to_string(), vec![app.to_string()]))
 }
@@ -47,7 +48,12 @@ fn spawn_detached(program: &str, args: &[String]) -> Result<(), String> {
         .stderr(std::process::Stdio::null());
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("spawn {}: {}", program, e))?;
+        .map_err(|e| {
+            i18n::tf(
+                "pal.spawn_failed",
+                &[("program", program), ("error", &e.to_string())],
+            )
+        })?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -322,10 +328,20 @@ fn con_mod_props(p: &NetworkConfig) -> Result<Vec<String>, String> {
     let mut mods: Vec<String> = Vec::new();
     match p.mode {
         Mode::Manual => {
-            let ip = p.ip.clone().ok_or("manual 模式缺 ip")?;
-            let mask = p.netmask.clone().ok_or("manual 模式缺 netmask")?;
-            let gw = p.gateway.clone().ok_or("manual 模式缺 gateway")?;
-            let prefix = mask_to_prefix(&mask).ok_or_else(|| format!("掩码不合法: {}", mask))?;
+            let ip = p
+                .ip
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "ip")]))?;
+            let mask = p
+                .netmask
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "netmask")]))?;
+            let gw = p
+                .gateway
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "gateway")]))?;
+            let prefix = mask_to_prefix(&mask)
+                .ok_or_else(|| i18n::tf("pal.mask_invalid", &[("mask", &mask)]))?;
             mods.push("ipv4.method".into());
             mods.push("manual".into());
             mods.push("ipv4.addresses".into());
@@ -363,9 +379,18 @@ fn con_mod_props(p: &NetworkConfig) -> Result<Vec<String>, String> {
             mods.push("auto".into());
         }
         Some(V6Mode::Manual) => {
-            let addr = p.ipv6.clone().ok_or("v6 manual 缺 ipv6")?;
-            let prefix = p.v6prefix.clone().ok_or("v6 manual 缺 v6prefix")?;
-            let gw = p.v6gateway.clone().ok_or("v6 manual 缺 v6gateway")?;
+            let addr = p
+                .ipv6
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "ipv6")]))?;
+            let prefix = p
+                .v6prefix
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "v6prefix")]))?;
+            let gw = p
+                .v6gateway
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "v6gateway")]))?;
             mods.push("ipv6.method".into());
             mods.push("manual".into());
             mods.push("ipv6.addresses".into());
@@ -463,10 +488,17 @@ impl NetworkPlatform for LinuxPlatform {
         st
     }
 
+    /// 这一腿的快照从来不留缓存（上面每次都是现场 `nmcli`），所以「新鲜的」与「现在这份」
+    /// 是同一个东西。写出来而不是省略，是因为契约要求三份实现各自表态：哪天这一腿也加了
+    /// 缓存，这一行就是必须跟着改的地方，而继承默认实现不会留下任何提醒。
+    fn fresh_status(&self) -> InterfaceStatus {
+        self.get_status()
+    }
+
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {
-        let dev = wifi_iface().ok_or("未找到无线设备（请确认 NetworkManager 与 Wi-Fi 已启用）")?;
+        let dev = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_device_hint"))?;
         let conn = active_connection(&dev)
-            .ok_or_else(|| format!("设备 {} 上没有活动连接", dev))?;
+            .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", &dev)]))?;
 
         // 一次 `con mod` 下发 IP/网关/DNS（减少提权次数）
         let mods = con_mod_props(p)?;
@@ -481,13 +513,14 @@ impl NetworkPlatform for LinuxPlatform {
     }
 
     fn set_dhcp(&self) -> Result<(), String> {
-        let dev = wifi_iface().ok_or("未找到无线设备")?;
+        let dev = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_iface"))?;
         self.set_dhcp_for(&dev)
     }
 
     /// 按**设备名**切回 DHCP：设备 → 活动连接（nmcli 的操作对象是连接而不是设备）。
     fn set_dhcp_for(&self, dev: &str) -> Result<(), String> {
-        let conn = active_connection(dev).ok_or("没有活动连接")?;
+        let conn = active_connection(dev)
+            .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", dev)]))?;
         run_priv(
             "nmcli",
             &[
@@ -541,6 +574,13 @@ impl NetworkPlatform for LinuxPlatform {
                 };
                 let gateway = get_field(&dev, "IP4.GATEWAY");
                 let dns = get_field_all(&dev, "IP4.DNS");
+                // 全局 IPv6：nmcli 会连 link-local 一起列出来，而 `fe80::` 每台机器都有、
+                // 也不代表这个口能走 IPv6，故跳过它取第一条真正的全局地址（去掉 /prefix）。
+                let ipv6 = get_field_all(&dev, "IP6.ADDRESS")
+                    .into_iter()
+                    .find(|a| !a.trim().to_ascii_lowercase().starts_with("fe80:"))
+                    .map(|a| a.split('/').next().unwrap_or("").trim().to_string())
+                    .filter(|a| !a.is_empty());
                 // 取 MAC 必须在 `dev` 被搬进 `NicInfo` 之前：`name: dev` 一移动，后面再
                 // `&dev` 就是 use-after-move（这个函数体只有 Linux 腿会编译，本机看不到）。
                 let mac = get_field(&dev, "GENERAL.HWADDR");
@@ -568,6 +608,7 @@ impl NetworkPlatform for LinuxPlatform {
                     mac,
                     ipv4,
                     netmask,
+                    ipv6,
                     gateway,
                     gateway_mac,
                     dns: if dns.is_empty() { None } else { Some(dns.join(",")) },
@@ -645,7 +686,7 @@ impl NetworkPlatform for LinuxPlatform {
         let name = target.name();
         if nm_tunnel_state(target).is_some() {
             return nmcli(&["connection", "up", name]).map(|_| ()).map_err(|e| {
-                format!("nmcli connection up {} 失败: {}（需要密码或权限时本应用不会代答）", name, e)
+                i18n::tf("pal.nm_up_failed", &[("name", name), ("error", &e)])
             });
         }
         if ip_link_is_up(name).is_some() {
@@ -657,26 +698,20 @@ impl NetworkPlatform for LinuxPlatform {
             if priv_channel() == PrivChannel::Direct {
                 return run("sudo", &["-n", "ip", "link", "set", name, "up"])
                     .map(|_| ())
-                    .map_err(|e| format!("sudo -n ip link set {} up 失败: {}", name, e));
+                    .map_err(|e| {
+                        i18n::tf("pal.sudo_ip_link_failed", &[("name", name), ("error", &e)])
+                    });
             }
-            return Err(format!(
-                "内核接口 {} 存在但没能拉起，而 `ip link set up` 需要 root。\
-                 本应用不在后台弹授权框：请给该接口建一条 NetworkManager 连接，或配好 sudoers 免密。",
-                name
-            ));
+            return Err(i18n::tf("pal.ip_link_needs_root", &[("name", name)]));
         }
         let known = nm_connection_names();
         Err(if known.is_empty() {
-            format!(
-                "Linux 上找不到隧道 {}：NetworkManager 里没有任何连接，内核也没有这个名字的设备",
-                name
-            )
+            i18n::tf("pal.tunnel_missing_no_nm", &[("name", name)])
         } else {
-            format!(
-                "Linux 上找不到隧道 {}；NM 已有连接：{}",
-                name,
-                known.join(", ")
-            )
+            i18n::tf("pal.tunnel_missing_nm_list", &[
+                ("name", name),
+                ("conns", &known.join(", ")),
+            ])
         })
     }
 
@@ -748,6 +783,22 @@ impl NetworkPlatform for LinuxPlatform {
         } else {
             Some(list)
         }
+    }
+
+    fn list_printers(&self) -> Vec<PrinterInfo> {
+        // CUPS 的客户端命令，与 macOS 同一套（Linux 上 CUPS 就是打印子系统本身）。
+        // 没装 CUPS 时 `lpstat` 起不来 → 空清单；界面上表现为「没有候选，请手输」。
+        let Ok(names) = run("lpstat", &["-e"]) else {
+            return Vec::new();
+        };
+        let default = run("lpstat", &["-d"]).unwrap_or_default();
+        printers_from_lpstat(&names, &default)
+    }
+
+    fn set_default_printer(&self, printer: &str) -> Result<(), String> {
+        // 与 macOS 同理：`lpoptions -d` 写的是当前用户的 ~/.cups/lpoptions，不提权。
+        // 系统级默认（`lpadmin -d`）要 root，而这个动作每次进入 Active 都会跑。
+        run("lpoptions", &["-d", printer]).map(|_| ())
     }
 }
 

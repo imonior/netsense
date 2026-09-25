@@ -18,10 +18,11 @@
 //!    不做字符串拼接，避免接口名含空格/特殊字符时被重新切分。
 
 use super::{
-    poll_ssid_watch, run, timeout_secs, Health, InterfaceStatus, NetworkPlatform, PrivChannel,
-    ProbeTarget, TunnelTarget, WatcherHandle,
+    poll_ssid_watch, run, timeout_secs, Health, InterfaceStatus, NetworkPlatform, PrinterInfo,
+    PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
+use crate::i18n;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -100,12 +101,12 @@ fn netsh_line(args: &[&str]) -> String {
 }
 
 /// `-PrefixLength` 只接受整数。在配置进入 PowerShell 之前把 `v6prefix` 收敛成数字：
-/// 既给出明确的中文报错，也彻底排除了向 `-PrefixLength` 后面追加 PowerShell 语句的可能。
+/// 既给出按界面语言写出的报错，也彻底排除了向 `-PrefixLength` 后面追加 PowerShell 语句的可能。
 fn parse_prefix_len(s: &str) -> Result<String, String> {
     match s.trim().parse::<u32>() {
         Ok(n) if n <= 128 => Ok(n.to_string()),
-        Ok(n) => Err(format!("v6prefix 超出合法范围 (0-128)：{}", n)),
-        Err(_) => Err(format!("v6prefix 必须是 0-128 的整数，收到：{}", s)),
+        Ok(n) => Err(i18n::tf("pal.v6prefix_range", &[("n", &n.to_string())])),
+        Err(_) => Err(i18n::tf("pal.v6prefix_not_int", &[("s", s)])),
     }
 }
 
@@ -174,9 +175,9 @@ fn run_elevated_ps(body: &str) -> Result<(), String> {
 /// UAC 被用户点掉时的那条报错（外层脚本把取消编码成退出码 1223 = ERROR_CANCELLED）。
 fn uac_cancelled(e: String) -> String {
     if e.contains("1223") {
-        "提权被取消（UAC）".to_string()
+        i18n::t("pal.uac_cancelled")
     } else {
-        format!("提权执行失败: {}", e)
+        i18n::tf("pal.elevate_failed", &[("error", &e)])
     }
 }
 
@@ -574,9 +575,18 @@ fn apply_ops(iface: &str, p: &NetworkConfig) -> Result<Vec<WinOp>, String> {
     let mut ops: Vec<WinOp> = Vec::new();
     match p.mode {
         Mode::Manual => {
-            let ip = p.ip.clone().ok_or("manual 模式缺 ip")?;
-            let mask = p.netmask.clone().ok_or("manual 模式缺 netmask")?;
-            let gw = p.gateway.clone().ok_or("manual 模式缺 gateway")?;
+            let ip = p
+                .ip
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "ip")]))?;
+            let mask = p
+                .netmask
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "netmask")]))?;
+            let gw = p
+                .gateway
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "gateway")]))?;
             ops.push(WinOp::SetManual {
                 iface: iface.to_string(),
                 ip,
@@ -607,10 +617,19 @@ fn apply_ops(iface: &str, p: &NetworkConfig) -> Result<Vec<WinOp>, String> {
             iface: iface.to_string(),
         }),
         Some(V6Mode::Manual) => {
-            let addr = p.ipv6.clone().ok_or("v6 manual 缺 ipv6")?;
-            let raw = p.v6prefix.clone().ok_or("v6 manual 缺 v6prefix")?;
+            let addr = p
+                .ipv6
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "ipv6")]))?;
+            let raw = p
+                .v6prefix
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "v6prefix")]))?;
             let prefix = parse_prefix_len(&raw)?;
-            let gw = p.v6gateway.clone().ok_or("v6 manual 缺 v6gateway")?;
+            let gw = p
+                .v6gateway
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "v6gateway")]))?;
             ops.push(WinOp::SetV6Manual {
                 iface: iface.to_string(),
                 addr,
@@ -787,17 +806,14 @@ fn wireguard_tunnel_names() -> Vec<String> {
 /// 一份 config.json 能指名安装 `%PROGRAMDATA%` 之外的任意 `.conf`。
 fn safe_tunnel_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
-        return Err("隧道名为空".to_string());
+        return Err(i18n::t("pal.tunnel_name_empty"));
     }
     if name
         .chars()
         .any(|c| c == '/' || c == '\\' || c == ':' || c < ' ')
         || name.contains("..")
     {
-        return Err(format!(
-            "隧道名 {} 不合法：只能是隧道本身的名字，不能含路径分隔符或控制字符",
-            name
-        ));
+        return Err(i18n::tf("pal.tunnel_name_invalid", &[("name", name)]));
     }
     Ok(())
 }
@@ -810,23 +826,17 @@ fn safe_tunnel_name(name: &str) -> Result<(), String> {
 /// worker，一次 tick 有自己的等待上限（见 `automation::persistent`）。
 fn connect_wireguard(tunnel: &str) -> Result<(), String> {
     safe_tunnel_name(tunnel)?;
-    let dir = wireguard_conf_dir().ok_or_else(|| {
-        "找不到 %PROGRAMDATA%，无法定位 WireGuard 的隧道配置目录".to_string()
-    })?;
+    let dir = wireguard_conf_dir().ok_or_else(|| i18n::t("pal.no_programdata"))?;
     let conf = dir.join(format!("{}.conf", tunnel));
     if !conf.is_file() {
         let known = wireguard_tunnel_names();
+        let dir_s = dir.display().to_string();
         return Err(if known.is_empty() {
-            format!(
-                "WireGuard 配置目录里没有任何隧道（应为 {}），先在 WireGuard 客户端里导入名为 {} 的隧道",
-                dir.display(),
-                tunnel
-            )
+            i18n::tf("pal.wg_dir_empty", &[("dir", &dir_s), ("name", tunnel)])
         } else {
-            format!(
-                "WireGuard 配置目录里没有 {}.conf；已有隧道：{}",
-                tunnel,
-                known.join(", ")
+            i18n::tf(
+                "pal.wg_conf_missing",
+                &[("name", tunnel), ("existing", &known.join(", "))],
             )
         });
     }
@@ -835,9 +845,9 @@ fn connect_wireguard(tunnel: &str) -> Result<(), String> {
     run(&exe, &["/installtunnelservice", &conf_s])
         .map(|_| ())
         .map_err(|e| {
-            format!(
-                "{} /installtunnelservice {} 失败: {}（安装隧道服务需要管理员权限，本应用不在后台弹 UAC）",
-                exe, conf_s, e
+            i18n::tf(
+                "pal.wg_install_failed",
+                &[("exe", &exe), ("conf", &conf_s), ("error", &e)],
             )
         })
 }
@@ -845,11 +855,53 @@ fn connect_wireguard(tunnel: &str) -> Result<(), String> {
 /// 拨一条已存好的电话簿/VPN 连接（凭据已保存时全程无需交互）。
 fn rasdial(entry: &str) -> Result<(), String> {
     run("rasdial", &[entry]).map(|_| ()).map_err(|e| {
-        format!(
-            "rasdial {} 失败: {}（需要现场输入账号密码或验证码的连接没法在后台拨通，请先手动连一次并勾选保存凭据）",
-            entry, e
-        )
+        i18n::tf("pal.rasdial_failed", &[("entry", entry), ("error", &e)])
     })
+}
+
+// —————————————————————————— 打印机（3B1 set_default_printer） ——————————————————————————
+
+/// 「这台机器有哪些打印机、哪台是默认」，一台一行，`名字<TAB>True|False`。
+///
+/// 走 CIM 的 `Win32_Printer` 而不是 `Get-Printer`：本文件的读取一律走 CIM 对象
+/// （语言无关、编码可控，见模块头），而 `Default` 标志本来就在这张表上，不需要再问一次。
+const PRINTER_ROWS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
+$rows = Get-CimInstance -ClassName Win32_Printer | ForEach-Object { "$($_.Name)`t$($_.Default)" };
+[Console]::Out.Write(($rows -join "`n"))"#;
+
+/// 解析 [`PRINTER_ROWS_PS`] 的行。名字为空的行丢掉 —— 那是 CIM 里没填名字的条目，
+/// 选中它只会让下一次下发拿空串去找打印机。
+fn parse_printer_rows(out: &str) -> Vec<PrinterInfo> {
+    out.lines()
+        .filter_map(|l| {
+            let (name, flag) = l.split_once('\t')?;
+            let name = name.trim();
+            (!name.is_empty()).then(|| PrinterInfo {
+                name: name.to_string(),
+                is_default: flag.trim().eq_ignore_ascii_case("true"),
+            })
+        })
+        .collect()
+}
+
+/// 「把 printer 设为当前用户的默认打印机」的脚本。
+///
+/// 名字只进 `$want` 这**一个**单引号字面量（[`psq`] 把内部的 `'` 翻倍），比较放在
+/// `Where-Object` 里做。刻意不用 WQL 的 `-Filter "Name='…'"`：那是在双引号里再闭合
+/// 一层单引号，多一处语法边界就多一类写错闭合的可能，而在对象上比名字没有任何代价。
+///
+/// 找不到那台打印机、以及 `SetDefaultPrinter` 返回非 0，都用**非 0 退出码**说话 ——
+/// `ps()` 据此把系统原话变成界面上的错误，而不是「动作记成功、打印机没变」。
+fn set_default_printer_script(printer: &str) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         $want={w}; \
+         $p=@(Get-CimInstance -ClassName Win32_Printer | Where-Object {{ $_.Name -eq $want }}); \
+         if ($p.Count -eq 0) {{ Write-Error \"no printer named $want\"; exit 3 }} \
+         $r=$p[0] | Invoke-CimMethod -MethodName SetDefaultPrinter; \
+         if ($r.ReturnValue -ne 0) {{ Write-Error \"SetDefaultPrinter returned $($r.ReturnValue)\"; exit 4 }}",
+        w = psq(printer)
+    )
 }
 
 impl NetworkPlatform for WindowsPlatform {
@@ -865,13 +917,17 @@ impl NetworkPlatform for WindowsPlatform {
         status_cached()
     }
 
+    fn fresh_status(&self) -> InterfaceStatus {
+        read_status()
+    }
+
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {
-        let iface = wifi_iface().ok_or("未找到无线网卡（请确认 Wi-Fi 适配器已启用）")?;
+        let iface = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_adapter_hint"))?;
         exec_ops(&apply_ops(&iface, p)?)
     }
 
     fn set_dhcp(&self) -> Result<(), String> {
-        let iface = wifi_iface().ok_or("未找到无线网卡")?;
+        let iface = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_iface"))?;
         exec_ops(&[
             WinOp::SetDhcp {
                 iface: iface.clone(),
@@ -909,12 +965,13 @@ $list = New-Object System.Collections.Generic.List[object];
 Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
   $n = $_; $idx = $n.ifIndex;
   $ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1;
+  $v6   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Link' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1;
   $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
   $dns  = Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4;
   $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
   $list.Add([pscustomobject]@{
     name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType;
-    ip=$ip.IPAddress; prefix=$ip.PrefixLength; gw=$rt.NextHop;
+    ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop;
     dns=(($dns | ForEach-Object { $_.ServerAddresses }) -join ',');
     ssid=$prof.Name;
   });
@@ -989,6 +1046,7 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                     mac: get("mac"),
                     ipv4,
                     netmask,
+                    ipv6: get("v6"),
                     gateway,
                     gateway_mac,
                     dns: get("dns"),
@@ -1061,11 +1119,13 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
     fn tunnel_connect(&self, target: &TunnelTarget) -> Result<(), String> {
         let name = target.name();
         match win_adapter(target) {
-            Some(a) if !a.provider_matched => Err(format!(
-                "网卡 {} 的描述（{}）里看不出 provider={}，provider 与 profile 要来自同一条隧道",
-                a.name,
-                a.desc,
-                target.provider().unwrap_or("")
+            Some(a) if !a.provider_matched => Err(i18n::tf(
+                "pal.iface_provider_mismatch",
+                &[
+                    ("name", &a.name),
+                    ("desc", &a.desc),
+                    ("provider", target.provider().unwrap_or("")),
+                ],
             )),
             Some(a) if a.up => Ok(()),
             Some(_) => match target {
@@ -1075,23 +1135,19 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
             None => {
                 let installed = wireguard_tunnel_names();
                 if !installed.is_empty() {
-                    Err(format!(
-                        "Windows 上没有名为 {} 的网卡；WireGuard 已装的隧道：{}",
-                        name,
-                        installed.join(", ")
+                    Err(i18n::tf(
+                        "pal.iface_missing_wg",
+                        &[("name", name), ("conns", &installed.join(", "))],
                     ))
                 } else {
-                    Err(format!(
-                        "Windows 上没有名为 {} 的网卡（这台机器上一个隧道都没有）",
-                        name
-                    ))
+                    Err(i18n::tf("pal.iface_missing_none", &[("name", name)]))
                 }
             }
         }
     }
 
     fn add_route(&self, dest: &str, gw: &str, metric: u32) -> Result<(), String> {
-        let iface = wifi_iface().ok_or("未找到无线网卡")?;
+        let iface = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_iface"))?;
         exec_ops(&[WinOp::RouteAdd {
             iface,
             dest: dest.to_string(),
@@ -1178,11 +1234,54 @@ $names = Get-ChildItem -Path $d -Recurse -Filter *.xml -ErrorAction SilentlyCont
             Some(list)
         }
     }
+
+    fn list_printers(&self) -> Vec<PrinterInfo> {
+        ps(PRINTER_ROWS_PS)
+            .map(|out| parse_printer_rows(&out))
+            .unwrap_or_default()
+    }
+
+    fn set_default_printer(&self, printer: &str) -> Result<(), String> {
+        // `SetDefaultPrinter` 是**每用户**的设置，不需要管理员 —— 与 macOS/Linux 侧
+        // 刻意选 `lpoptions -d` 是同一个决策：这个动作每次进入 Active 都会跑。
+        ps(&set_default_printer_script(printer)).map(|_| ())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CIM 打的是 .NET 布尔的 `True` / `False`；名字里带空格与反斜杠（网络共享打印机）
+    /// 都必须原样留着 —— 那是用户接下来要写进配置里、下次下发要拿去找打印机的字符串。
+    #[test]
+    fn printer_rows_keep_the_exact_name_and_only_one_default() {
+        let rows = parse_printer_rows(
+            "Microsoft Print to PDF\tFalse\nHP OfficeJet Pro 476\tTrue\n\\\\filesrv\\Lobby\tFalse\n",
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].name, "HP OfficeJet Pro 476");
+        assert!(rows[1].is_default);
+        assert!(!rows[0].is_default);
+        assert_eq!(rows[2].name, r"\\filesrv\Lobby");
+        assert!(!rows[2].is_default);
+        // 没有 `\t` 的行（PowerShell 报错文本混进来时）与空名字的行都不该变成一条打印机
+        assert!(parse_printer_rows("Get-CimInstance : Access denied\n\tTrue\n").is_empty());
+    }
+
+    /// 打印机名是一段自由文本，而这里要把它交进一段 PowerShell 里。它只能出现在
+    /// `$want` 那一个单引号字面量内，且内部的 `'` 必须被翻倍 —— 否则一份 config.json
+    /// 就是任意命令执行。
+    #[test]
+    fn a_printer_name_cannot_close_its_own_quotes() {
+        let s = set_default_printer_script(r"O'Brien's 'HP; Remove-Item x");
+        assert!(s.contains(r"$want='O''Brien''s ''HP; Remove-Item x';"), "{s}");
+        // 比较是在对象上做的，不是拼进 WQL 的 -Filter
+        assert!(!s.contains("-Filter"), "{s}");
+        assert!(s.contains("-eq $want"), "{s}");
+        // 两种失败都得用非 0 退出码说话，否则「打印机没换成」会被记成动作成功
+        assert!(s.contains("exit 3") && s.contains("exit 4"), "{s}");
+    }
 
     /// 两个数组构造器**故意**长得不一样，这条测试就是不让它们被"顺手统一"掉：
     /// `& netsh.exe @(...)` 由 PowerShell 自己补引号，而 `Start-Process -ArgumentList @(...)`

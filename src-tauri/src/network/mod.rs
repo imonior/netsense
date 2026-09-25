@@ -10,6 +10,7 @@ pub mod health;
 pub mod readback;
 
 use crate::config::NetworkConfig;
+use crate::i18n;
 use crate::platform::{Health, NetworkPlatform, ProbeTarget};
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ const READBACK_SETTLE: Duration = Duration::from_millis(800);
 pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
     if let Err(e) = plat.apply_network(cfg) {
         return Stage3A::Failed {
-            reason: format!("下发网络配置失败: {}", e),
+            reason: i18n::tf("net.apply_failed", &[("error", &e)]),
         };
     }
     // 静态路由属于 3A：路由没加上时继续跑自动化只会放大问题 —— 放在 on_apply 里，
@@ -44,12 +45,12 @@ pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
         } else {
             match r.gateway.as_deref() {
                 Some(g) => plat.add_route(&r.dest, g, r.metric),
-                None => Err(format!("路由 {} 缺 gateway", r.dest)),
+                None => Err(i18n::tf("net.route_no_gw", &[("dest", &r.dest)])),
             }
         };
         if let Err(e) = res {
             return Stage3A::Failed {
-                reason: format!("路由 {} 失败: {}", r.dest, e),
+                reason: i18n::tf("net.route_failed", &[("dest", &r.dest), ("error", &e)]),
             };
         }
     }
@@ -71,10 +72,12 @@ pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
         }
     }
     Stage3A::Failed {
-        reason: format!(
-            "回读校验未通过（{} 次采样后仍不符）: {}",
-            READBACK_ATTEMPTS,
-            last.map(|f| f.to_string()).unwrap_or_default()
+        reason: i18n::tf(
+            "net.verify_failed",
+            &[
+                ("tries", &READBACK_ATTEMPTS.to_string()),
+                ("detail", &last.map(|f| f.to_string()).unwrap_or_default()),
+            ],
         ),
     }
 }

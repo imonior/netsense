@@ -7,21 +7,22 @@
 //! 而误报的代价（用户从此不敢信状态灯）比漏报更高。
 
 use crate::config::{Mode, NetworkConfig};
+use crate::i18n;
 use crate::platform::{InterfaceStatus, NetworkPlatform};
 use std::fmt;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyFailure {
-    /// 形如 `ip: 期望 192.168.1.100，实际 169.254.23.9`
+    /// 形如 `ip: 期望 192.168.1.100，实际 169.254.23.9`（措辞随界面语言，字段名与地址原样保留）
     pub mismatches: Vec<String>,
 }
 
 impl fmt::Display for VerifyFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.mismatches.is_empty() {
-            write!(f, "无差异")
+            write!(f, "{}", i18n::t("net.no_diff"))
         } else {
-            write!(f, "{}", self.mismatches.join("；"))
+            write!(f, "{}", self.mismatches.join(&i18n::t("net.diff_sep")))
         }
     }
 }
@@ -30,7 +31,9 @@ pub fn readback_match<P: NetworkPlatform>(
     plat: &P,
     want: &NetworkConfig,
 ) -> Result<(), VerifyFailure> {
-    check(&plat.get_status(), want)
+    // `fresh_status` 而不是 `get_status`：校验循环靠的是「每次采样都真的去问一次系统」，
+    // 拿到一份 TTL 内的旧快照等于少一次重试机会。
+    check(&plat.fresh_status(), want)
 }
 
 /// 纯函数版本：把采样与判定分开，便于用假数据覆盖各种不符组合。
@@ -41,15 +44,15 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
         Mode::Dhcp => {
             // DHCP 环境下唯一能确证的是「拿到了地址」；具体地址由服务器决定，无从比对。
             if got.ipv4.as_deref().unwrap_or("").trim().is_empty() {
-                mismatches.push("期望已通过 DHCP 拿到 IPv4，实际没有地址".to_string());
+                mismatches.push(i18n::t("net.dhcp_no_ipv4"));
             }
         }
         Mode::Manual => {
             if let Some(want_ip) = want.ip.as_deref() {
                 match got.ipv4.as_deref() {
                     Some(g) if g.trim() == want_ip.trim() => {}
-                    Some(g) => mismatches.push(format!("ip: 期望 {}，实际 {}", want_ip, g)),
-                    None => mismatches.push(format!("ip: 期望 {}，实际未取到", want_ip)),
+                    Some(g) => mismatches.push(mismatch("ip", want_ip, Some(g.trim()))),
+                    None => mismatches.push(mismatch("ip", want_ip, None)),
                 }
             }
             check_optional("netmask", want.netmask.as_deref(), got.netmask.as_deref(), &mut mismatches);
@@ -69,9 +72,11 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
                 let missing: Vec<&String> =
                     want_list.iter().filter(|w| !got_list.contains(w)).collect();
                 if !missing.is_empty() {
-                    mismatches.push(format!(
-                        "dns: 期望 {:?}，实际 {:?}",
-                        want_list, got_list
+                    // 列表按 `, ` 拼开：Rust 的 `{:?}` 会把调试格式带进界面文案。
+                    mismatches.push(mismatch(
+                        "dns",
+                        &want_list.join(", "),
+                        Some(&got_list.join(", ")),
                     ));
                 }
             }
@@ -82,6 +87,18 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
         Ok(())
     } else {
         Err(VerifyFailure { mismatches })
+    }
+}
+
+/// 一条「期望与实际不符」的描述。`field` 是配置里的字段名，五种语言里都原样保留，
+/// 界面与日志因此始终能用 `ip:` / `dns:` 认出行首。
+fn mismatch(field: &str, want: &str, got: Option<&str>) -> String {
+    match got {
+        Some(g) => i18n::tf(
+            "net.mismatch",
+            &[("field", field), ("want", want), ("got", g)],
+        ),
+        None => i18n::tf("net.mismatch_missing", &[("field", field), ("want", want)]),
     }
 }
 
@@ -96,7 +113,7 @@ fn check_optional(
         return;
     }
     if w.trim() != g.trim() {
-        out.push(format!("{}: 期望 {}，实际 {}", field, w, g));
+        out.push(mismatch(field, w.trim(), Some(g.trim())));
     }
 }
 

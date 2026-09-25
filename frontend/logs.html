@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NetSense</title>
+  <style>
+    :root {
+      --bg: #1c1c1e;
+      --bg-card: #26262a;
+      --line: #34343a;
+      --fg: #ededf0;
+      --muted: #8e8e97;
+      --accent: #2f81f7;
+      --ok: #34c759;
+      --warn: #ff9f0a;
+      --err: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg); color: var(--fg);
+      font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 12px 16px 10px; border-bottom: 1px solid var(--line); flex: none;
+    }
+    header b { font-size: 14px; letter-spacing: .2px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    select, input[type=text] {
+      background: var(--bg-card); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px;
+    }
+    button {
+      padding: 5px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--line); background: var(--bg-card); color: var(--fg);
+      font-family: inherit;
+    }
+    button.tiny { padding: 3px 9px; font-size: 11px; color: var(--muted); }
+    button:active { transform: translateY(1px); }
+    label.chk { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); }
+    main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 16px 14px; gap: 8px; }
+    .bar { display: flex; align-items: center; gap: 10px; flex: none; }
+    .bar input[type=text] { flex: 1; min-width: 0; }
+    .val { color: var(--muted); white-space: nowrap; }
+    /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 */
+    .path {
+      padding: 5px 8px; background: #1a1a1d; border: 1px solid var(--line);
+      border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: #9ecbff; word-break: break-all; user-select: text; flex: none;
+    }
+    pre {
+      flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 8px 10px;
+      background: var(--bg-card); border: 1px solid var(--line); border-radius: 8px;
+      font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap; word-break: break-word; user-select: text;
+    }
+    /* 一天的日志可以很长，所以按级别上色只给行首的那一段标记，正文保持可读 */
+    .l-E { color: var(--err); }
+    .l-W { color: var(--warn); }
+    .l-I { color: var(--fg); }
+    .l-D { color: var(--muted); }
+    .hit { background: #3a2f00; border-radius: 2px; }
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      background: rgba(0,0,0,.82); border: 1px solid var(--line); color: #fff;
+      padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
+      transition: opacity .18s; pointer-events: none; white-space: nowrap;
+    }
+    .toast.show { opacity: 1; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: #45454d; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <b id="hd-title" data-i18n="logs.title">Logs</b>
+    <div class="row">
+      <select id="sel-file" size="1"></select>
+      <select id="sel-lines" size="1" data-i18n-title="logs.lines" title="Lines to read">
+        <option value="200">200</option>
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+        <option value="2000">2000</option>
+        <option value="5000">5000</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="chk-auto"><span id="k-auto" data-i18n="logs.auto">Follow</span></label>
+      <button id="btn-refresh" data-i18n="logs.refresh">Refresh</button>
+      <button id="btn-dir" data-i18n="sett.open_folder">Open folder</button>
+      <button class="tiny" id="btn-close" data-i18n="sett.close">Close</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="bar">
+      <input type="text" id="in-filter" data-i18n-placeholder="logs.filter" placeholder="Filter" spellcheck="false">
+      <span class="val" id="v-status"></span>
+    </div>
+    <div class="path" id="p-dir">—</div>
+    <pre id="out"></pre>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
+    const invoke = (cmd, args) => {
+      if (!hasTauri()) return Promise.reject(new Error("no tauri bridge"));
+      return window.__TAURI__.core.invoke(cmd, args);
+    };
+    const el = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    let strings = {};
+    const t = (k, d) => strings[k] || d || k;
+    const tf = (k, d, vars) =>
+      Object.entries(vars || {}).reduce((s, [a, b]) => s.replace("{" + a + "}", b), t(k, d));
+    // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。
+    const syncLang = () => invoke("get_language")
+      .then((c) => { document.documentElement.lang = c; })
+      .catch(() => {});
+
+    function toast(msg) {
+      const n = el("toast");
+      n.textContent = msg; n.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => n.classList.remove("show"), 1800);
+    }
+
+    // 界面文案只有一份来源：后端字典（静态标记里的英文是问不到字典时的兜底，
+    // 由闸门要求与字典的 en 值逐字一致）。
+    function applyI18n() {
+      const put = (n, key, set) => { const v = strings[key]; if (v) set(v); };
+      for (const n of document.querySelectorAll("[data-i18n]"))
+        put(n, n.dataset.i18n, (v) => { n.textContent = v; });
+      for (const n of document.querySelectorAll("[data-i18n-placeholder]"))
+        put(n, n.dataset.i18nPlaceholder, (v) => n.setAttribute("placeholder", v));
+      for (const n of document.querySelectorAll("[data-i18n-title]"))
+        put(n, n.dataset.i18nTitle, (v) => n.setAttribute("title", v));
+      syncLang();
+      renderBody();
+    }
+
+    /* —————————————————————— 数据 ——————————————————————
+       `body` 存的是后端给的那一段原文，过滤只在显示时做一遍：过滤器改一个字不该
+       再去问一次磁盘，而重读会把「已经滚上去看的那一段」换掉。 */
+    let files = [];
+    let name = "";
+    let body = "";
+    let shown = 0;      // 本次返回的行数
+    let truncated = false;
+    let busy = false;
+
+    function optLabel(f) {
+      return f.today ? `${f.name} ${t("logs.today", "(today)")}` : f.name;
+    }
+
+    function fillSelect() {
+      const sel = el("sel-file");
+      sel.innerHTML = files.length
+        ? files.map(f => `<option value="${esc(f.name)}">${esc(optLabel(f))}</option>`).join("")
+        : `<option value="">${esc(t("logs.no_files", "No log files yet"))}</option>`;
+      sel.value = name;
+    }
+
+    async function loadFiles(keepName) {
+      try {
+        const d = await invoke("get_log_files");
+        files = d.files || [];
+        el("p-dir").textContent = d.log_dir || "—";
+        const max = Number(d.max_lines) || 5000;
+        const want = Number(el("sel-lines").value) || 500;
+        if (want > max) el("sel-lines").value = String(max);
+        if (!keepName || !files.some(f => f.name === name)) name = files.length ? files[0].name : "";
+        fillSelect();
+      } catch (e) { /* 浏览器直接打开时静默：没有后端可问 */ }
+    }
+
+    async function readBody() {
+      if (!name || busy) return;
+      busy = true;
+      try {
+        const r = await invoke("read_log", { name, lines: Number(el("sel-lines").value) || 500 });
+        body = r.text || "";
+        shown = Number(r.lines) || 0;
+        truncated = !!r.truncated;
+      } catch (e) {
+        // 读失败必须说出口：这条命令是界面唯一的证据来源，静默的空白会被当成「今天没日志」
+        toast(String(e)); body = ""; shown = 0; truncated = false;
+      } finally {
+        busy = false;
+      }
+      renderBody();
+    }
+
+    function renderBody() {
+      const q = el("in-filter").value.trim().toLowerCase();
+      const pre = el("out");
+      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+      const lines = body ? body.split("\n") : [];
+      const kept = q ? lines.filter(l => l.toLowerCase().includes(q)) : lines;
+      const mark = (line) => {
+        const i = q ? line.toLowerCase().indexOf(q) : -1;
+        if (i < 0) return esc(line);
+        return esc(line.slice(0, i)) + '<span class="hit">' + esc(line.slice(i, i + q.length))
+          + "</span>" + esc(line.slice(i + q.length));
+      };
+      // 一行一个 span：级别只染行首的那段标记，整行刷红会让一屏日志没法读。
+      pre.innerHTML = kept.length
+        ? kept.map(l => {
+            const m = /\] \[([EWDI])/.exec(l);
+            return `<span class="${m ? "l-" + m[1] : ""}">${mark(l)}</span>`;
+          }).join("\n")
+        : (kept.length || q ? "" : esc(t("logs.empty", "Nothing to show")));
+      el("v-status").textContent = q
+        ? tf("logs.showing", "{shown} of {total} lines", { shown: kept.length, total: shown })
+        : tf("logs.read", "{total} lines", { total: shown })
+          + (truncated ? " · " + t("logs.truncated", "older lines not shown") : "");
+      // 「跟随」的整个意义就是看见最新一行，所以只有本来就贴着底部时才自动滚。
+      if (el("chk-auto").checked || atBottom) pre.scrollTop = pre.scrollHeight;
+    }
+
+    /* —————————————————————— 交互 —————————————————————— */
+    el("sel-file").onchange = (ev) => { name = ev.target.value; body = ""; renderBody(); readBody(); };
+    el("sel-lines").onchange = () => readBody();
+    el("in-filter").oninput = () => renderBody();
+    el("chk-auto").onchange = (ev) => { if (ev.target.checked) readBody(); };
+    el("btn-refresh").onclick = async () => { await loadFiles(true); await readBody(); };
+    el("btn-dir").onclick = () => invoke("open_logs").catch(e => toast(String(e)));
+    el("btn-close").onclick = () => invoke("close_log_viewer").catch(() => {});
+
+    // 每 2.5 秒问一次，但只在窗口真的看得见时问：关掉窗口只是隐藏（这个进程会一直
+    // 活着），一个藏在后台每两秒读一次磁盘的定时器是纯浪费。
+    setInterval(() => {
+      if (!el("chk-auto").checked || document.hidden) return;
+      loadFiles(true).then(readBody);
+    }, 2500);
+
+    // 语言在软件设置里改；这个窗口开着的时候改了，就得当下跟着换口径。
+    let langShown = null;
+    async function syncLanguage(code) {
+      if (!code || code === langShown) return;
+      langShown = code;
+      try { strings = await invoke("get_strings"); } catch (e) { return; }
+      applyI18n();
+      fillSelect();
+    }
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.listen("netsense://status", (e) => {
+        const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
+        if (p) syncLanguage(p.language);
+      });
+    }
+
+    (async () => {
+      try { strings = await invoke("get_strings"); } catch (e) {}
+      applyI18n();
+      await loadFiles(false);
+      await readBody();
+    })();
+  </script>
+</body>
+</html>

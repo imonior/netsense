@@ -34,12 +34,53 @@ impl Default for AllowedScripts {
     }
 }
 
+/// 纯字面量地折叠 `.` 与 `..`，不查文件系统。
+///
+/// 只给 [`canonicalize_best`] 的退化分支用。**为什么必须有它**：`starts_with` 按分量比较，
+/// 而没被折叠的 `scripts/../nested/../../x.sh` 的分量序列里，前几段恰好是
+/// `<配置目录>/scripts` —— 一次字面前缀命中就把「指向受信目录之外」的路径放行了，
+/// 而 exec 时操作系统会按 `..` 真的走到外面那份文件。两侧解析必须同样严格。
+fn collapse_dots(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    // out 末尾可被 `..` 弹出的普通分量数；用它保证 `..` 不会穿过锚点（根/盘符）。
+    let mut depth = 0usize;
+    let mut anchored = false;
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth > 0 {
+                    out.pop();
+                    depth -= 1;
+                } else if !anchored {
+                    // 相对写法开头的 `..` 是语义的一部分，保留下来；
+                    // 它同样不可能与绝对受信目录前缀相等。
+                    out.push(c.as_os_str());
+                }
+            }
+            Component::Normal(_) => {
+                out.push(c.as_os_str());
+                depth += 1;
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                out.push(c.as_os_str());
+                anchored = true;
+            }
+        }
+    }
+    out
+}
+
 /// 尽量把路径规约到规范形式。
 ///
 /// 不能直接 `canonicalize` 就算了之：目标文件常常尚未落盘（配置里登记、稍后才生成），
 /// 此时 canonicalize 会失败。退化为「父目录 canonicalize + 文件名」即可保持一致——
 /// 重要的是**两侧用同一套规则**，否则 macOS 上 `/var`（实为 `/private/var` 符号链接）
 /// 这类差异会让合法路径被误判为非法。
+///
+/// 父目录也解析不动时（整条链都还没落盘），退到 [`collapse_dots`]：字面折叠至少是
+/// 确定的，不依赖这条路径在某个平台上能不能解析。
 fn canonicalize_best(path: &std::path::Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(path) {
         return c;
@@ -49,7 +90,7 @@ fn canonicalize_best(path: &std::path::Path) -> PathBuf {
             return p.join(name);
         }
     }
-    path.to_path_buf()
+    collapse_dots(path)
 }
 
 /// 配置里的脚本路径 → 执行用的绝对路径。
@@ -166,17 +207,39 @@ mod tests {
         // `..` 也不能用来逃出去
         let up = resolve_script("scripts/../nested/../../escape.sh", &allowed);
         assert!(!is_script_allowed(&up, &allowed));
-        // 绝对路径原样保留（显式登记那条路径依赖这个）
-        assert_eq!(
-            resolve_script("/opt/ops/apply.sh", &allowed),
-            Path::new("/opt/ops/apply.sh")
-        );
+        // 绝对路径原样保留（显式登记那条路径依赖这个）。
+        // 根按平台取：Windows 上 `/opt/...` 缺盘符，按 Windows 的规则本来就不算绝对路径，
+        // 会被上面的相对分支重新锚到当前盘符的配置目录下 —— 这正是 resolve_script 的语义，
+        // 拿它当「绝对路径」断言只会得到一次平台相关的失败。
+        let abs = if cfg!(windows) { "C:/opt/ops/apply.sh" } else { "/opt/ops/apply.sh" };
+        assert_eq!(resolve_script(abs, &allowed), Path::new(abs));
         // 受信目录本身是相对路径时（配置从工作目录读），不强改成绝对，
         // 因为 exec 也按 CWD 解释，一致比绝对更重要
         let rel = sut("scripts");
         assert_eq!(resolve_script("scripts/x.sh", &rel), Path::new("scripts/x.sh"));
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 整条链都还没落盘时（配置登记了稍后才生成的脚本），文件系统给不出任何规约，
+    /// 折叠只能按字面做。这条断言必须与临时目录、符号链接、平台分隔符都无关，
+    /// 否则「`..` 逃不出受信目录」这件事就只在某些平台上成立。
+    #[test]
+    fn a_path_that_does_not_exist_yet_still_cannot_escape() {
+        let allowed = sut("/nonexistent-base/scripts");
+        assert!(!is_script_allowed(
+            Path::new("/nonexistent-base/scripts/../../escape.sh"),
+            &allowed
+        ));
+        assert!(!is_script_allowed(
+            Path::new("/nonexistent-base/scripts/sub/../../escape.sh"),
+            &allowed
+        ));
+        // 折叠后仍在受信目录内的，照旧放行
+        assert!(is_script_allowed(
+            Path::new("/nonexistent-base/scripts/./sub/x.sh"),
+            &allowed
+        ));
     }
 
     /// macOS 上临时目录是 `/var/...`，而它其实是 `/private/var/...` 的符号链接：

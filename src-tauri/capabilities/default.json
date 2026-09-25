@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core permissions for the NetSense editor window and the tray popup panel. Without this capability the ACL is empty and every window.__TAURI__.core.invoke(...) / event.listen(...) call from the frontend is rejected, leaving the UI permanently blank.",
-  "windows": ["main", "popup"],
+  "description": "Core permissions for the NetSense editor window, the software-settings window, the log window and the tray popup panel. Without this capability the ACL is empty and every window.__TAURI__.core.invoke(...) / event.listen(...) call from the frontend is rejected, leaving the UI permanently blank.",
+  "windows": ["main", "settings", "logs", "popup"],
   "permissions": ["core:default"]
 }

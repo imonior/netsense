@@ -1,9 +1,10 @@
 //! 状态栏（托盘）弹窗面板 —— 本项目的主交互入口（三平台一致）。
 //!
 //! 交互模型：
-//!   - 左键点托盘图标 → 在图标正下方弹出面板；再点一次收起；
+//!   - 点托盘图标（左键或右键）→ 在图标正下方开合面板；
 //!   - 面板失焦（点到别处）→ 自动收起；
-//!   - 右键点托盘图标 → 原生菜单（显示编辑器 / 打开日志 / 退出）。
+//!   - 托盘没有原生菜单：所有入口（设置 / 日志 / DHCP / 探测 / 退出）都在面板里，
+//!     见 `tray.rs` 的说明 —— 同一屏内容不该维护两份。
 //!
 //! 关键实现点：
 //!   1. 面板窗口在 `tauri.conf.json` 里声明为 `visible: false` + 无边框 + 置顶 + 不进任务栏，
@@ -20,8 +21,12 @@ use tauri::{AppHandle, Manager, PhysicalPosition, Position, WebviewWindow};
 
 /// 面板窗口 label（与 tauri.conf.json 的 windows[].label 对应）。
 pub const POPUP_LABEL: &str = "popup";
-/// 主编辑器窗口 label。
+/// 主编辑器窗口 label（自动化配置）。
 pub const MAIN_LABEL: &str = "main";
+/// 软件配置窗口 label。
+pub const SETTINGS_LABEL: &str = "settings";
+/// 日志窗口 label。
+pub const LOGS_LABEL: &str = "logs";
 
 /// 失焦收起后忽略托盘点击的时间窗口，避免"点一下反而先关后开"。
 const REOPEN_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -48,7 +53,10 @@ pub fn anchor_center_bottom(x: f64, y: f64, w: f64, h: f64) -> Option<(f64, f64)
 /// 切换面板显隐。
 pub fn toggle(app: &AppHandle, anchor: Option<(f64, f64)>) {
     let Some(win) = app.get_webview_window(POPUP_LABEL) else {
-        crate::log::warn("未找到 popup 窗口（检查 tauri.conf.json 的 windows 配置）");
+        crate::log::warn(&crate::i18n::tf(
+            "app.window_missing",
+            &[("label", POPUP_LABEL)],
+        ));
         return;
     };
 
@@ -70,11 +78,34 @@ pub fn toggle(app: &AppHandle, anchor: Option<(f64, f64)>) {
     let _ = win.set_focus();
 }
 
-/// 展示主编辑器窗口（托盘菜单 / 面板按钮调用）。
+/// 展示主编辑器窗口（自动化配置）。
 pub fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window(MAIN_LABEL) {
-        let _ = w.show();
-        let _ = w.set_focus();
+    show_window(app, MAIN_LABEL);
+}
+
+/// 展示软件配置窗口。
+pub fn show_settings(app: &AppHandle) {
+    show_window(app, SETTINGS_LABEL);
+}
+
+/// 展示日志窗口。
+pub fn show_logs(app: &AppHandle) {
+    show_window(app, LOGS_LABEL);
+}
+
+/// 把一个已声明的窗口叫到前台。窗口不存在时只记一条 warn：
+/// 三个窗口都在 `tauri.conf.json` 里声明，找不到就是配置被改坏了，
+/// 而为一个入口崩掉整个进程是拿用户的网络自动化去换一个按钮。
+fn show_window(app: &AppHandle, label: &str) {
+    match app.get_webview_window(label) {
+        Some(w) => {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        None => crate::log::warn(&crate::i18n::tf(
+            "app.window_missing",
+            &[("label", label)],
+        )),
     }
 }
 

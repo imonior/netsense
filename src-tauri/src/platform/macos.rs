@@ -1,8 +1,8 @@
 //! macOS 平台实现。
 //!
 //! 依赖系统命令：`networksetup` / `ipconfig` / `route` / `arp` / `ping` / `curl`，
-//! 以及 `airport`（RSSI/BSSID）、`scutil --nc`（VPN/WireGuard 隧道清单与连接）
-//! 与 `osascript`（授权框提权）。
+//! 以及 `airport`（RSSI/BSSID）、`scutil --nc`（VPN/WireGuard 隧道清单与连接）、
+//! `lpstat` / `lpoptions`（打印机清单与用户默认）与 `osascript`（授权框提权）。
 //!
 //! ⚠️ **SSID / 信号的来源随 macOS 版本被逐步收紧，单一来源必然在某代系统上失效**
 //! 面板 SSID 空白、菜单里信号缺失这类故障的根因就是只取一个来源：
@@ -21,10 +21,12 @@
 //! 不可用时自动回落 `osascript ... with administrator privileges`，功能不中断。
 
 use super::{
-    extract_mac, parse_kv, poll_ssid_watch, run, sh_q, timeout_secs, Health, InterfaceStatus,
-    NetworkPlatform, PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
+    extract_mac, parse_kv, poll_ssid_watch, printers_from_lpstat, run, sh_q, timeout_secs, Health,
+    InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
+    WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
+use crate::i18n;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -188,14 +190,20 @@ pub fn exec_ops(ops: &[PrivOp]) -> Result<(), String> {
     if ops.is_empty() {
         return Ok(());
     }
-    match priv_channel() {
+    let r = match priv_channel() {
         PrivChannel::Direct => match exec_ops_sudoers(ops) {
             Ok(()) => Ok(()),
             Err(e) if is_nopasswd_unavailable(&e) => exec_ops_osascript(ops),
             Err(e) => Err(e),
         },
         PrivChannel::Prompt => exec_ops_osascript(ops),
+    };
+    // 网络刚被本进程改动：丢掉状态快照。3A 的「下发 → 读回校验」紧跟着就要读一次
+    // `get_status`，那份读数必须是下发**之后**的实况，否则校验屏障形同虚设。
+    if r.is_ok() {
+        super::invalidate_status();
     }
+    r
 }
 
 fn is_nopasswd_unavailable(stderr: &str) -> bool {
@@ -220,21 +228,23 @@ fn exec_ops_sudoers(ops: &[PrivOp]) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("spawn sudo: {}", e))?;
+        .map_err(|e| i18n::tf("pal.spawn_priv_failed", &[("error", &e.to_string())]))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(payload.as_bytes())
-            .map_err(|e| format!("write priv stdin: {}", e))?;
+            .map_err(|e| i18n::tf("pal.priv_stdin_failed", &[("error", &e.to_string())]))?;
     }
     let out = child
         .wait_with_output()
-        .map_err(|e| format!("wait sudo: {}", e))?;
+        .map_err(|e| {
+            i18n::tf("pal.wait_privileged_failed", &[("error", &e.to_string())])
+        })?;
     if out.status.success() {
         Ok(())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if err.is_empty() {
-            "特权脚本执行失败（无 stderr）".to_string()
+            i18n::t("pal.privileged_no_stderr")
         } else {
             err
         })
@@ -259,9 +269,18 @@ fn apply_ops(svc: &str, p: &NetworkConfig) -> Result<Vec<PrivOp>, String> {
     let mut ops: Vec<PrivOp> = Vec::new();
     match p.mode {
         Mode::Manual => {
-            let ip = p.ip.clone().ok_or("manual 模式缺 ip")?;
-            let netmask = p.netmask.clone().ok_or("manual 模式缺 netmask")?;
-            let gateway = p.gateway.clone().ok_or("manual 模式缺 gateway")?;
+            let ip = p
+                .ip
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "ip")]))?;
+            let netmask = p
+                .netmask
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "netmask")]))?;
+            let gateway = p
+                .gateway
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.manual_missing", &[("field", "gateway")]))?;
             ops.push(PrivOp::SetManual {
                 svc: svc.to_string(),
                 ip,
@@ -286,9 +305,18 @@ fn apply_ops(svc: &str, p: &NetworkConfig) -> Result<Vec<PrivOp>, String> {
         Some(V6Mode::Off) => ops.push(PrivOp::SetV6Off { svc: svc.to_string() }),
         Some(V6Mode::Automatic) => ops.push(PrivOp::SetV6Auto { svc: svc.to_string() }),
         Some(V6Mode::Manual) => {
-            let addr = p.ipv6.clone().ok_or("v6 manual 缺 ipv6")?;
-            let prefix = p.v6prefix.clone().ok_or("v6 manual 缺 v6prefix")?;
-            let gateway = p.v6gateway.clone().ok_or("v6 manual 缺 v6gateway")?;
+            let addr = p
+                .ipv6
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "ipv6")]))?;
+            let prefix = p
+                .v6prefix
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "v6prefix")]))?;
+            let gateway = p
+                .v6gateway
+                .clone()
+                .ok_or_else(|| i18n::tf("pal.v6_manual_missing", &[("field", "v6gateway")]))?;
             ops.push(PrivOp::SetV6Manual {
                 svc: svc.to_string(),
                 addr,
@@ -392,6 +420,32 @@ fn dns_of_service(svc: &str) -> Option<String> {
     Some(dns.split_whitespace().collect::<Vec<_>>().join(","))
 }
 
+/// 某个网络服务当前的**全局** IPv6 地址（`networksetup -getinfo` 的 `IPv6 IP address:`）。
+///
+/// 判据直接问系统，而不去翻 `ifconfig` 的输出：
+/// - `IPv6 IP address: none` 是「这个口上确实没有 v6 地址」的权威回答，而 `ifconfig`
+///   里只有 `fe80::` 一条链路本地地址 —— 前端无从判断那算不算「有 IPv6」；
+/// - `fe80::` 与隐私临时地址（每分钟轮换）都不适合作为展示值。
+///
+/// 注意键名是 `IPv6 IP address:`，不是 `IPv6:`（后者是 off / automatic / manual 模式）。
+fn v6_of_service(svc: &str) -> Option<String> {
+    let o = run("networksetup", &["-getinfo", svc]).ok()?;
+    for line in o.lines() {
+        let Some(rest) = line.trim().strip_prefix("IPv6 IP address:") else {
+            continue;
+        };
+        let v = rest.trim();
+        if v.eq_ignore_ascii_case("none")
+            || v.is_empty()
+            || v.to_ascii_lowercase().starts_with("fe80:")
+        {
+            continue;
+        }
+        return Some(v.split('%').next().unwrap_or(v).to_string());
+    }
+    None
+}
+
 fn probe_icmp(target: Option<&str>, timeout_ms: u64) -> bool {
     let t = target.unwrap_or("223.5.5.5");
     let secs = timeout_secs(timeout_ms);
@@ -446,7 +500,7 @@ fn discover_wifi_device() -> Option<String> {
             is_wifi_port = port.contains("Wi-Fi")
                 || port.contains("WiFi")
                 || port.contains("AirPort")
-                || port.contains("无线");
+                || port.contains("无线"); // i18n-exempt: 匹配中文版 macOS 自己报的硬件口名，不是界面文案
         } else if is_wifi_port {
             if let Some(dev) = l.strip_prefix("Device:") {
                 let dev = dev.trim();
@@ -515,6 +569,7 @@ fn sanitize_ssid(v: &str) -> Option<String> {
         }
     }
     // SSID 允许空格，所以不能靠「有没有空格」判断；但提示语都是长句且以句号收尾。
+    // i18n-exempt: '。' 是在匹配中文版 macOS 自己写出的提示句尾，不是界面文案
     if (t.ends_with('.') || t.ends_with('。')) && t.chars().count() > 24 {
         return None;
     }
@@ -642,7 +697,7 @@ fn ssid_via_networksetup(dev: &str) -> Option<String> {
         // 网络名提示语时取冒号后的值」——「未关联」那句没有冒号且会被 sanitize 拦掉。
         out.lines().find_map(|l| {
             let l = l.trim();
-            if l.contains("Network") || l.contains("网络") {
+            if l.contains("Network") || l.contains("网络") { // i18n-exempt: 匹配中文版系统输出的行标签，不是界面文案
                 split_kv(l).and_then(|(_, v)| sanitize_ssid(v))
             } else {
                 None
@@ -786,10 +841,10 @@ fn kind_of(dev: &str, port: Option<&str>) -> super::NicKind {
     }
     if let Some(p) = port {
         let p = p.to_ascii_lowercase();
-        if p.contains("wi-fi") || p.contains("wifi") || p.contains("airport") || p.contains("无线") {
+        if p.contains("wi-fi") || p.contains("wifi") || p.contains("airport") || p.contains("无线") { // i18n-exempt: 匹配中文版 macOS 的硬件口名，不是界面文案
             return super::NicKind::Wireless;
         }
-        if p.contains("ethernet") || p.contains("thunderbolt") || p.contains("usb") || p.contains("以太") {
+        if p.contains("ethernet") || p.contains("thunderbolt") || p.contains("usb") || p.contains("以太") { // i18n-exempt: 匹配中文版 macOS 的硬件口名，不是界面文案
             return super::NicKind::Wired;
         }
         // 硬件端口名未知但设备名是 en*：macOS 上这就是以太网
@@ -940,6 +995,63 @@ fn scutil_match(target: &TunnelTarget) -> NcMatch {
     }
 }
 
+/// 采一份主无线网卡的状态快照 —— [`NetworkPlatform::get_status`] 的真实工作。
+///
+/// 单独成函数只为套上 TTL 缓存：一次快照要起 6~7 个子进程（`networksetup` / `ipconfig`
+/// / `route` / `arp`），而面板每刷新一次就要一份。改动网络的路径（[`exec_ops`]）会显式
+/// 丢掉缓存，所以 3A 的「下发 → 读回校验」拿到的始终是下发之后的实况。
+fn read_status() -> InterfaceStatus {
+    let dev = wifi_iface();
+    let ssid = MacPlatform.get_current_ssid();
+    let (rssi, bssid) = radio_info(&dev);
+
+    let mut st = InterfaceStatus {
+        ssid,
+        rssi,
+        bssid,
+        iface: Some(dev.clone()),
+        ..Default::default()
+    };
+
+    // 连通性判据必须独立于 SSID：macOS 15.6+ 与非授权进程都可能读不到 SSID，
+    // 若沿用「ssid.is_some()」判连接，整面板会显示离线、按 SSID 的 profile 也永远
+    // 匹配不上。接口拿到 IPv4 地址即为已连接。
+    //
+    // 注意这两条 ipconfig 不依赖网络服务名，故不再挂在 `wifi_service()` 之下
+    // （服务名只在 DNS / IPv6 查询时才需要）。
+    if let Ok(o) = run("ipconfig", &["getifaddr", &dev]) {
+        let v = o.trim();
+        if !v.is_empty() {
+            st.ipv4 = Some(v.to_string());
+        }
+    }
+    if let Ok(o) = run("ipconfig", &["getoption", &dev, "subnet_mask"]) {
+        let v = o.trim();
+        if !v.is_empty() {
+            st.netmask = Some(v.to_string());
+        }
+    }
+    st.connected = st.ssid.is_some() || st.ipv4.is_some();
+
+    if let Some(svc) = wifi_service() {
+        if let Ok(o) = run("networksetup", &["-getdnsservers", &svc]) {
+            let dns = o.trim();
+            // 未设置时输出英文提示语（"There aren't any DNS Servers set on ..."）或 "Empty"
+            if !dns.starts_with("There") && dns != "Empty" {
+                st.dns = Some(dns.split_whitespace().collect::<Vec<_>>().join(","));
+            }
+        }
+        if let Ok(o) = run("networksetup", &["-getinfo", &svc]) {
+            st.v6mode = parse_kv(&o, "IPv6:").or(Some("automatic".into()));
+        }
+    }
+    if let Some(gw) = default_gateway() {
+        st.gateway = Some(gw.clone());
+        st.gateway_mac = gateway_mac_for(&gw);
+    }
+    st
+}
+
 impl NetworkPlatform for MacPlatform {
     fn watch_ssid(&self, cb: Box<dyn Fn(Option<String>) + Send + Sync>) -> WatcherHandle {
         // MacPlatform 为 ZST，直接 move 进线程（不捕获 &self，生命周期非 'static）
@@ -959,64 +1071,20 @@ impl NetworkPlatform for MacPlatform {
     }
 
     fn get_status(&self) -> InterfaceStatus {
-        let dev = wifi_iface();
-        let ssid = self.get_current_ssid();
-        let (rssi, bssid) = radio_info(&dev);
+        super::cached_status(read_status)
+    }
 
-        let mut st = InterfaceStatus {
-            ssid,
-            rssi,
-            bssid,
-            iface: Some(dev.clone()),
-            ..Default::default()
-        };
-
-        // 连通性判据必须独立于 SSID：macOS 15.6+ 与非授权进程都可能读不到 SSID，
-        // 若沿用「ssid.is_some()」判连接，整面板会显示离线、按 SSID 的 profile 也永远
-        // 匹配不上。接口拿到 IPv4 地址即为已连接。
-        //
-        // 注意这两条 ipconfig 不依赖网络服务名，故不再挂在 `wifi_service()` 之下
-        // （服务名只在 DNS / IPv6 查询时才需要）。
-        if let Ok(o) = run("ipconfig", &["getifaddr", &dev]) {
-            let v = o.trim();
-            if !v.is_empty() {
-                st.ipv4 = Some(v.to_string());
-            }
-        }
-        if let Ok(o) = run("ipconfig", &["getoption", &dev, "subnet_mask"]) {
-            let v = o.trim();
-            if !v.is_empty() {
-                st.netmask = Some(v.to_string());
-            }
-        }
-        st.connected = st.ssid.is_some() || st.ipv4.is_some();
-
-        if let Some(svc) = wifi_service() {
-            if let Ok(o) = run("networksetup", &["-getdnsservers", &svc]) {
-                let dns = o.trim();
-                // 未设置时输出英文提示语（"There aren't any DNS Servers set on ..."）或 "Empty"
-                if !dns.starts_with("There") && dns != "Empty" {
-                    st.dns = Some(dns.split_whitespace().collect::<Vec<_>>().join(","));
-                }
-            }
-            if let Ok(o) = run("networksetup", &["-getinfo", &svc]) {
-                st.v6mode = parse_kv(&o, "IPv6:").or(Some("automatic".into()));
-            }
-        }
-        if let Some(gw) = default_gateway() {
-            st.gateway = Some(gw.clone());
-            st.gateway_mac = gateway_mac_for(&gw);
-        }
-        st
+    fn fresh_status(&self) -> InterfaceStatus {
+        read_status()
     }
 
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {
-        let svc = wifi_service().ok_or("找不到 Wi-Fi 网络服务")?;
+        let svc = wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?;
         exec_ops(&apply_ops(&svc, p)?)
     }
 
     fn set_dhcp(&self) -> Result<(), String> {
-        let svc = wifi_service().ok_or("找不到 Wi-Fi 网络服务")?;
+        let svc = wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?;
         exec_ops(&[
             PrivOp::SetDhcp { svc: svc.clone() },
             PrivOp::SetDns {
@@ -1032,11 +1100,11 @@ impl NetworkPlatform for MacPlatform {
     /// 隧道设备（utun*）没有网络服务，改 DHCP 对它没有意义，直接告知不支持。
     fn set_dhcp_for(&self, dev: &str) -> Result<(), String> {
         if super::is_tunnel_device(dev) {
-            return Err(format!("网卡 {} 是 VPN 隧道，地址由 VPN 客户端下发，不能改为 DHCP", dev));
+            return Err(i18n::tf("pal.vpn_iface_not_switchable", &[("dev", dev)]));
         }
         let hw = hardware_ports();
         let svc = service_for_dev(dev, &hw).or_else(wifi_service).ok_or_else(|| {
-            format!("找不到网卡 {} 对应的网络服务", dev)
+            i18n::tf("pal.no_service_for_iface", &[("dev", dev)])
         })?;
         exec_ops(&[
             PrivOp::SetDhcp { svc: svc.clone() },
@@ -1051,7 +1119,7 @@ impl NetworkPlatform for MacPlatform {
     ///
     /// 「在用」= 拿到 IPv4，或者是已关联的无线网卡（刚连上还没拿到地址的瞬间也要能看到）。
     /// 每次调用会拉起若干子进程，故整体经 [`super::cached_nics`] 做 TTL 缓存
-    /// —— 托盘菜单每次状态广播都要一份快照。
+    /// —— 面板每次状态广播都要一份快照。
     fn list_interfaces(&self) -> Vec<super::NicInfo> {
         super::cached_nics(|| {
             let hw = hardware_ports();
@@ -1085,6 +1153,7 @@ impl NetworkPlatform for MacPlatform {
                 let gateway = routes.get(&dev).cloned();
                 let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
                 let dns = port.and_then(|p| dns_of_service(&p.port));
+                let ipv6 = port.and_then(|p| v6_of_service(&p.port));
                 let app = if kind == super::NicKind::Vpn {
                     vpn_app_for(&dev, ipv4.as_deref(), &hw)
                 } else {
@@ -1100,6 +1169,7 @@ impl NetworkPlatform for MacPlatform {
                     mac: port.and_then(|p| p.mac.clone()),
                     ipv4,
                     netmask,
+                    ipv6,
                     gateway,
                     gateway_mac,
                     dns,
@@ -1168,32 +1238,24 @@ impl NetworkPlatform for MacPlatform {
         if !m.found {
             let known = scutil_nc_labels();
             return Err(if known.is_empty() {
-                format!(
-                    "macOS 的系统 VPN 清单（scutil --nc list）里没有任何隧道，也就没有 {}",
-                    name
-                )
+                i18n::tf("pal.scutil_empty", &[("name", name)])
             } else {
-                format!(
-                    "macOS 的系统 VPN 清单里没有名为 {} 的隧道；现有：{}",
-                    name,
-                    known.join(", ")
-                )
+                i18n::tf("pal.scutil_missing", &[
+                    ("name", name),
+                    ("existing", &known.join(", ")),
+                ])
             });
         }
         if !m.provider_matched {
-            return Err(format!(
-                "系统 VPN 清单里叫 {} 的那条隧道与 provider={} 对不上，provider 与 profile 要来自同一条隧道",
-                name,
-                target.provider().unwrap_or("")
-            ));
+            return Err(i18n::tf("pal.scutil_provider_mismatch", &[
+                ("name", name),
+                ("provider", target.provider().unwrap_or("")),
+            ]));
         }
         run("/usr/sbin/scutil", &["--nc", "start", name])
             .map(|_| ())
             .map_err(|e| {
-                format!(
-                    "scutil --nc start {} 失败: {}（若这是权限不足，请先在系统设置里手动连一次）",
-                    name, e
-                )
+                i18n::tf("pal.scutil_start_failed", &[("name", name), ("error", &e)])
             })
     }
 
@@ -1238,6 +1300,23 @@ impl NetworkPlatform for MacPlatform {
                 .filter(|l| !l.is_empty())
                 .collect(),
         )
+    }
+
+    fn list_printers(&self) -> Vec<PrinterInfo> {
+        let Ok(names) = run("lpstat", &["-e"]) else {
+            return Vec::new();
+        };
+        // 默认那一行读不到（比如根本没设过默认）不该让整张清单消失，所以按空文本继续
+        let default = run("lpstat", &["-d"]).unwrap_or_default();
+        printers_from_lpstat(&names, &default)
+    }
+
+    fn set_default_printer(&self, printer: &str) -> Result<(), String> {
+        // `lpoptions -d` 改的是**当前用户**的 CUPS 默认目的地（落在 ~/.cups/lpoptions），
+        // 因此不需要提权 —— 系统级的 `lpadmin -d` 要 root，那等于每换一次网络弹一次授权框。
+        // 名字在本机不存在时 lpoptions 自己退非 0（stderr: "Unknown printer or class."），
+        // 这条错误原样冒到界面上，比我们先查一遍清单更诚实（清单可能在这一瞬间已经变了）。
+        run("lpoptions", &["-d", printer]).map(|_| ())
     }
 }
 

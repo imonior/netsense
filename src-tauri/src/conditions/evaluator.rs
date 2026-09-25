@@ -195,6 +195,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_uppercase(),
             enabled,
+            quick: true,
             detection: DetectionConfig::default(),
             rules,
             then: None,

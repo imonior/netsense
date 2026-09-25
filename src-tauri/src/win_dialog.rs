@@ -9,6 +9,10 @@
 //! 只用到这一个函数，零依赖更省心，也不会拖慢编译。
 //!
 //! 非 Windows 平台编译成 stderr 版本（macOS/Linux 从终端启动时一样能看到）。
+//!
+//! 文案取自字典的 `dlg.*`：这条路径不经过 WebView，前端的 `data-i18n` 帮不上它 ——
+//! 想在崩溃对话框里看到别的语言，只能靠后端字典。取的是**弹出那一刻**的语言，
+//! 与「一条日志保住它写下时的语言」是同一类时点文本。
 
 #[cfg(target_os = "windows")]
 mod imp {
@@ -64,7 +68,6 @@ pub fn fatal(title: &str, body: &str) {
 }
 
 /// 警告对话框（黄色警告图标）。
-#[allow(dead_code)] // 目前只在 Windows 的 WebView2 检查里用到
 pub fn warn(title: &str, body: &str) {
     imp::show(title, body, false);
 }

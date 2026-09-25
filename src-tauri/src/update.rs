@@ -15,6 +15,7 @@
 //! 新包可验证即放行；不可验证时，只有当**当前安装包同样未签名**（无 Apple 证书的
 //! 分发形态）才告警放行，否则拒绝覆盖已签名版本。详见 `verify_codesign`。
 
+use crate::i18n;
 use serde::Deserialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -61,25 +62,30 @@ fn native_update(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
         .checksum_url
         .as_ref()
         .filter(|u| !u.trim().is_empty())
-        .ok_or("release carries no SHA256SUMS: refusing to install an unverified asset")?;
+        .ok_or_else(|| i18n::t("upd.no_sums"))?;
     require_https(cu)?;
 
     emit_progress(app, "download", 0);
     let tmp = download_file(app, &t.download_url, &t.asset_name, t.size)?;
 
     // 校验 SHA256：任何一环拿不到可信哈希都中止，不「告警后继续」。
-    let sums = crate::ipc::fetch_url(cu).map_err(|e| format!("fetch SHA256SUMS failed: {e}"))?;
+    let sums = crate::ipc::fetch_url(cu)
+        .map_err(|e| i18n::tf("upd.sums_fetch", &[("error", &e)]))?;
     let expected = parse_hash(&sums, &t.asset_name)
-        .ok_or_else(|| format!("{} not listed in SHA256SUMS", t.asset_name))?;
+        .ok_or_else(|| i18n::tf("upd.not_in_sums", &[("asset", &t.asset_name)]))?;
     let actual = sha256_file(&tmp)?;
     if !eq_ignore_case(&actual, &expected) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "checksum mismatch for {}: expected {}, got {}",
-            t.asset_name, expected, actual
+        return Err(i18n::tf(
+            "upd.checksum_mismatch",
+            &[
+                ("asset", &t.asset_name),
+                ("want", &expected),
+                ("got", &actual),
+            ],
         ));
     }
-    crate::log::info(&format!("update: {} SHA256 verified", t.asset_name));
+    crate::log::info(&i18n::tf("upd.sha256_ok", &[("asset", &t.asset_name)]));
     // 校验过的字节和随后安装的字节必须是同一份：共享 temp 上若文件属主不是我们，
     // 对方可以在这两步之间换掉内容。
     #[cfg(unix)]
@@ -132,7 +138,7 @@ fn download_file(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("download failed to start curl: {e}"))?;
+        .map_err(|e| i18n::tf("upd.curl_start", &[("error", &e.to_string())]))?;
 
     let mut last = 0u32;
     loop {
@@ -152,35 +158,36 @@ fn download_file(
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&dest);
-                return Err(format!("download wait failed: {e}"));
+                return Err(i18n::tf("upd.curl_wait", &[("error", &e.to_string())]));
             }
         }
     }
     let out = child
         .wait_with_output()
-        .map_err(|e| format!("download wait: {e}"))?;
+        .map_err(|e| i18n::tf("upd.curl_wait", &[("error", &e.to_string())]))?;
     if !out.status.success() {
         let _ = std::fs::remove_file(&dest);
-        return Err(format!(
-            "download failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(i18n::tf(
+            "upd.download_failed",
+            &[("error", String::from_utf8_lossy(&out.stderr).trim())],
         ));
     }
 
-    let meta = std::fs::metadata(&dest).map_err(|e| format!("download: stat temp: {e}"))?;
+    let meta = std::fs::metadata(&dest)
+        .map_err(|e| i18n::tf("upd.stat_temp", &[("error", &e.to_string())]))?;
     if let Some(sz) = expect_size {
         if meta.len() != sz {
             let _ = std::fs::remove_file(&dest);
-            return Err(format!(
-                "download size mismatch: expected {sz}, got {}",
-                meta.len()
+            return Err(i18n::tf(
+                "upd.size_mismatch",
+                &[("want", &sz.to_string()), ("got", &meta.len().to_string())],
             ));
         }
     } else if meta.len() < MIN_ASSET {
         let _ = std::fs::remove_file(&dest);
-        return Err(format!(
-            "downloaded file too small ({} bytes) — refusing to install",
-            meta.len()
+        return Err(i18n::tf(
+            "upd.too_small",
+            &[("bytes", &meta.len().to_string())],
         ));
     }
     Ok(dest)
@@ -201,7 +208,7 @@ pub(crate) fn require_https(url: &str) -> Result<(), String> {
     if url.get(..8).map(|p| p.eq_ignore_ascii_case("https://")) == Some(true) {
         Ok(())
     } else {
-        Err(format!("refusing non-https update url: {url}"))
+        Err(i18n::tf("upd.non_https", &[("url", url)]))
     }
 }
 
@@ -243,10 +250,10 @@ fn new_private_file(prefix: &str, suffix: &str) -> Result<PathBuf, String> {
         match open_private_new(&p) {
             Ok(_) => return Ok(p),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("create private temp file: {e}")),
+            Err(e) => return Err(i18n::tf("upd.temp_file_create", &[("error", &e.to_string())])),
         }
     }
-    Err("no unoccupied temp file name after 8 attempts".to_string())
+    Err(i18n::t("upd.temp_file_name"))
 }
 
 /// 确认路径确实归当前用户所有，且组/其他位没有任何权限。
@@ -257,12 +264,17 @@ fn new_private_file(prefix: &str, suffix: &str) -> Result<PathBuf, String> {
 #[cfg(unix)]
 fn verify_private(p: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let md = p.metadata().map_err(|e| format!("stat {}: {e}", p.display()))?;
+    let md = p
+        .metadata()
+        .map_err(|e| i18n::tf("upd.stat_path", &[("path", &p.display().to_string()), ("error", &e.to_string())]))?;
     if md.uid() != read_uid() {
-        return Err(format!("{} is owned by another user", p.display()));
+        return Err(i18n::tf("upd.owned_by_other", &[("path", &p.display().to_string())]));
     }
     if md.mode() & 0o077 != 0 {
-        return Err(format!("{} is accessible to other users", p.display()));
+        return Err(i18n::tf(
+            "upd.world_accessible",
+            &[("path", &p.display().to_string())],
+        ));
     }
     Ok(())
 }
@@ -282,7 +294,7 @@ fn write_private_script(prefix: &str, content: &str) -> Result<PathBuf, String> 
     let p = new_private_file(prefix, ".sh")?;
     std::fs::write(&p, content).map_err(|e| {
         let _ = std::fs::remove_file(&p);
-        format!("write {prefix} script: {e}")
+        i18n::tf("upd.script_write", &[("prefix", prefix), ("error", &e.to_string())])
     })?;
     if let Err(e) = verify_private(&p) {
         let _ = std::fs::remove_file(&p);
@@ -300,21 +312,26 @@ fn new_private_dir(prefix: &str) -> Result<PathBuf, String> {
         match std::fs::DirBuilder::new().mode(0o700).create(&p) {
             Ok(()) => return Ok(p),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("create private temp dir: {e}")),
+            Err(e) => {
+                return Err(i18n::tf("upd.temp_dir_create", &[("error", &e.to_string())]))
+            }
         }
     }
-    Err("no unoccupied temp dir name after 8 attempts".to_string())
+    Err(i18n::t("upd.temp_dir_name"))
 }
 
 // ———————————————————————————————— 校验 ————————————————————————————————
 
 fn sha256_file(p: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    let mut f = std::fs::File::open(p).map_err(|e| format!("sha256 open: {e}"))?;
+    let mut f = std::fs::File::open(p)
+        .map_err(|e| i18n::tf("upd.sha256_open", &[("error", &e.to_string())]))?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("sha256 read: {e}"))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| i18n::tf("upd.sha256_read", &[("error", &e.to_string())]))?;
         if n == 0 {
             break;
         }
@@ -372,22 +389,25 @@ fn is_hex(s: &str) -> bool {
 /// 把已经落盘、已经校验过的资产装进系统。签名里没有 `UpdateTarget`：到了安装阶段，
 /// 该信的只有那个验过哈希的文件，前端回传的描述已经用完了。
 fn install(path: &Path) -> Result<(), String> {
+    // 每个平台恰好留一个「尾表达式」块：写成 `return ...;` 的话，在非 macOS 腿上所有分支都被
+    // 裁掉后函数就没有返回值了（E0308），而补上 return 又触发 clippy 的 unneeded_return。
+    // 三个分支写成同一种形状，任何一条腿都是「一个块表达式收尾」。
     #[cfg(target_os = "macos")]
     {
         install_macos(path)
     }
     #[cfg(target_os = "windows")]
     {
-        return install_windows(path);
+        install_windows(path)
     }
     #[cfg(target_os = "linux")]
     {
-        return install_linux(path);
+        install_linux(path)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = path;
-        Err("unsupported OS for native in-place update".to_string())
+        Err(i18n::t("upd.unsupported_os"))
     }
 }
 
@@ -421,7 +441,7 @@ fn install_macos(asset_path: &Path) -> Result<(), String> {
     // 反推不出来，也不再需要反推。
     let (app_path, _staging) = extract_mac_app(asset_path)?;
     if app_path.file_name().map(|n| n.to_string_lossy().to_string()) != Some("NetSense.app".to_string()) {
-        return Err("unexpected app bundle name (expected NetSense.app)".to_string());
+        return Err(i18n::t("upd.bad_bundle"));
     }
     verify_codesign(&app_path)?;
 
@@ -436,22 +456,22 @@ fn install_macos(asset_path: &Path) -> Result<(), String> {
         Command::new("osascript")
             .args(["-e", &format!("do shell script {apa} with administrator privileges")])
             .output()
-            .map_err(|e| format!("elevated install start: {e}"))
+            .map_err(|e| i18n::tf("upd.elevated_start", &[("error", &e.to_string())]))
     } else {
         Command::new("/bin/sh")
             .arg(&script_path)
             .output()
-            .map_err(|e| format!("install failed: {e}"))
+            .map_err(|e| i18n::tf("upd.install_start", &[("error", &e.to_string())]))
     };
     let _ = std::fs::remove_file(&script_path);
     let out = out?;
     if out.status.success() {
         return Ok(());
     }
-    Err(format!(
-        "{} failed: {}",
-        if elevated { "elevated install" } else { "install" },
-        String::from_utf8_lossy(&out.stderr).trim()
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(i18n::tf(
+        if elevated { "upd.elevated_failed" } else { "upd.install_failed" },
+        &[("error", &err)],
     ))
 }
 
@@ -460,9 +480,9 @@ fn extract_mac_app(asset_path: &Path) -> Result<(PathBuf, Staging), String> {
     match Path::new(asset_path).extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("dmg") => extract_dmg(asset_path),
         Some("zip") => extract_zip(asset_path),
-        _ => Err(format!(
-            "unsupported macOS update asset (expected .dmg or .zip): {}",
-            asset_path.display()
+        _ => Err(i18n::tf(
+            "upd.bad_mac_asset",
+            &[("path", &asset_path.display().to_string())],
         )),
     }
 }
@@ -475,13 +495,16 @@ fn extract_dmg(dmg: &Path) -> Result<(PathBuf, Staging), String> {
         .args(["attach", dmg.to_str().unwrap_or_default(), "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount)
         .output()
-        .map_err(|e| format!("mount dmg: {e}"))?;
+        .map_err(|e| i18n::tf("upd.mount_dmg", &[("error", &e.to_string())]))?;
     if !out.status.success() {
-        return Err(format!("mount dmg: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(i18n::tf(
+            "upd.mount_dmg",
+            &[("error", String::from_utf8_lossy(&out.stderr).trim())],
+        ));
     }
     let app = find_app_bundle(&mount);
     if app.as_os_str().is_empty() {
-        return Err("no .app bundle found inside the dmg".to_string());
+        return Err(i18n::t("upd.no_app_in_dmg"));
     }
     Ok((app, staging))
 }
@@ -495,13 +518,16 @@ fn extract_zip(zip: &Path) -> Result<(PathBuf, Staging), String> {
     let out = Command::new("ditto")
         .args(["-x", "-k", zip.to_str().unwrap_or_default(), dest.to_str().unwrap_or_default()])
         .output()
-        .map_err(|e| format!("extract zip: {e}"))?;
+        .map_err(|e| i18n::tf("upd.extract_zip", &[("error", &e.to_string())]))?;
     if !out.status.success() {
-        return Err(format!("extract zip: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(i18n::tf(
+            "upd.extract_zip",
+            &[("error", String::from_utf8_lossy(&out.stderr).trim())],
+        ));
     }
     let app = find_app_bundle(&dest);
     if app.as_os_str().is_empty() {
-        return Err("no .app bundle found inside the zip".to_string());
+        return Err(i18n::t("upd.no_app_in_zip"));
     }
     Ok((app, staging))
 }
@@ -525,9 +551,9 @@ fn verify_codesign(app: &Path) -> Result<(), String> {
     }
     let installed = PathBuf::from(darwin_install_target());
     if codesign_ok(&installed) {
-        return Err(format!(
-            "code signature verification failed for {} — refusing to overwrite a signed install",
-            app.display()
+        return Err(i18n::tf(
+            "upd.codesign_refuse",
+            &[("path", &app.display().to_string())],
         ));
     }
     crate::log::warn(
@@ -677,7 +703,8 @@ fn current_install_dir() -> Option<String> {
 fn stage_installer(src: &Path) -> Result<PathBuf, String> {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| std::env::temp_dir().display().to_string());
     let dir = Path::new(&base).join("netsense").join("updates");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create updates dir: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::tf("upd.updates_dir", &[("error", &e.to_string())]))?;
     // 清掉上次的残留安装器
     if let Ok(glob) = std::fs::read_dir(&dir) {
         for e in glob.flatten() {
@@ -685,7 +712,8 @@ fn stage_installer(src: &Path) -> Result<PathBuf, String> {
         }
     }
     let dest = dir.join(format!("netsense-update-installer{}", Path::new(src).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default()));
-    std::fs::copy(src, &dest).map_err(|e| format!("copy installer: {e}"))?;
+    std::fs::copy(src, &dest)
+        .map_err(|e| i18n::tf("upd.copy_installer", &[("error", &e.to_string())]))?;
     Ok(dest)
 }
 
@@ -707,11 +735,11 @@ fn run_elevated(exe: &str, args: &[String]) -> Result<(), String> {
     let out = Command::new("powershell")
         .args(["-NoProfile", "-Command", &ps])
         .output()
-        .map_err(|e| format!("start installer (elevated): {e}"))?;
+        .map_err(|e| i18n::tf("upd.win_elevated_start", &[("error", &e.to_string())]))?;
     if !out.status.success() {
-        return Err(format!(
-            "elevated installer failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(i18n::tf(
+            "upd.win_elevated_failed",
+            &[("error", String::from_utf8_lossy(&out.stderr).trim())],
         ));
     }
     Ok(())
@@ -729,18 +757,17 @@ fn install_linux(path: &Path) -> Result<(), String> {
         .unwrap_or_default();
     match ext.as_str() {
         "deb" => {
-            if let Err(e) = run_pkexec("dpkg", &["-i", staged.to_str().unwrap_or_default()]) {
-                return Err(e);
-            }
+            run_pkexec("dpkg", &["-i", staged.to_str().unwrap_or_default()])?;
             relaunch_linux_app()
         }
         "rpm" => {
-            if let Err(e) = run_pkexec("rpm", &["-U", staged.to_str().unwrap_or_default()]) {
-                return Err(e);
-            }
+            run_pkexec("rpm", &["-U", staged.to_str().unwrap_or_default()])?;
             relaunch_linux_app()
         }
-        other => Err(format!("unsupported update asset format .{other}: expected .deb or .rpm")),
+        other => Err(i18n::tf(
+            "upd.bad_asset_format",
+            &[("ext", other)],
+        )),
     }
 }
 
@@ -751,9 +778,10 @@ fn stage_linux_installer(src: &Path) -> Result<PathBuf, String> {
     } else if let Some(h) = std::env::var_os("HOME") {
         PathBuf::from(h).join(".local").join("share").join("netsense").join("updates")
     } else {
-        return Err("cannot resolve a persistent updates directory".to_string());
+        return Err(i18n::t("upd.no_updates_dir"));
     };
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create updates dir: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::tf("upd.updates_dir", &[("error", &e.to_string())]))?;
     if let Ok(glob) = std::fs::read_dir(&dir) {
         for e in glob.flatten() {
             let _ = std::fs::remove_file(e.path());
@@ -761,7 +789,8 @@ fn stage_linux_installer(src: &Path) -> Result<PathBuf, String> {
     }
     let ext = Path::new(src).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     let dest = dir.join(format!("netsense-update-installer{ext}"));
-    std::fs::copy(src, &dest).map_err(|e| format!("copy installer: {e}"))?;
+    std::fs::copy(src, &dest)
+        .map_err(|e| i18n::tf("upd.copy_installer", &[("error", &e.to_string())]))?;
     Ok(dest)
 }
 
@@ -772,11 +801,16 @@ fn run_pkexec(prog: &str, args: &[&str]) -> Result<(), String> {
     for a in args {
         cmd.arg(a);
     }
-    let out = cmd.output().map_err(|e| format!("{prog} via pkexec failed to start: {e}"))?;
+    let out = cmd.output().map_err(|e| {
+        i18n::tf("upd.pkexec_start", &[("prog", prog), ("error", &e.to_string())])
+    })?;
     if !out.status.success() {
-        return Err(format!(
-            "{prog} via pkexec failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(i18n::tf(
+            "upd.pkexec_failed",
+            &[
+                ("prog", prog),
+                ("error", String::from_utf8_lossy(&out.stderr).trim()),
+            ],
         ));
     }
     Ok(())
@@ -807,7 +841,7 @@ fn relaunch_linux_app() -> Result<(), String> {
             let _ = c.wait();
             Ok(())
         }
-        Err(e) => Err(format!("relaunch failed: {e}")),
+        Err(e) => Err(i18n::tf("upd.relaunch_failed", &[("error", &e.to_string())])),
     }
 }
 
@@ -850,11 +884,11 @@ fn brew_path() -> Option<String> {
 }
 
 fn run_brew(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
-    // 「brew 退出 0 但没真装上」的落地检查只有 macOS 做得出（读 .app 的 Info.plist），
-    // 所以其余平台上 `t` 到这里就没用了。
-    #[cfg(not(target_os = "macos"))]
-    let _ = t;
-    let brew = brew_path().ok_or("未找到 brew：Homebrew 安装请先安装 Homebrew")?;
+    // 渠道与目标版本先记一行日志：brew 的失败原因往往只剩 exit code，事后要靠这行判断
+    // 当时到底想升到哪儿。同时这也让 `t` 在非 macOS 腿上算「被读过」——那个平台
+    // 做不了 Info.plist 回读校验，字段除了日志就没别的用处。
+    crate::log::info(&i18n::tf("upd.brew_target", &[("version", &t.version)]));
+    let brew = brew_path().ok_or_else(|| crate::i18n::t("upd.no_brew"))?;
 
     // `brew update` 纯网络，90s 上限；卡住就说明 DNS/API 出问题，宁可超时报错。
     emit_progress(app, "refresh", 0);
@@ -862,7 +896,7 @@ fn run_brew(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
         .arg("update")
         .output_timeout(90);
     if let Err(e) = upd {
-        crate::log::warn(&format!("brew update failed, continuing: {e}"));
+        crate::log::warn(&i18n::tf("upd.brew_update_failed", &[("error", &e.to_string())]));
     }
 
     emit_progress(app, "install", 0);
@@ -871,7 +905,7 @@ fn run_brew(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
             .args(["upgrade", "--cask", "--greedy", "netsense"])
             .env("HOMEBREW_NO_AUTO_UPDATE", "1")
             .output_timeout(300)
-            .map_err(|e| format!("brew upgrade failed to start: {e}"))?;
+            .map_err(|e| i18n::tf("upd.brew_start", &[("error", &e.to_string())]))?;
         if out.status.success() {
             Ok(())
         } else {
@@ -883,23 +917,23 @@ fn run_brew(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
         Ok(()) => {}
         Err(e) if e.contains("untrusted tap") => {
             // Homebrew 6 对第三方 tap 要求显式信任；用户已从此 tap 安装并点了升级，信任即授权。
-            crate::log::info("update: tap untrusted — trusting imonior/tap and retrying");
+            crate::log::info(&i18n::t("upd.brew_trust_retry"));
             let trust = Command::new(&brew).args(["trust", "imonior/tap"]).output_timeout(30);
             if let Err(trust_err) = trust {
-                return Err(format!("brew trust imonior/tap failed: {trust_err}"));
+                return Err(i18n::tf("upd.brew_trust", &[("error", &trust_err.to_string())]));
             }
             run_upgrade()?;
         }
-        Err(e) => return Err(format!("brew upgrade failed: {e}")),
+        Err(e) => return Err(i18n::tf("upd.brew_failed", &[("error", &e)])),
     }
 
     // brew 退出 0 但 cask postflight 没杀掉本进程（即没真装）：严格校验磁盘上的版本。
     #[cfg(target_os = "macos")]
     if let Some(installed) = installed_bundle_version() {
         if installed != t.version {
-            return Err(format!(
-                "brew 退出 0 但 /Applications/NetSense.app 仍是 {installed}（期望 {}）",
-                t.version
+            return Err(crate::i18n::tf(
+                "upd.brew_no_effect",
+                &[("installed", &installed), ("want", &t.version)],
             ));
         }
     }
@@ -949,11 +983,11 @@ impl OutputTimeout for Command {
                 let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    format!("command timed out after {secs}s"),
+                    i18n::tf("upd.command_timeout", &[("secs", &secs.to_string())]),
                 ))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
-                "wait thread disconnected before the command finished",
+                i18n::t("upd.wait_disconnected"),
             )),
         }
     }

@@ -1,5 +1,7 @@
 # NetSense
 
+[English](README.md) · **简体中文** · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
+
 面向 macOS、Windows、Linux 的跨平台网络 **Profile** 管理器。
 
 每个 Profile 回答三个问题：*我在哪个网络上？*（`Rules` / `Conditions`）、*这个网络应该是什么样？*
@@ -26,8 +28,9 @@ Windows 用 PowerShell CIM + `netsh`，Linux 用 `nmcli`。
   出来并且什么都不下发，而不是悄悄挑一个赢家。
 - **下发是一道屏障（3A）**：IPv4 / 掩码 / 网关 / DNS / IPv6 与静态路由一起下发；分支配置了 `verify`
   时，再回读系统状态做校验，可选叠加 ICMP/HTTP 健康度探测 —— 持续不通就回落 DHCP。
-- **自动化（3B）只在 3A 通过后才执行。** 一次性动作（`launch_app`、`run_script`）按 `priority` 分批：
-  数值小者先跑、同批并发、一批结束后才进下一批、某一批内失败不影响后续批次。匹配失败（Conflict）与
+- **自动化（3B）只在 3A 通过后才执行。** 一次性动作（`launch_app`、`run_script`、`set_default_printer`）
+  按 `priority` 分批：数值小者先跑、同批并发、一批结束后才进下一批、某一批内失败不影响后续批次。
+  设默认打印机改的只是*当前用户*的默认值，所以切网络不会弹授权框。匹配失败（Conflict）与
   执行失败（Error）是两种状态，分开呈现。
 - **检测策略是 Profile 级的**：响应网络事件、按间隔轮询、或两者并存，各自带变化延迟 —— 一次瞬断
   重连不会反复改写网卡。
@@ -41,16 +44,20 @@ Windows 用 PowerShell CIM + `netsh`，Linux 用 `nmcli`。
 - 每个 Profile 的静态 IP / DHCP / 自定义 DNS / IPv6（automatic、manual、off）/ 静态路由，并分
   THEN 与 ELSE 两条分支。
 - 回读校验与健康度监测在下发步骤里、按分支配置：只有系统确认落地了，Profile 才报「已应用」。
-- 托盘弹窗面板：实时状态、全部在用网卡、VPN 隧道、带匹配徽章的一键切换 Profile、语言切换。左键弹出，
-  失焦收起，右键出原生菜单。
+- 托盘弹窗面板：当前在用的网络（网络接口、SSID 与信号强度、MAC、IPv4 / 掩码 / 网关 / IPv6 / DNS）、
+  其余在用网卡、VPN 隧道、带匹配徽章的一键切换 Profile，以及全部入口 —— 设置、日志、DHCP、探测、
+  升级、退出。点图标（左右键都一样）弹出，失焦收起；没有原生托盘菜单。
 - 覆盖整个模型的配置编辑器 —— Rules、Conditions、3A、路由、动作、ELSE 与全局 fallback —— 并把引擎
   的实时判定就地渲染出来。
+- 一个软件设置窗口，装的是与任何网络都无关的设置：界面语言、登录时启动（每次打开窗口都向操作系统读一次，而不是取自文件里的副本）、`config.json` 与日志放在哪里，以及日志保留多少天。
 - 能免密就免密：macOS 一次性安装 `sudoers` 白名单、Windows 以管理员运行一次、Linux 配 `sudo -n`。
   条件不具备时回落到系统授权对话框，而不是直接失败。
 - 在线升级：检查 GitHub Releases 并挑出本平台的产物。Homebrew 安装走 `brew upgrade --cask`，全程不
   下载任何东西；其他方式则下载产物，只有它的 SHA256 与该 Release 的 `SHA256SUMS` 对得上才安装 ——
   这一步做不了（没有 `SHA256SUMS`、里面没列这个产物、或取不到）就中止升级，改为把你指到 Release 页。
 - 五种界面语言（English、简体中文、繁體中文、日本語、한국어），key 对齐经过校验，默认 English。
+  三种平台上的每一座窗口都跟着这个选择走 —— 托盘面板、编辑器、软件设置、日志窗口，以及托盘提示和原生错误
+  对话框；`scripts/validate.py` 里有一项检查专门盯着静态文案有没有写死。
 
 ## 技术栈
 
@@ -102,14 +109,18 @@ sh scripts/install-priv-helper.sh
 ```bash
 python3 scripts/validate.py    # JSON 合法性；5 语 i18n key 与占位符对齐；key 引用双向检查；
                                # PAL 边界；三平台 trait 覆盖；tauri.conf.json 字段；版本号一致性；
-                               # 文档与代码对账
+                               # 文档与代码对账；以及界面文案是否全部取自字典
 node scripts/editor-smoke.mjs  # 无头跑编辑器的数据绑定（需要 Node，但没有构建步骤）
 cd src-tauri && cargo test     # 纯 bin crate —— 用 cargo test，不是 --lib
 ```
 
-NetSense 常驻托盘：左键打开面板，右键出菜单（设置 · 打开日志目录 · 把当前网络设为 DHCP · 立即探测 ·
-退出，这几项之上还有只读的行，展示在用的网卡与隧道）。它的配置是一个单独的 `config.json`（与 NetSense
-可执行文件同目录）；`config.example.json` 是一份可直接参考的完整示例。
+NetSense 常驻托盘：点图标（左右键都一样）打开面板，所有入口都在面板里（设置 · 打开日志目录 ·
+把当前网络设为 DHCP · 立即探测 · 退出，这些按钮之上就是在用的网卡与隧道）。它由两份配置驱动，因为这两类设置毫无关系：哪个网络
+得到哪套处理，是自动化配置 `config.json`，在编辑器窗口里改；应用本身怎么表现 —— 界面语言、日志保留天数、开机启动 ——
+是软件配置 `settings.json`，在面板「设置」打开的窗口里改，改它永远不会重新下发网络设置。
+两份文件都在属于当前用户的 NetSense 目录里 —— macOS 为 `~/Library/Application Support/NetSense`、Windows 为
+`%APPDATA%\NetSense`、Linux 为 `~/.config/netsense`；它们不在可执行文件的同目录：签过名的 macOS
+应用包和只读的 `Program Files` 都不该被写入。日志放在当前用户的 NetSense 日志目录。`config.example.json` 是一份可直接参考的示例。
 
 > Windows 上首次改网络会弹一次 UAC。以管理员身份运行一次即可免除，此后提权通道显示「无需授权」。
 
@@ -118,7 +129,6 @@ NetSense 常驻托盘：左键打开面板，右键出菜单（设置 · 打开�
 ```jsonc
 {
   "schema": 1,
-  "language": "en",
   "allowed_scripts": ["/opt/ops/office-init.sh"],
   "profiles": [{
     "id": "office", "name": "Office_5G", "enabled": true,
