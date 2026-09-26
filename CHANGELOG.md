@@ -4,6 +4,16 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Editor current-network block** now displays full NIC details matching the tray popup (Interface → SSID → Signal → MAC → IPv4 → Netmask → Gateway → IPv6 → DNS)
+- **SSID picker** converted from datalist to real `<select>` with manual entry option for hidden networks
+- **Interface picker** shows human-readable labels (e.g., "en0 (Wi-Fi)") instead of bare device names
+- **Printer picker** converted from datalist to real `<select>` with human-readable labels, excluding auto-discovered queues
+- Removed unused i18n key `editor.nic_gateway_mac`; added `editor.ssid_manual`, `editor.printer_placeholder`, `editor.printer_manual`
+
 ## [1.0.0] - 2026-09-23
 
 A tray-resident network Profile manager for macOS, Windows and Linux: networks are matched by

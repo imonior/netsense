@@ -4,6 +4,16 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [未發佈]
+
+### 變更
+
+- **編輯器目前網路區塊**現在顯示完整的網卡詳情，與托盤面板一致（介面 → SSID → 訊號 → MAC → IPv4 → 子網路遮罩 → 閘道 → IPv6 → DNS）
+- **SSID 選擇器**從 datalist 改為真正的下拉式選單，支援手動輸入隱藏網路
+- **介面選擇器**顯示人類可讀的標籤（如 "en0 (Wi-Fi)"）而非裸設備名
+- **印表機選擇器**從 datalist 改為真正的下拉式選單，顯示人類可讀標籤，排除自動發現的佇列
+- 刪除未使用的 i18n key `editor.nic_gateway_mac`；新增 `editor.ssid_manual`、`editor.printer_placeholder`、`editor.printer_manual`
+
 ## [1.0.0] - 2026-09-23
 
 常駐系統托盤的網路配置方案（Profile）管理員，面向 macOS、Windows 與 Linux：

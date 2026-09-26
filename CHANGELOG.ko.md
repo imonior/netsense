@@ -4,6 +4,16 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다.
 
+## [미발행]
+
+### 변경
+
+- **편집기 현재 네트워크 블록**이 트레이 팝업과 일치하는 전체 NIC 세부 정보 표시 (인터페이스 → SSID → 신호 → MAC → IPv4 → 넷마스크 → 게이트웨이 → IPv6 → DNS)
+- **SSID 피커**를 datalist에서 실제 `<select>`로 변경, 숨겨진 네트워크 수동 입력 옵션 추가
+- **인터페이스 피커**가 "en0 (Wi-Fi)"와 같은 인간 가독 라벨 표시
+- **프린터 피커**를 datalist에서 실제 `<select>`로 변경, 인간 가독 라벨 표시, 자동 발견 큐 제외
+- 사용되지 않는 i18n 키 `editor.nic_gateway_mac` 삭제; `editor.ssid_manual`, `editor.printer_placeholder`, `editor.printer_manual` 추가
+
 ## [1.0.0] - 2026-09-23
 
 트레이에 상주하는 네트워크 프로파일 관리자(macOS / Windows / Linux): 네트워크는
