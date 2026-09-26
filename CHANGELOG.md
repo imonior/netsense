@@ -24,6 +24,13 @@ All notable changes to NetSense are documented here. The format is based on
 - The elevated batch path now returns the real command error text (e.g. what `netsh` complained)
   instead of just a bare exit code
 
+### Fixed
+
+- **Windows printer list: a queue's Location no longer masquerades as its name.** While parsing
+  `Win32_Printer` rows, an empty Comment column was dropped and the Location shifted up into the
+  description slot — a front-desk queue could be displayed as just its location. Rows are now
+  taken by column position
+
 ## [1.0.1] - 2026-09-26
 
 ### Changed

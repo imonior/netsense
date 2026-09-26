@@ -991,9 +991,12 @@ fn parse_printer_rows(out: &str) -> Vec<PrinterInfo> {
             } else {
                 return None;
             };
-            let rest: Vec<&str> = it.map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-            let comment = rest.first().copied().unwrap_or("");
-            let location = rest.get(1..).map(|r| r.join(" ")).unwrap_or_default();
+            // 按**列位**取值，空列不许消失：备注为空的行一旦把空列滤掉，位置就会
+            // 顶上备注的位置，界面上 `前台`（Location）成了打印机的名字 ——
+            // v1.0.1 用户报的「位置伪装成名字」就是这么来的。
+            let mut rest = it.map(|s| s.trim());
+            let comment = rest.next().unwrap_or("");
+            let location = rest.collect::<Vec<_>>().join(" ");
             Some(PrinterInfo {
                 name: name.to_string(),
                 info: printer_label(name, comment, &location),
