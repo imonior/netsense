@@ -18,3 +18,6 @@ sha2 = "0.10"
 [features]
 # default = macOS; 后续加 windows / linux feature gates
 default = []
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-wlan = "0.3.2"

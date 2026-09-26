@@ -308,6 +308,41 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseId: ${{ needs.release.outputs.release_id }}
 
+      # Hash the installers here, on the machine that just built them, while they are still ordinary
+      # files on disk. The alternative -- pulling each asset back out of the Release in the
+      # `checksums` job -- cannot work in Actions: downloading an asset's *binary* content is not
+      # supported with GITHUB_TOKEN (it needs a user OAuth token or client id/secret), and on a
+      # Draft the redirect target answers 404 anyway. Uploading is fine, which is why the assembled
+      # manifest still goes to the Release from a separate job.
+      #
+      # The manifest rows carry plain file names because `cd`-ing first makes sha256sum print the
+      # basename -- and the basename is exactly the asset name tauri-action uploads under, which is
+      # the string update.rs looks up after download.
+      - name: Record installer checksums
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="SHA256SUMS.${{ matrix.label }}"
+          : > "$out"
+          while IFS= read -r -d '' f; do
+            d=$(dirname "$f"); n=$(basename "$f")
+            ( cd "$d" && sha256sum "$n" ) >> "$out"
+          done < <(find "src-tauri/target/${{ matrix.target }}/release/bundle" -type f \
+                     \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.deb' \) -print0 | sort -z)
+          if [ ! -s "$out" ]; then
+            echo "::error::leg ${{ matrix.label }} produced no installer to checksum"
+            exit 1
+          fi
+          cat "$out"
+      - name: Upload checksum fragment
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v7
+        with:
+          name: sums-${{ matrix.label }}
+          path: SHA256SUMS.${{ matrix.label }}
+          if-no-files-found: error
+
       # Note on Windows packaging: no "offline" installer, and no second packaging pass. The
       # offlineInstaller variant embedded the full WebView2 runtime into setup.exe (~218MB);
       # `bundle.windows.webviewInstallMode = skip` (see tauri.conf.json) keeps the
@@ -328,24 +363,34 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/netsense
           if-no-files-found: ignore
 
-  # Collect every platform's installer, generate a root-level SHA256SUMS, and upload it back to the
-  # same Draft Release.
+  # Assemble one root-level SHA256SUMS from the per-leg fragments and upload it to the same Draft
+  # Release.
   #
   # Why a separate job instead of each matrix leg writing its own: the four legs run in the same run
-  # in parallel; if each leg ran `sha256sum *` and uploaded a same-named SHA256SUMS, the four uploads
-  # would overwrite each other and only one leg's manifest would survive -- so in-app upgrade
-  # verification would read "not listed in SHA256SUMS" for every platform but that one. So after build
-  # finishes we pull the Draft Release's assets back and hash them all once.
+  # in parallel; if each leg uploaded a same-named SHA256SUMS, the four uploads would fight and only
+  # one leg's manifest would survive -- so in-app upgrade verification would read "not listed in
+  # SHA256SUMS" for every platform but that one. So the legs hand their lines back as small,
+  # distinctly-named artifacts, and this job merges them once.
   #
-  # ⚠️ Locate assets by releaseId, not tag: a Draft Release hangs off a placeholder tag
-  # (`releases/tag/untagged-<hash>`, see the release leg comments), so looking up by tag 404s.
-  # Uploading likewise must go through uploads.github.com + releaseId, not `gh release upload <tag>`.
+  # ⚠️ The installers themselves are deliberately never re-downloaded here. Fetching an asset's
+  # binary content is not supported with the workflow's GITHUB_TOKEN, and a Draft's redirect target
+  # 404s regardless -- which is exactly how this job failed the first time it ran.
+  # Uploading *is* supported, but it must go through uploads.github.com + releaseId, not
+  # `gh release upload <tag>`: a Draft hangs off a placeholder tag (see the release leg comments),
+  # so any tag-based lookup 404s.
   checksums:
     needs: [release, build]
     if: ${{ !cancelled() && needs.release.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Collect checksum fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sums-*
+          path: fragments
+          merge-multiple: false
+
       - name: Generate and upload SHA256SUMS
         shell: bash
         env:
@@ -357,39 +402,32 @@ jobs:
             echo "::error::no release id from release job"
             exit 1
           fi
-          api="repos/${GITHUB_REPOSITORY}/releases/${RID}/assets"
-          mkdir -p sums && cd sums
-
-          # Pull back every installer on this Release (skip any pre-existing checksum file to avoid
-          # self-reference).
-          count=0
-          while IFS=$'\t' read -r id name; do
-            [ -z "$id" ] && continue
-            case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
-              sha256sums*|checksums*|sha256.txt|shasums*)
-                echo "skip existing checksum asset: $name"; continue ;;
-            esac
-            echo "fetching asset $name (id=$id)"
-            gh api "$api/$id" -H "Accept: application/octet-stream" > "$name"
-            count=$((count + 1))
-          done < <(gh api "$api?per_page=100" --jq '.[] | "\(.id)\t\(.name)"')
-
-          if [ "$count" -eq 0 ]; then
-            echo "::error::no release assets found to checksum"
+          # One fragment per leg (SHA256SUMS.<label>), each in its own artifact directory. Sorted so
+          # the manifest is byte-stable across re-runs of the same tag.
+          cat fragments/*/SHA256SUMS.* | sort -k 2 > SHA256SUMS
+          count=$(grep -c '[^[:space:]]' SHA256SUMS || true)
+          legs=$(find fragments -name 'SHA256SUMS.*' | wc -l)
+          # A missing line is not cosmetic: the updater treats "my file is not in SHA256SUMS" as
+          # "this update cannot be verified", and refuses it -- so that platform would never upgrade.
+          if [ "${count:-0}" -eq 0 ] || [ "$legs" -lt 4 ]; then
+            echo "::error::${legs} leg(s) / ${count} installer(s) contributed checksums, expected 4"
             exit 1
           fi
+          cat SHA256SUMS
 
-          # GNU-style `hash  filename`: this is the exact shape update.rs's parse_hash accepts.
-          sha256sum * > ../SHA256SUMS
-          cd .. && cat SHA256SUMS
-
-          # Upload (overwrites the old manifest on a re-run). Content-Type must be set explicitly or
-          # GitHub guesses from the extension.
+          # An asset name is unique per Release, so a re-run of the same tag must drop the previous
+          # manifest before posting the new one.
+          for aid in $(gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
+                        --jq '.[] | select(.name=="SHA256SUMS") | .id'); do
+            echo "replacing existing SHA256SUMS asset id=${aid}"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets/${aid}"
+          done
+          # Content-Type must be explicit or GitHub guesses it from the extension.
           gh api -X POST \
             "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=SHA256SUMS" \
             -H "Content-Type: application/octet-stream" \
             --input SHA256SUMS
-          echo "uploaded SHA256SUMS covering ${count} asset(s)"
+          echo "uploaded SHA256SUMS covering ${count} asset(s) from ${legs} legs"
 
   # Auto-publish once checksums are verified. Keeps the safe gated flow: the release stays a draft
   # through build + checksum, and only goes public after every platform artifact is present and its
