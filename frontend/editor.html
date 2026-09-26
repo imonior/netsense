@@ -853,15 +853,13 @@
         `<div class="full">${chk(`${p}.action.elevated`, !!act.elevated, "editor.action_elevated", "inline")}</div>`;
     } else if (ty === "set_default_printer") {
       // 打印机名可以手输：现在没装、连上那台网络后才有的共享打印机，也要能提前配好。
-      // WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select> + "Other…" 选项。
+      // 打印机只能从系统已添加的列表中选择，不能有手动输入（未添加的打印机无法使用）
       const cur = String(act.printer ?? "").trim();
       const printers = printerList.filter(p => p && p.name);
-      const opts = (cur && !printers.some(p => p.name === cur)) ? [{name: cur, info: ""}, ...printers] : printers;
       body += `<div class="full">` +
         `<select data-bind="${p}.action.printer" style="max-width:260px">` +
         `<option value=""${cur ? "" : " selected"}>${esc(t("editor.printer_placeholder", "Select printer…"))}</option>` +
-        opts.map(pr => `<option value="${esc(pr.name)}" ${pr.name === cur ? "selected" : ""}>${esc(pr.info || pr.name)}</option>`).join("") +
-        `<option value="__manual__">${esc(t("editor.printer_manual", "Manual entry…"))}</option>` +
+        printers.map(pr => `<option value="${esc(pr.name)}" ${pr.name === cur ? "selected" : ""}>${esc(pr.info || pr.name)}</option>`).join("") +
         `</select>` +
         `</div>`;
     } else {

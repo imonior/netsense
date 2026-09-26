@@ -645,9 +645,9 @@ check("其他动作没有被连带标上提权", p?.then?.one_shot?.[0]?.action?
 
 group("3B 动作：默认打印机的候选来自系统，不是让用户手抄名字");
 const prInput = byBind("then.one_shot.3.action.printer");
-eq("打印机那一项是下拉选择框", prInput?.tagName, "SELECT");
-eq("候选就是系统里的打印机名（顺序照后端），外加手动输入项",
-  prInput?.children.map((o) => o.value), ["", "Office LaserJet", "Home Inkjet", "__manual__"]);
+eq("打印机那一项是下拉选择框（只能从系统已添加的打印机中选择）", prInput?.tagName, "SELECT");
+eq("候选就是系统里的打印机名（顺序照后端），无手动输入项",
+  prInput?.children.map((o) => o.value), ["", "Office LaserJet", "Home Inkjet"]);
 eq("当前默认的那台在候选里带说明，其余留空",
   findById("printer-list")?.children.map((o) => o.textContent), [strings["editor.printer_is_default"], ""]);
 check("整列只挂一份候选清单：THEN 与 ELSE 共用同一个 id，重复的那份会被浏览器忽略",
