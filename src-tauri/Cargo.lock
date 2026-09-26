@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "netsense"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "objc2-core-wlan",
