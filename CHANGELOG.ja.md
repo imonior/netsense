@@ -4,7 +4,7 @@ NetSense のすべての重要な変更をここに記録する。形式は
 [Keep a Changelog](https://keepachangelog.com/) に基づき、本プロジェクトは
 [セマンティックバージョニング](https://semver.org/) に準拠する。
 
-## [未リリース]
+## [1.0.1] - 2026-09-26
 
 ### 変更
 

@@ -4,7 +4,7 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
-## [未發佈]
+## [1.0.1] - 2026-09-26
 
 ### 變更
 
