@@ -4,6 +4,26 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-09-26
+
+### Added
+
+- **macOS Wi-Fi SSID via CoreWLAN.** macOS 15.6+ redacts the SSID from every CLI NetSense used to
+  read it (`networksetup` / `ipconfig` / `system_profiler`), so the current network showed as
+  unknown. NetSense now asks CoreWLAN directly, requesting Location permission once (Profiles do
+  need the network name); until that is granted the old CLI fallback chain still runs, so nothing
+  gets worse
+- **Windows: UAC now asked once per app run** for network config. The first apply elevates a
+  resident helper — the same executable, re-launched once via UAC, taking batches over an
+  owner-only named pipe that only accepts work from that very executable. Declining the prompt, or
+  losing the helper, falls back to the previous per-batch prompt; elevated **user scripts** keep
+  asking every run on purpose
+
+### Changed
+
+- The elevated batch path now returns the real command error text (e.g. what `netsh` complained)
+  instead of just a bare exit code
+
 ## [1.0.1] - 2026-09-26
 
 ### Changed
