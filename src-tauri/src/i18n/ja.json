@@ -109,7 +109,6 @@
   "editor.action_printer": "プリンタ",
   "editor.printer_is_default": "（現在の既定）",
   "editor.printer_placeholder": "プリンタを選択…",
-  "editor.printer_manual": "手動入力…",
   "editor.action_elevated": "管理者権限",
   "editor.action_delete": "削除",
   "editor.action_none": "アクションなし",

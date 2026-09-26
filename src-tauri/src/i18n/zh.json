@@ -109,7 +109,6 @@
   "editor.action_printer": "打印机",
   "editor.printer_is_default": "（当前默认）",
   "editor.printer_placeholder": "选择打印机…",
-  "editor.printer_manual": "手动输入…",
   "editor.action_elevated": "提权",
   "editor.action_delete": "删除",
   "editor.action_none": "暂无动作",

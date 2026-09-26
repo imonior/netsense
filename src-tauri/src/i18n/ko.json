@@ -109,7 +109,6 @@
   "editor.action_printer": "프린터",
   "editor.printer_is_default": "(현재 기본값)",
   "editor.printer_placeholder": "프린터 선택…",
-  "editor.printer_manual": "수동 입력…",
   "editor.action_elevated": "관리자 권한",
   "editor.action_delete": "삭제",
   "editor.action_none": "동작 없음",

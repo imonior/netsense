@@ -109,7 +109,6 @@
   "editor.action_printer": "Printer",
   "editor.printer_is_default": "(current default)",
   "editor.printer_placeholder": "Select printer…",
-  "editor.printer_manual": "Manual entry…",
   "editor.action_elevated": "Elevated",
   "editor.action_delete": "Remove",
   "editor.action_none": "No actions",
