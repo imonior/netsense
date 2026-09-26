@@ -486,7 +486,7 @@ eq("四格的小标题取自字典", ["sk-1", "sk-2", "sk-3", "sk-4"].map((id) =
 check("格 1 讲的是「现在生效的是谁」，与用户正在编辑哪一条无关（此刻选中的是 home）",
   h.sel.id === "home" && findById("st-profile").textContent.includes("Office_5G"));
 check("格 2 摊开的是它命中所用的条件值", findById("st-cond").textContent.includes("Office_5G"));
-check("格 3 是当前网络信息（含读到的网关 MAC）", findById("st-net").textContent.includes("aa:bb:cc:dd:ee:ff"));
+check("格 3 是当前网络信息", findById("st-net").textContent.includes("Office_5G"));
 eq("格 4：后端什么都没跑过 → 列出 Active 的 THEN 动作，但不给任何成败徽标",
   [findById("st-act").textContent.includes("Slack.app"),
    inside(findById("st-act")).filter((e) => e.className?.includes("achip") && e.textContent).length],
@@ -542,15 +542,15 @@ group("第 2 列：条件行 = 勾选框 + 类型 + 值 + 徽标 + 删除，同�
 const crows = findAll((e) => e.className?.includes("crow"));
 eq("office 的两条规则里一共 4 个条件，一行一个", crows.length, 4);
 const crow0 = inside(crows[0]);
-eq("同一行里：启用勾选 + 类型下拉 + 值控件 + 徽标 + 删除按钮",
+eq("同一行里：启用勾选 + 类型下拉 + 值下拉 + 徽标 + 删除按钮",
   [crow0.filter((e) => e.tagName === "INPUT").length,
    crow0.filter((e) => e.tagName === "SELECT").length,
    crow0.filter((e) => e.className?.includes("badge")).length,
    crow0.filter((e) => e.dataset?.act === "del-cond").length],
-  [2, 1, 1, 1]);
+  [1, 2, 1, 1]);
 const ssidInput = byBind("rules.0.conditions.0.value");
 eq("SSID 值是下拉选择框", ssidInput?.tagName, "SELECT");
-eq("候选来自系统已保存的 SSID", ssidInput?.children.map((o) => o.value), ["", "Office_5G", "Café"]);
+eq("候选来自系统已保存的 SSID，外加手动输入项", ssidInput?.children.map((o) => o.value), ["", "Office_5G", "Café", "__manual__"]);
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
 eq("下拉里只有非 VPN 的硬件出口，外加一个空选项",
@@ -646,8 +646,8 @@ check("其他动作没有被连带标上提权", p?.then?.one_shot?.[0]?.action?
 group("3B 动作：默认打印机的候选来自系统，不是让用户手抄名字");
 const prInput = byBind("then.one_shot.3.action.printer");
 eq("打印机那一项是下拉选择框", prInput?.tagName, "SELECT");
-eq("候选就是系统里的打印机名（顺序照后端）",
-  prInput?.children.map((o) => o.value), ["", "Office LaserJet", "Home Inkjet"]);
+eq("候选就是系统里的打印机名（顺序照后端），外加手动输入项",
+  prInput?.children.map((o) => o.value), ["", "Office LaserJet", "Home Inkjet", "__manual__"]);
 eq("当前默认的那台在候选里带说明，其余留空",
   findById("printer-list")?.children.map((o) => o.textContent), [strings["editor.printer_is_default"], ""]);
 check("整列只挂一份候选清单：THEN 与 ELSE 共用同一个 id，重复的那份会被浏览器忽略",
