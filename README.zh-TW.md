@@ -64,7 +64,7 @@ Tauri v2 + Rust、系統 WebView、前端為純靜態 HTML/CSS/JS（無 Node 建
 
 | 平台 | 讀取 | 寫入 | 提權 |
 |------|------|------|------|
-| macOS | `networksetup` / `ipconfig` / `arp` / `system_profiler`（以及仍在時的 `airport`） | `networksetup` / `route` | sudoers 白名單，否則 `osascript` 授權框 |
+| macOS | `CoreWLAN` / `networksetup` / `ipconfig` / `arp` / `system_profiler`（以及仍在時的 `airport`） | `networksetup` / `route` | sudoers 白名單，否則 `osascript` 授權框 |
 | Windows | PowerShell CIM（`Get-NetAdapter` …）+ `netsh` | `netsh` / `New-NetRoute` | 已是管理員則免授權，否則 UAC |
 | Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | `sudo -n`，否則 `pkexec` |
 

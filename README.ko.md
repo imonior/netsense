@@ -77,7 +77,7 @@ Core Engine (detection / conditions / 매칭 / network / automation)은 시스�
 
 | 플랫폼 | 읽기 | 쓰기 | 권한 상승 |
 |--------|------|------|-----------|
-| macOS | `networksetup` / `ipconfig` / `arp` / `system_profiler` (`airport`은 아직 남아 있는 곳에서) | `networksetup` / `route` | sudoers 허용 목록, 아니면 `osascript` 인증 대화상자 |
+| macOS | `CoreWLAN` / `networksetup` / `ipconfig` / `arp` / `system_profiler` (`airport`은 아직 남아 있는 곳에서) | `networksetup` / `route` | sudoers 허용 목록, 아니면 `osascript` 인증 대화상자 |
 | Windows | PowerShell CIM (`Get-NetAdapter` …) + `netsh` | `netsh` / `New-NetRoute` | 이미 관리자면 승인 없음, 아니면 UAC |
 | Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | `sudo -n`, 아니면 `pkexec` |
 

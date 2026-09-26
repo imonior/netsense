@@ -82,7 +82,7 @@ command directly: everything platform-specific sits behind one trait in the PAL
 
 | Platform | Reads | Writes | Elevation |
 |----------|-------|--------|-----------|
-| macOS | `networksetup` / `ipconfig` / `arp` / `system_profiler` (`airport`, where it still exists) | `networksetup` / `route` | sudoers allow-list, else `osascript` prompt |
+| macOS | `CoreWLAN` / `networksetup` / `ipconfig` / `arp` / `system_profiler` (`airport`, where it still exists) | `networksetup` / `route` | sudoers allow-list, else `osascript` prompt |
 | Windows | PowerShell CIM (`Get-NetAdapter` …) + `netsh` | `netsh` / `New-NetRoute` | none when already admin, else UAC |
 | Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | `sudo -n`, else `pkexec` |
 

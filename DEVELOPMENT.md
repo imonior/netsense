@@ -67,6 +67,7 @@ netsense/
 ├── src-tauri/
 │   ├── Cargo.toml
 │   ├── tauri.conf.json
+│   ├── Info.plist             # macOS bundle plist merged at packaging: NSLocationWhenInUseUsageDescription
 │   ├── build.rs
 │   ├── icons/                 # tray/window icons (derived from app-icon.png by gen_icons.py)
 │   └── src/
@@ -204,7 +205,7 @@ Cross-platform implementation notes:
 
 | Capability | macOS | Windows | Linux |
 |------------|-------|---------|-------|
-| Current SSID | `networksetup -getairportnetwork` → `ipconfig getsummary` → `system_profiler SPAirPortDataType` (a graded fallback, §9.6) | `Get-NetConnectionProfile` (CIM) | `nmcli -g GENERAL.CONNECTION device show <dev>`, falling back to `con show --active` |
+| Current SSID | `CoreWLAN` (`CWWiFiClient`, needs Location permission) → `networksetup -getairportnetwork` → `ipconfig getsummary` → `system_profiler SPAirPortDataType` (a graded fallback, §9.6) | `Get-NetConnectionProfile` (CIM) | `nmcli -g GENERAL.CONNECTION device show <dev>`, falling back to `con show --active` |
 | Gateway MAC | `route -n get default` → `arp -n <gw>` | `arp -a` (whole table, MAC-shaped match) | `ip neigh show <gw>` |
 | BSSID | `airport -I <dev>` (≤ 14.3) → `system_profiler` | `netsh wlan show interfaces` (ASCII fields only) | `nmcli -f IN-USE,BSSID,SIGNAL dev wifi list`, the `*` row |
 | Apply static | `networksetup -setmanual` | `netsh interface ipv4 set address` | `nmcli connection modify` + `con up` |
@@ -661,7 +662,7 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Capability | macOS | Windows | Linux |
 |------------|-------|---------|-------|
 | Wi-Fi interface discovery | `networksetup -listallhardwareports` (Hardware Port → Device), cached; **never hardcode `en0`** | `Get-NetAdapter` by `MediaType='Native 802.11'` | `nmcli -t -f DEVICE,TYPE dev status` finds `wifi` |
-| Current SSID | gradient: `networksetup` → `ipconfig getsummary` → `system_profiler` (see 9.6.1) | `Get-NetConnectionProfile.Name` | active connection name (`nmcli`) |
+| Current SSID | gradient: `CoreWLAN` (needs Location permission) → `networksetup` → `ipconfig getsummary` → `system_profiler` (see 9.6.1) | `Get-NetConnectionProfile.Name` | active connection name (`nmcli`) |
 | IP/mask/gateway/DNS | `ipconfig` + `networksetup -getinfo` | one PowerShell JSON pull (`Get-NetIPAddress` / `Get-NetRoute` / `Get-DnsClientServerAddress`) | `nmcli -g IP4.*` |
 | BSSID / signal | `airport -I` (≤ 14.3) → `system_profiler SPAirPortDataType` | `netsh wlan show interfaces` (**ASCII fields only**) | `nmcli -f IN-USE,BSSID,SIGNAL dev wifi list` |
 | Gateway MAC | `arp -n <gw>` | `arp -a` matching gateway line | `ip neigh show <gw>` |
@@ -686,29 +687,37 @@ Apple has been progressively locking down Wi-Fi metadata, so **a single source a
 on some macOS generation**, and the symptom is a blank SSID area plus an incomplete status-bar
 menu. Verified source availability:
 
-| macOS | `airport -I` | `networksetup -getairportnetwork` | `ipconfig getsummary` | `system_profiler` |
-|---|---|---|---|---|
-| ≤ 14.3 | SSID + RSSI + BSSID | SSID | SSID | all |
-| 14.4–14.5 | **removed** | SSID | SSID | SSID + RSSI (BSSID empty) |
-| 15.0–15.5 | removed | **always "You are not associated…"** | SSID (~46 ms) | SSID + RSSI |
-| 15.6+ | removed | same | **SSID `<redacted>`** | SSID + RSSI |
+| macOS | `CoreWLAN` (SSID) | `airport -I` | `networksetup -getairportnetwork` | `ipconfig getsummary` | `system_profiler` |
+|---|---|---|---|---|---|
+| ≤ 14.3 | SSID (no prompt) | SSID + RSSI + BSSID | SSID | SSID | all |
+| 14.4–14.5 | SSID, needs Location permission | **removed** | SSID | SSID | SSID + RSSI (BSSID empty) |
+| 15.0–15.5 | SSID, needs Location permission | removed | **always "You are not associated…"** | SSID (~46 ms) | SSID + RSSI |
+| 15.6+ | **the only source still telling the truth**, needs Location permission | removed | same | **SSID `<redacted>`** | **SSID redacted too** (RSSI usable) |
 
 Rules that follow from it:
 
 1. **Never hardcode the interface.** By default `en0` is Wi-Fi on portables, but on iMac /
    Mac mini / Mac Studio `en0` is Ethernet and Wi-Fi is `en1`. Hardcoding it reads the wrong
    port for everything (`wifi_iface()`, cached, resolves it via `listallhardwareports`).
-2. **SSID is a gradient, not a lookup**: `networksetup` → `ipconfig getsummary` →
+2. **SSID is a gradient, not a lookup**: `CoreWLAN` → `networksetup` → `ipconfig getsummary` →
    `system_profiler`, each guarded by `sanitize_ssid()`. That guard is load-bearing — without
    it the "not associated" sentence or `<redacted>` would be shown as a network name, and the
    chain would never fall through to the next source.
-3. **`system_profiler` is the only survivor from 14.4 on, and it is slow** (1–4 s). It is last
-   in the chain and its result is cached for 2 s (`SYS_PROFILER_TTL`) so that a panel refresh
-   plus a watcher poll share one call. Do not reorder it earlier.
-4. **`connected` must not be derived from the SSID alone.** When SSID is unreadable (15.6+,
+3. **CoreWLAN treats the SSID as location information** (macOS 14+). Reading it requires the
+   one-shot `requestWhenInUseAuthorization` fired from the `setup` hook plus
+   `NSLocationWhenInUseUsageDescription` in the bundle `Info.plist`
+   (`bundle.macos.infoPlist`); only then does NetSense appear in System Settings →
+   Privacy & Security → Location Services. While permission is not granted the read returns
+   `None` and the chain degrades to the CLI sources — which on 15.6+ all come back blank,
+   so an ungranted app shows exactly the old "unknown" behaviour, never a failure.
+4. **`system_profiler` survives 14.4+ only for RSSI/BSSID** (its SSID is redacted from 15.6
+   on), and it is slow (1–4 s). It is last in the chain and its result is cached for 2 s
+   (`SYS_PROFILER_TTL`) so that a panel refresh plus a watcher poll share one call.
+   Do not reorder it earlier.
+5. **`connected` must not be derived from the SSID alone.** When SSID is unreadable (15.6+,
    or an unauthorized process) the UI would claim "not connected" while holding an IP, and
    SSID-keyed profiles would never match. It is `ssid.is_some() || ipv4.is_some()`.
-5. **Nothing that samples status may run on the main thread**: the tray icon and the windows are
+6. **Nothing that samples status may run on the main thread**: the tray icon and the windows are
    built there, so `publish_status()` samples once per broadcast, and the commands that
    sample (`get_status`, `get_interfaces`, `check_update`, `run_update`, and every command that
    posts to the engine) carry `#[tauri::command(async)]` — in Tauri, a *non-async* command runs on
@@ -754,7 +763,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - 5 languages (zh / en / zh-TW / ja / ko), **`en.json` is the baseline**; dictionaries are embedded into the binary at compile time via `include_str!`, so no file is read at runtime and no packaging omission can occur.
 - **English is the default on every platform, and any other language is a user choice** — nothing depends on a locale guess. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`pal`/`act`/`net`/`upd`/`dlg` today, **457 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`pal`/`act`/`net`/`upd`/`dlg` today, **458 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，

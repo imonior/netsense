@@ -1335,7 +1335,8 @@ mod tests {
         assert!(!rows[2].is_default);
         // 备注与位置只给人看，队列名才是下发用的
         assert_eq!(rows[1].info.as_deref(), Some("476 on 3F · Office"));
-        assert_eq!(rows[2].info.as_deref(), Some("前台"));
+        // 没有备注的那台：位置不能单独当名字，否则看着像另一台机器冒出来了
+        assert_eq!(rows[2].info.as_deref(), Some(r"\\filesrv\Lobby · 前台"));
         assert_eq!(rows[0].info, None);
         // 没有 `\t` 的行（PowerShell 报错文本混进来时）与空名字的行都不该变成一条打印机
         assert!(parse_printer_rows("Get-CimInstance : Access denied\n\tTrue\n").is_empty());

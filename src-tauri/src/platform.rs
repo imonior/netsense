@@ -718,19 +718,30 @@ fn lpstat_long_printers(long_out: &str) -> Vec<PrinterInfo> {
 
 /// 把系统给打印机写的两句备注（说明、位置）拼成界面上那一行。三平台共用。
 ///
-/// 规则只有一条：标签只装**新信息**。说明常常就是把队列名原样填了一遍（CUPS 里
-/// `CanonG3860` 的 Description 就是 `CanonG3860`），那它什么都不说明；但同一台的位置
-/// （`XSMS`）仍然有用，于是留下 `CanonG3860 · XSMS`。两句都没信息时返回 `None`，
-/// 让界面回落到队列名 —— 名字永远是对的。
+/// 规则只有一条：**标签要认得出是哪台机器**。
+/// - 说明与队列名重复时（CUPS 新建队列常把队列名原样填进说明）丢掉说明；但同一台的
+///   位置（`XSMS`）仍然有用，于是留下 `XSMS`。
+/// - 说明**根本没有**、只有位置时不能只亮位置 —— 那会让用户把一台机器认成另一台
+///   （Windows 上被误认成「别的系统的打印机」就是这么来的），于是队列名顶上：
+///   `\\filesrv\Lobby · 前台`。
+/// - 一点新信息都没有（说明重复且无位置，或两句都空）时返回 `None`，界面回落队列名。
 pub(crate) fn printer_label(name: &str, description: &str, location: &str) -> Option<String> {
+    let d = description.trim();
+    let l = location.trim();
     let mut parts: Vec<&str> = Vec::new();
-    for p in [description, location] {
-        let p = p.trim();
-        if !p.is_empty() && p != name && !parts.contains(&p) {
-            parts.push(p);
+    if !d.is_empty() {
+        if d != name {
+            parts.push(d);
         }
+    } else if !l.is_empty() && l != name {
+        // 没有说明、只有位置：补上队列名当主语，位置只是它的注脚
+        parts.push(name);
     }
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    if !l.is_empty() && !parts.contains(&l) {
+        parts.push(l);
+    }
+    let only_name = parts.len() == 1 && parts[0] == name;
+    (!parts.is_empty() && !only_name).then(|| parts.join(" · "))
 }
 
 /// 见 [`printers_from_lpstat`]：`lpstat -d` 那一行里的目的地名。
@@ -901,7 +912,7 @@ mod windows;
 mod linux;
 
 #[cfg(target_os = "macos")]
-pub use macos::{priv_channel, MacPlatform as Platform};
+pub use macos::{priv_channel, request_location_authorization, MacPlatform as Platform};
 #[cfg(target_os = "windows")]
 pub use windows::{priv_channel, WindowsPlatform as Platform};
 #[cfg(target_os = "linux")]
@@ -1151,7 +1162,7 @@ printer CanonG3860 is disabled.
     }
 
     /// 队列名 + 说明 + 位置 → 界面上那一行。三平台共用，所以规则只在这一处钉死：
-    /// 只装新信息，重复的与空的都不算。
+    /// 标签要认得出是哪台机器 —— 重复的不算，缺说明时队列名补位，光秃秃的位置不当主语。
     #[test]
     fn a_printer_label_carries_only_what_the_queue_name_does_not_say() {
         assert_eq!(
@@ -1164,6 +1175,11 @@ printer CanonG3860 is disabled.
         assert_eq!(printer_label("CanonG3860", "CanonG3860", "XSMS").as_deref(), Some("XSMS"));
         // 两句都一样时不重复一遍
         assert_eq!(printer_label("HP", "前台", "前台").as_deref(), Some("前台"));
+        // 没有说明、只有位置：不能让位置单独冒充打印机名，队列名补位当主语
+        assert_eq!(
+            printer_label(r"\\filesrv\Lobby", "", "前台").as_deref(),
+            Some(r"\\filesrv\Lobby · 前台")
+        );
         // 什么都没有 → 界面回落到队列名
         assert_eq!(printer_label("HP", "  ", "").as_deref(), None);
     }

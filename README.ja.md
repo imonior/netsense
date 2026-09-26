@@ -82,7 +82,7 @@ Core Engine（detection / conditions / 照合 / network / automation）はシス
 
 | プラットフォーム | 読み取り | 書き込み | 権限昇格 |
 |------------------|----------|----------|----------|
-| macOS | `networksetup` / `ipconfig` / `arp` / `system_profiler`（`airport` はまだ生きているところで） | `networksetup` / `route` | sudoers 許可リスト、それ以外は `osascript` の認可ダイアログ |
+| macOS | `CoreWLAN` / `networksetup` / `ipconfig` / `arp` / `system_profiler`（`airport` はまだ生きているところで） | `networksetup` / `route` | sudoers 許可リスト、それ以外は `osascript` の認可ダイアログ |
 | Windows | PowerShell CIM（`Get-NetAdapter` …）+ `netsh` | `netsh` / `New-NetRoute` | 既に管理者なら承認不要、それ以外は UAC |
 | Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | `sudo -n`、それ以外は `pkexec` |
 

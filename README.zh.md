@@ -67,7 +67,7 @@ Core Engine（detection / conditions / 匹配 / network / automation）从不直
 
 | 平台 | 读取 | 写入 | 提权 |
 |------|------|------|------|
-| macOS | `networksetup` / `ipconfig` / `arp` / `system_profiler`（还有仍在时的 `airport`） | `networksetup` / `route` | sudoers 白名单，否则 `osascript` 授权框 |
+| macOS | `CoreWLAN` / `networksetup` / `ipconfig` / `arp` / `system_profiler`（还有仍在时的 `airport`） | `networksetup` / `route` | sudoers 白名单，否则 `osascript` 授权框 |
 | Windows | PowerShell CIM（`Get-NetAdapter` …）+ `netsh` | `netsh` / `New-NetRoute` | 已是管理员则免弹窗，否则 UAC |
 | Linux | `nmcli` / `ip neigh` | `nmcli con mod` / `ip route` | `sudo -n`，否则 `pkexec` |
 

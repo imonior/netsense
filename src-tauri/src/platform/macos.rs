@@ -12,10 +12,14 @@
 //! | ≤ 14.3 | SSID+RSSI+BSSID | SSID | SSID | 全量 |
 //! | 14.4–14.5 | **已删除** | SSID | SSID | SSID+RSSI（BSSID 空） |
 //! | 15.0–15.5 | 已删除 | **恒返回 "You are not associated…"** | SSID（约 46ms） | SSID+RSSI |
-//! | 15.6+ | 已删除 | 同上 | **SSID 被涂成 `<redacted>`** | SSID+RSSI |
+//! | 15.6+ | 已删除 | 同上 | **SSID 被涂成 `<redacted>`** | **SSID 同样被涂黑**（只剩 RSSI） |
 //!
-//! 因此这里实现的是**逐级降级**而非单点取值：`networksetup` → `ipconfig getsummary`
-//! → `system_profiler`（最后这个是 14.4 起唯一持续可用的来源，但慢，故带 2s 缓存）。
+//! 15.6 起 CLI 来源在现连 SSID 上全军覆没，所以这里的第一来源是 **CoreWLAN**
+//! （`CWWiFiClient`，见 `ssid_via_corewlan`）：Sequoia 上它仍然给出真实网络名，
+//! 代价是系统把 SSID 视为位置信息 —— 必须申请定位授权（`request_location_authorization`）
+//! 并在 Info.plist 里声明用途，NetSense 才会出现在「定位服务」授权列表。
+//! 授权没给之前它返回 `None`，降级链照旧走完三个 CLI 来源
+//! （`networksetup` → `ipconfig getsummary` → `system_profiler`，最后那个慢，故带 2s 缓存）。
 //!
 //! 提权策略：优先 `/etc/sudoers.d/netsense` 授权的白名单包装脚本（免密、无弹窗），
 //! 不可用时自动回落 `osascript ... with administrator privileges`，功能不中断。
@@ -27,6 +31,10 @@ use super::{
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
+use objc2::rc::Retained;
+use objc2::{class, msg_send};
+use objc2_core_location::CLLocationManager;
+use objc2_core_wlan::CWWiFiClient;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -687,6 +695,39 @@ fn parse_system_profiler(out: &str) -> RadioInfo {
     info
 }
 
+/// 应用启动时调一次：向系统申请「使用期间」定位授权，NetSense 才会出现在
+/// 系统设置 → 隐私与安全性 → 定位服务 的列表里，用户放行后 CoreWLAN 才读得到 SSID
+/// （macOS 14 起把网络名当作位置信息对待）。
+///
+/// 不挂 delegate 等回调 —— SSID 监视线程每 2~5s 轮询一次，授权一变，下一轮自然读到。
+/// `CLLocationManager` 要活得和进程一样久（系统按「管理器是否仍存活」判定授权会话），
+/// 而 ObjC 对象不是 `Sync` 的，所以套一层壳再放进 static：引用永不跨线程传递，
+/// 也没有 delegate 回调可被触发，共享只读是安全的。
+pub fn request_location_authorization() {
+    struct LocationManager(Retained<CLLocationManager>);
+    // SAFETY: 见函数注释 —— 该对象只在这一个函数里被触碰（启动时的主线程），
+    // static 只是为了续命，跨线程共享的实际上只有它的存在性。
+    unsafe impl Send for LocationManager {}
+    unsafe impl Sync for LocationManager {}
+    static MANAGER: OnceLock<LocationManager> = OnceLock::new();
+    let mgr = MANAGER.get_or_init(|| unsafe {
+        LocationManager(msg_send![class!(CLLocationManager), new])
+    });
+    unsafe { mgr.0.requestWhenInUseAuthorization() };
+}
+
+/// 来源 0：CoreWLAN（`CWWiFiClient`）。macOS 14.4 起唯一可靠取现连 SSID 的来源 ——
+/// 15.6+ 三个 CLI 来源全被涂黑（版本矩阵见文件头注释）。
+///
+/// 未授权、没有无线网卡、未关联网络时都返回 `None`，调用方继续走 CLI 降级链；
+/// 所以「用户还没放行定位授权」不会让状态读取整体失败，只是 SSID 一时为空。
+fn ssid_via_corewlan() -> Option<String> {
+    let client = unsafe { CWWiFiClient::sharedWiFiClient() };
+    let iface = unsafe { client.interface() }?;
+    let ssid = unsafe { iface.ssid() }?;
+    sanitize_ssid(&ssid.to_string())
+}
+
 /// 来源 1：`networksetup -getairportnetwork <dev>`，输出 `Current Wi-Fi Network: X`。
 /// ≤ macOS 14 可靠；15.0 起恒返回 "You are not associated with an AirPort network."
 /// （被 `sanitize_ssid` 归一成 `None`，从而自动继续降级）。
@@ -1116,16 +1157,19 @@ impl NetworkPlatform for MacPlatform {
         poll_ssid_watch(|| MacPlatform.get_current_ssid(), cb)
     }
 
-    /// 逐级降级取 SSID，顺序 = 由快到慢、由准到糙（版本矩阵见文件头注释）：
-    /// `networksetup` → `ipconfig getsummary` → `system_profiler`。
+    /// 逐级降级取 SSID，顺序 = 由准到糙、由快到慢（版本矩阵见文件头注释）：
+    /// CoreWLAN → `networksetup` → `ipconfig getsummary` → `system_profiler`。
     ///
     /// 单点取值的代价：只用 `networksetup` 时，macOS 15.0 起
-    /// 会稳定拿到 "You are not associated with an AirPort network."，于是 SSID 区永远空白。
+    /// 会稳定拿到 "You are not associated with an AirPort network."，于是 SSID 区永远空白；
+    /// 而 15.6+ 起三个 CLI 来源一起失效，SSID 必须优先走 CoreWLAN（需定位授权）。
     fn get_current_ssid(&self) -> Option<String> {
-        let dev = wifi_iface();
-        ssid_via_networksetup(&dev)
-            .or_else(|| ssid_via_ipconfig(&dev))
-            .or_else(|| system_profiler_info().ssid)
+        ssid_via_corewlan().or_else(|| {
+            let dev = wifi_iface();
+            ssid_via_networksetup(&dev)
+                .or_else(|| ssid_via_ipconfig(&dev))
+                .or_else(|| system_profiler_info().ssid)
+        })
     }
 
     fn get_status(&self) -> InterfaceStatus {

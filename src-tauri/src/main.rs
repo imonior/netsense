@@ -120,6 +120,11 @@ fn main() {
 
     tauri::Builder::default()
         .setup(move |app| {
+            // macOS 14+ 把现连 SSID 当位置信息：申请过一次「使用期间」定位授权，
+            // CoreWLAN 才读得到网络名、NetSense 才会出现在「定位服务」列表里。
+            // 用户还没放行不会把应用弄坏 —— SSID 取值自动退回 CLI 降级链。
+            #[cfg(target_os = "macos")]
+            platform::request_location_authorization();
             // 配置文件：用户目录里那份优先，其次才是同目录那份（见 `paths::config_path`）
             let config_path = paths::config_path();
             // 软件配置在主流程里已经读过（语言、日志保留要用），这里只把那份结果带进状态
