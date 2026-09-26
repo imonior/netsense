@@ -13,6 +13,8 @@
 //! 3. **提权走 UAC**：把要执行的命令渲染成一段 PowerShell 脚本，
 //!    用 `-EncodedCommand`（UTF-16LE base64，彻底避开引号/编码问题）交给
 //!    `Start-Process -Verb RunAs` 以管理员身份执行，一次授权覆盖本批全部操作。
+//!    网络配置批次默认先走常驻 helper（`win_helper`）：同一个会话只弹一次授权，
+//!    helper 不可用时才透明退回上面这条逐批弹窗的通路。
 //!
 //! 4. **命令参数一律用 `@('a','b')` 数组传递**（`& netsh.exe @(...)`），
 //!    不做字符串拼接，避免接口名含空格/特殊字符时被重新切分。
@@ -44,7 +46,10 @@ fn cache() -> &'static Mutex<Option<(Instant, InterfaceStatus)>> {
 /// 保证含中文的返回值（SSID、适配器名）在 Rust 侧能正确按 UTF-8 解码。
 /// 调用时**不要**在脚本里再执行 `netsh` 等原生命令（它们的输出是 OEM 代码页，
 /// 会被 UTF-8 解码器解坏）；需要 netsh 文本时请直接从 Rust 调 `netsh` 并只取 ASCII 字段。
-fn ps(script: &str) -> Result<String, String> {
+///
+/// `pub(crate)` 是给 `win_helper` 拉起 helper 用的（`Start-Process -Verb RunAs` 本身
+/// 也得由一条普通权限的 PowerShell 来说）。
+pub(crate) fn ps(script: &str) -> Result<String, String> {
     let full = format!(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$ProgressPreference='SilentlyContinue';\r\n{}",
         script
@@ -79,7 +84,8 @@ fn ps_arr(items: &[&str]) -> String {
 /// 而 `Start-Process -ArgumentList @(...)` 是把元素**用空格拼成一条命令行**交给子进程，
 /// 补引号是子进程那边按 Win32 规则解析的事 —— 于是 `'C:\Program Files\a.bat'` 会在那里
 /// 变成两个参数。这里显式给含空白（或含 `"`）的元素再包一层双引号，内部 `"` 按 `\"` 转义。
-fn ps_exec_arr(items: &[&str]) -> String {
+/// `pub(crate)` 同样是给 `win_helper` 拉起自身用的。
+pub(crate) fn ps_exec_arr(items: &[&str]) -> String {
     let inner: Vec<String> = items.iter().map(|s| ps_exec_arg(s)).collect();
     format!("@({})", inner.join(","))
 }
@@ -136,7 +142,8 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// UTF-16LE + base64，供 PowerShell `-EncodedCommand` 使用。
-fn encode_command(script: &str) -> String {
+/// `pub(crate)`：helper 服务端（`win_helper`）执行的就是这条编码通路。
+pub(crate) fn encode_command(script: &str) -> String {
     let mut bytes = Vec::with_capacity(script.len() * 2 + 2);
     for u in script.encode_utf16() {
         bytes.extend_from_slice(&u.to_le_bytes());
@@ -173,7 +180,8 @@ fn run_elevated_ps(body: &str) -> Result<(), String> {
 }
 
 /// UAC 被用户点掉时的那条报错（外层脚本把取消编码成退出码 1223 = ERROR_CANCELLED）。
-fn uac_cancelled(e: String) -> String {
+/// `pub(crate)` 也给 `win_helper` 复用：拉起 helper 被取消时的口径必须和这里一致。
+pub(crate) fn uac_cancelled(e: String) -> String {
     if e.contains("1223") {
         i18n::t("pal.uac_cancelled")
     } else {
@@ -632,7 +640,17 @@ fn exec_ops(ops: &[WinOp]) -> Result<(), String> {
         return Ok(());
     }
     let body: String = ops.iter().map(|o| o.render()).collect::<Vec<_>>().join("\r\n");
-    let r = run_elevated_ps(&body);
+    // 优先交给常驻 helper（见 `super::win_helper`）：授权从「每批一次」降到「每会话一次」，
+    // 执行的本就是同一份 PowerShell。够不着 helper 才退回原来的逐批 `run_elevated_ps`。
+    // 已是管理员（Direct）时 -Verb RunAs 本就不弹窗，不必多绕一条管道。
+    let r = if matches!(priv_channel(), PrivChannel::Prompt) {
+        match super::win_helper::run_batch(&body) {
+            super::win_helper::Outcome::Done(r) => r,
+            super::win_helper::Outcome::Unavailable => run_elevated_ps(&body),
+        }
+    } else {
+        run_elevated_ps(&body)
+    };
     invalidate_cache();
     r
 }

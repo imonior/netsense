@@ -101,6 +101,7 @@ netsense/
 │       ├── platform/
 │       │   ├── macos.rs       # macOS: networksetup / arp / airport / route / osascript
 │       │   ├── windows.rs     # Windows: PowerShell(CIM) read + netsh write + UAC elevation
+│       │   ├── win_helper.rs  # Windows 常驻提权 helper：同一 exe 的 `--netsense-helper` + 命名管道 RPC（一次授权/会话）
 │       │   └── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec
 │       ├── update.rs          # 在线升级：check_update / run_update（下载 + 校验 + 安装）
 │       ├── win_dialog.rs      # Windows 原生对话框桥
@@ -538,6 +539,8 @@ sh scripts/install-priv-helper.sh uninstall  # uninstall
 A `launchd` resident + Unix socket approach needs its own socket authentication (macOS has no `SO_PEERCRED`, requires `getpeereid` FFI) and protocol version compatibility — clearly larger complexity and attack surface.
 sudoers + allow-list script achieves the same goal using the system's built-in authorization mechanism, and with **a narrower privilege scope** (only network-configuration operations are allowed). If stronger isolation beyond passwordless is needed later (e.g. SMJobBless signature checks), revisit the open items in §14.
 
+Windows ended up taking the helper route anyway (§9.6 "Four key Windows backend designs" rule 3) because what makes this section's launchd+socket plan expensive is nearly free there: the kernel's own named-pipe DACL plus a client-process image-path check authenticate the caller, and the protocol is just "run this already-rendered batch" — no new privilege is ever minted. On macOS the complexities named above still argue for the sudoers allow-list; a Windows-style helper is not on the roadmap.
+
 > If a `run` automation action declares `elevated: true`, it does **not** go through the allow-list channel but still uses the `osascript` auth dialog —
 > user scripts must be treated separately from network-configuration operations, guaranteeing the user is informed every time a privileged script runs.
 
@@ -673,7 +676,7 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Tunnel up? (3B2 read) | `scutil --nc list` (`WireGuard for macOS` registers each tunnel as a NEVPN config, so it appears here too) | `Get-NetAdapter` — the adapter **description** is the provider hint | `nmcli -t connection show` → `ip link show <dev>` (flags, not `state`) |
 | Connect tunnel (3B2 write) | `scutil --nc start <label>` | `wireguard.exe /installtunnelservice <conf>` / `rasdial <name>` | `nmcli connection up <name>` → `ip link set <name> up` |
 | Elevate = Direct | sudoers allow-list script (`sudo -n`, no dialog) | process already admin | `sudo -n` available |
-| Elevate = Prompt | `osascript ... with administrator privileges` | UAC (`Start-Process -Verb RunAs`) | `pkexec` |
+| Elevate = Prompt | `osascript ... with administrator privileges` | config batches: resident helper (`win_helper.rs`, one UAC per GUI session, same `Start-Process -Verb RunAs` to spawn it); fallback / user scripts: UAC per call (`Start-Process -Verb RunAs`) | `pkexec` |
 | Saved SSID list | `networksetup -listpreferredwirelessnetworks` | read WLAN config XML (`[xml]` parse) | `nmcli con show` filtered to `802-11-wireless` |
 | Open log folder | `open` | `explorer` | `xdg-open` |
 
@@ -738,6 +741,7 @@ Rules that follow from it:
 3. **Elevation commands always pass args as `@('a','b')` arrays, never string-concatenated**:
    `& netsh.exe @('interface','ipv4','set','address','name=Wi-Fi','static',...)`.
    Interface names with spaces/special chars are not re-split. The whole batch is rendered into a PowerShell script and handed to `Start-Process -Verb RunAs` via `-EncodedCommand` (UTF-16LE + base64, self-implemented, zero-dependency) for **one UAC covering all operations**.
+   Config batches first try the **resident helper** (`platform/win_helper.rs`): the same exe re-launched elevated once per GUI session (`--netsense-helper`), executing batches over a named pipe whose DACL is owner-only and whose server verifies the connecting process is the *same executable*. Trust model: a batch's content comes from a config this very user edited, so the helper — reachable only by that same user — asks nothing new; user scripts (`run_script elevated`) **deliberately keep their per-run UAC**. Any helper failure (prompt declined, pipe dead, hostile same-user process hogging the slot) falls back to the plain per-batch UAC path above, and since every batch op (`netsh set …`) is an idempotent setting, the one retry after a half-delivered request costs nothing.
 4. **Never slice a `&str` by byte offset — command output is *lossily* decoded.**
    CP936 Chinese becomes 3-byte `U+FFFD` (the `�` in logs), so `&line[i..i + 17]` panics the instant `i` lands inside one (`byte index N is not a char boundary`).
    `platform.rs::extract_mac` therefore scans `line.as_bytes()`, skips any window containing a non-ASCII byte, and only then builds the `&str`; the regression test uses the bytes captured from a real Chinese Windows box.
@@ -904,7 +908,7 @@ Linux `$XDG_CONFIG_HOME/netsense/config.json`，默认 `~/.config/netsense/`）�
 按用户存放意味着重装不掉配置，而签过名的 macOS `.app` 与只读的 `Program Files` 都不该被写入。把 `config.example.json` 复制一份改名即用。
 Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writable, otherwise `<temp>/NetSense/logs`. `scripts/` is resolved against the directory that actually holds the chosen `config.json`, so the README's "relative path = next to config.json" stays true wherever the config lives. The panel's **Logs** button opens the log window, and that window prints the directory it is really reading —— 目录可能被后端换过（用户目录不可写时退到临时目录），界面自己拼的那个路径会说谎。 A panic hook writes panics into that same file, so a silent exit is never silent any more.
 
-> **Windows prompts UAC once on the first network change.** To remove it: launch once as administrator (after that the in-process privilege channel shows "no authorization needed"). If you don't want to stay admin, accept one UAC per network change — this is the peer design of macOS's `osascript` fallback channel.
+> **Windows asks UAC once per app session** (the first apply spawns the resident elevated helper, §9.6 "Four key Windows backend designs" rule 3; later batches ride the pipe). To remove that prompt too: launch once as administrator (after that the in-process privilege channel shows "no authorization needed"). Elevation for user scripts still asks every run by design.
 
 ---
 
@@ -1123,7 +1127,7 @@ and in-app upgrade.
 |------|---------|
 | 3A **rollback** | restore the previous working configuration instead of the blanket DHCP fallback (§7) |
 | More condition kinds | IPv4 / gateway / connectivity / VPN state beyond what `conditions/` matches today |
-| Stronger privilege isolation | if the passwordless sudoers / UAC channel is not enough: a signed helper (SMJobBless-style), see §9.2 |
+| Stronger privilege isolation | if the passwordless sudoers / UAC channel is not enough: a **signed** helper (SMJobBless-style), see §9.2 — Windows already has the plain unsigned elevated helper (§9.6 rule 3), macOS / Linux are the open half |
 | Code signing / notarization | unsigned builds cost every user an accept-the-warning step on each OS |
 | Signed release checksums | `SHA256SUMS` travels the same HTTPS path as the asset it describes, so it proves integrity, not provenance; an Ed25519/minisign signature checked against a key baked into the app would (§9.3) |
 | Linux beyond NetworkManager | a systemd-networkd / pure-`ip` backend; the current Linux PAL assumes NetworkManager is in charge |
@@ -1210,7 +1214,8 @@ What no automated gate can reach, and therefore what needs a real machine per OS
   user's own default as a side effect of a test.
 - **Popup panel**: keyboard focus / the blur-collapse rule and Retina coordinate conversion (§9.5).
 - **Privilege channel**: a first install of `scripts/install-priv-helper.sh`, and the UAC prompt count for
-  a non-admin Windows user.
+  a non-admin Windows user — with the helper it should be **one per GUI session** (first apply asks; later
+  applies ride the pipe), one per batch if the helper was declined or died, still one per run for `elevated` user scripts.
 - **Integration tests**: mock the PAL and run the 3A-fail chain through the engine thread itself, so the
   wiring — that `execute_branch` really skips the 3B submission when 3A failed — is pinned and not just
   the state machine (§12).
@@ -1222,7 +1227,7 @@ What no automated gate can reach, and therefore what needs a real machine per OS
 - **One provider trait per action kind** would give three traits with one implementation each. One `Tick` trait plus the `provider::tick_for` factory covers the same seam (§8).
 - `InterfaceStatus` gains `Serialize` (IPC return needs JSON) and `gateway_mac` / `netmask` / `bssid` / `iface` fields.
 - After health fallback, the `applied_fp` fingerprint is cleared: otherwise later hot-reloads would skip push due to "content unchanged", leaving the network stuck on DHCP.
-- **Privilege model uses the system's built-in authorization** (macOS sudoers allow-list / Windows UAC / Linux sudo+pkexec), not a resident privilege daemon — rationale in §9.2 (narrower scope, no socket-auth surface).
+- **Privilege model uses the system's built-in authorization** (macOS sudoers allow-list / Windows UAC / Linux sudo+pkexec); only Windows adds a resident elevated helper (§9.6 rule 3) — macOS / Linux stay daemon-free per §9.2 (narrower scope, no socket-auth surface).
 - `watch_ssid` is adaptive polling (2s/5s) on all three platforms, **not event-driven**: macOS's CoreWLAN notifications need objc2 FFI and handling `CWInterface` notification object lifetime, Windows's `WlanRegisterNotification` likewise needs FFI; the payoff (skipping a subprocess every 2–5s) doesn't justify the complexity, deferred.
   The polling logic is extracted into shared `poll_ssid_watch`; switching to event-driven later only requires changing each platform's `watch_ssid` in one place.
 - The frontend has no build tooling (no Vite/Svelte), still pure static HTML; `invoke` depends on `withGlobalTauri`.

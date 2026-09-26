@@ -145,8 +145,10 @@ window that the panel's "Settings" button opens; changing it never re-applies a 
 read-only `Program Files` must not be written to. Logs go to NetSense's per-user log directory.
 `config.example.json` is a complete worked example.
 
-> On Windows the first network change prompts for UAC once. Running as administrator once removes
-> it; the privilege channel then reports "no authorization needed".
+> Elevation for network config on Windows asks UAC **once per app run** (the first apply spawns a
+> resident elevated helper that later batches ride; decline it, or lose the helper, and NetSense
+> falls back to asking per batch). Running as administrator removes even that; the privilege channel
+> then reports "no authorization needed".
 
 ## Configuration
 

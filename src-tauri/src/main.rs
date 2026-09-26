@@ -2,6 +2,8 @@
 //!
 //! 装配顺序（每一项都有理由，顺序不能随意换）：
 //!
+//! 0. Windows 的 helper 模式分叉 —— 被 UAC 拉起的命名管道服务进程（见
+//!    `platform::win_helper`）在这一行就离开，绝不碰后面的 GUI 装配；
 //! 1. 字典（i18n）→ 软件配置 → 日志 + panic hook —— 日志最先起，否则后面的失败没有任何
 //!    痕迹；字典在日志之前，因为启动那几行日志本身就是要翻译的；软件配置在两者之间，
 //!    因为它决定的正是「用什么语言说」和「留几天」；
@@ -44,6 +46,14 @@ use i18n::Language;
 use platform::{priv_channel, platform_name};
 
 fn main() {
+    // -1) Windows helper 模式必须在**一切装配之前**分叉：这个进程是被 UAC 拉起、
+    //     只服务命名管道的提权进程 —— 不起窗口、不写日志文件（两个进程追写同一份
+    //     日志是要打架的），错误文本一律经管道回到 GUI 那一侧再落日志。
+    #[cfg(target_os = "windows")]
+    if platform::win_helper::helper_mode() {
+        std::process::exit(platform::win_helper::serve());
+    }
+
     // 0) 字典先于第一条日志。
     //
     //    日志文案是用户看的（也是远程定位时唯一看的），而 `i18n::t` 在字典装好之前

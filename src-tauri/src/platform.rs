@@ -908,6 +908,8 @@ pub const fn platform_name() -> &'static str {
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+pub(crate) mod win_helper;
 #[cfg(target_os = "linux")]
 mod linux;
 
