@@ -245,6 +245,9 @@
 <div class="modal-mask" id="verify-mask" hidden>
   <div class="modal wide" id="verify-modal"></div>
 </div>
+<div class="modal-mask" id="del-mask" hidden>
+  <div class="modal" id="del-modal"></div>
+</div>
 
 <script>
   const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
@@ -270,6 +273,18 @@
   let _seq = 0;
   const uid = (p) => p + Date.now().toString(36).slice(-5) + (_seq++).toString(36);
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
+
+  // ———————— NIC helpers (mirrors popup.html) ————————
+  const kindLabel = (kind) => kind === "wireless" ? t("popup.kind_wireless", "Wi-Fi")
+    : kind === "wired" ? t("popup.kind_wired", "Wired")
+    : kind === "vpn" ? t("popup.kind_vpn", "VPN") : t("popup.kind_other", "Other");
+
+  const nicTitle = (n) => {
+    const label = (n.label || "").trim();
+    if (!label) return `${n.name} (${kindLabel(n.kind)})`;
+    return label.toLowerCase().includes(n.name.toLowerCase())
+      ? label : `${n.name} (${label})`;
+  };
 
   /* —————————————————————— 状态 ——————————————————————
      `draft` 与磁盘上的配置刻意分成两份：引擎广播可能几秒就来一次，
@@ -388,7 +403,7 @@
   /// 系统硬件网络出口：条件比的是「在用的普通网卡」，VPN 隧道不是出口，不能选。
   const ifaceNames = () => nicList
     .filter(n => n && n.name && n.kind !== "vpn")
-    .map(n => String(n.name));
+    .map(n => nicTitle(n));
 
   /* —————————————————————— 第一层：当前状态条 —————————————————————— */
   function renderStrip() {
@@ -421,20 +436,56 @@
     $("st-cond").innerHTML = p2 || `<span class="empty">${esc(t("editor.state_none"))}</span>`;
 
     // 格 3：当前网络信息。条件值从这里取，而不是让用户手抄 MAC。
+    // 与托盘面板同一套字段、同一顺序：iface → SSID → signal → mac → IPv4 → netmask → gateway → IPv6 → DNS
+    const primary = nicList[0] || null;
     const s = (view && view.snapshot) || {};
+    const wireless = !primary || primary.kind === "wireless";
+    const ssid = s.ssid || (primary && primary.ssid) || "";
+    const ssidDisplay = ssid || t("status.ssid_unknown");
+    
     const rows = [];
-    // 第四个元素是「能不能被用作条件」：没连 Wi-Fi 时 SSID 为空，这一行仍然要出现
-    // （否则用户分不清「读不到」和「这里本来就没有」），但不给「用作条件」按钮——
-    // 把读不到的值写进条件里，等于凭空造一条永远不成立的条件。
-    const put = (label, val, type) => { if (val) rows.push([label, val, type, val]); };
-    rows.push([t("status.ssid"), s.ssid || t("status.ssid_unknown"), "wifi_ssid", s.ssid]);
-    put(t("editor.nic_gateway_mac"), s.gateway_mac, "gateway_mac");
-    put(t("editor.match_bssid"), s.bssid, "bssid");
-    put(t("editor.match_interface"), s.primary_interface, "network_interface");
-    let p3 = rows.map(([k, v, type, canUse]) =>
-      `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}` +
-      (canUse ? `<button class="mini-btn" data-act="use-cond" data-type="${type}" data-val="${esc(v)}">${esc(t("editor.use_value"))}</button>` : "") +
-      `</span></div>`).join("");
+    // Interface（总是显示）
+    if (primary) {
+      rows.push([t("popup.interface"), nicTitle(primary), "network_interface", primary.name]);
+    } else if (s.primary_interface) {
+      rows.push([t("popup.interface"), s.primary_interface, "network_interface", s.primary_interface]);
+    }
+    // SSID（无线才显示具体值，有线时留空行占位）
+    rows.push([t("status.ssid"), wireless ? ssidDisplay : "", "wifi_ssid", wireless ? s.ssid : undefined]);
+    // Signal strength（仅无线且有 RSSI 时显示）
+    if (wireless && s.rssi != null) {
+      rows.push([t("popup.signal"), s.rssi + " dBm"]);
+    }
+    // MAC
+    if (primary && primary.mac) {
+      rows.push([t("popup.mac"), primary.mac, "bssid", primary.mac]);
+    } else if (s.bssid) {
+      rows.push([t("popup.mac"), s.bssid, "bssid", s.bssid]);
+    }
+    // IPv4
+    const ipv4 = s.ipv4 || (primary && primary.ipv4);
+    if (ipv4) rows.push([t("popup.ip"), ipv4]);
+    // Netmask
+    const netmask = (primary && primary.netmask) || s.netmask;
+    if (netmask) rows.push([t("popup.netmask"), netmask]);
+    // Gateway
+    const gateway = s.gateway || (primary && primary.gateway);
+    if (gateway) rows.push([t("popup.gateway"), gateway, "gateway_mac", s.gateway_mac || (primary && primary.gateway_mac)]);
+    // IPv6
+    if (primary && primary.ipv6) rows.push([t("popup.ipv6"), primary.ipv6]);
+    // DNS
+    const dns = s.dns || (primary && primary.dns);
+    if (dns) rows.push([t("popup.dns"), dns]);
+    
+    let p3 = rows.map(([k, v, type, canUse]) => {
+      const hasValue = v !== undefined && v !== null && v !== "";
+      if (!hasValue && k !== t("status.ssid")) return "";
+      return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v || "—")}` +
+        (canUse ? `<button class="mini-btn" data-act="use-cond" data-type="${type}" data-val="${esc(canUse)}">${esc(t("editor.use_value"))}</button>` : "") +
+        `</span></div>`;
+    }).filter(Boolean).join("");
+    
+    // 附加信息：所有网卡名列表 + VPN 隧道
     if ((s.interfaces || []).length)
       p3 += `<div class="kv"><span class="k">${esc(t("editor.hardware_column"))}</span><span class="v">${esc(s.interfaces.join(", "))}</span></div>`;
     if ((s.tunnels || []).length)
@@ -577,21 +628,49 @@
   const ssidDatalist = () => `<datalist id="ssid-list">` +
     wifiList.filter(Boolean).map(s => `<option value="${esc(s)}"></option>`).join("") + `</datalist>`;
 
-  /// SSID 可以手输（隐藏网络、还没连上过的环境都要能提前配好），所以是 datalist；
-  /// 网卡名是这台机器上的事实，猜没有意义，所以只能是下拉。
+  /// SSID 可以手输（隐藏网络、还没连上过的环境都要能提前配好）。
+  /// WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select>，底部加 "Other…" 选项支持手输。
   function condValue(b, c) {
     const type = c.type || "wifi_ssid";
-    if (type === "wifi_ssid")
-      return `<input type="text" value="${esc(c.value ?? "")}" placeholder="${esc(COND_PH.wifi_ssid)}" list="ssid-list" data-bind="${b}.value">`;
+    if (type === "wifi_ssid") {
+      const cur = String(c.value ?? "").trim();
+      const ssids = wifiList.filter(Boolean);
+      // 如果当前值不在列表里，保留它作为第一个选项
+      const opts = (cur && !ssids.includes(cur)) ? [cur, ...ssids] : ssids;
+      return `<select data-bind="${b}.value" style="max-width:220px" onchange="if(this.value==='__manual__'){this.outerHTML='<input type=text class=in data-bind='+this.dataset.bind+' value=\\''+esc(cur)+'\\' style=max-width:220px>'}">` +
+        `<option value=""${cur ? "" : " selected"}>${esc(COND_PH.wifi_ssid)}</option>` +
+        opts.map(s => `<option value="${esc(s)}" ${s === cur ? "selected" : ""}>${esc(s)}</option>`).join("") +
+        `<option value="__manual__">${esc(t("editor.ssid_manual", "Manual entry…"))}</option>` +
+        `</select>`;
+    }
     if (type === "network_interface") {
       const cur = String(c.value || "").trim();
-      const names = ifaceNames();
+      // 构建 nicTitle -> name 的映射，用于显示和存储
+      const ifaceMap = new Map();
+      const titles = [];
+      for (const n of nicList) {
+        if (!n || !n.name || n.kind === "vpn") continue;
+        const title = nicTitle(n);
+        ifaceMap.set(title, n.name);
+        titles.push(title);
+      }
+      // 当前值可能是设备名，需要找到对应的 title
+      let curTitle = "";
+      for (const [title, name] of ifaceMap) {
+        if (name === cur) { curTitle = title; break; }
+      }
       // 配置里写着这台机器现在没有的网卡是合法的（换台笔记本、拔了扩展坞）：
       // 那一项原样列出来，否则下拉会把已存的值改成另一张卡，一次保存就把人改了。
-      const opts = cur && !names.includes(cur) ? [cur, ...names] : names;
+      if (cur && !curTitle) {
+        titles.unshift(cur); // 未知设备直接放最前面
+        ifaceMap.set(cur, cur);
+      }
       return `<select data-bind="${b}.value">` +
         `<option value=""${cur ? "" : " selected"}>—</option>` +
-        opts.map(n => `<option value="${esc(n)}" ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("") +
+        titles.map(title => {
+          const name = ifaceMap.get(title) || title;
+          return `<option value="${esc(name)}" ${name === cur ? "selected" : ""}>${esc(title)}</option>`;
+        }).join("") +
         `</select>`;
     }
     return txt(`${b}.value`, c.value, COND_PH[type] || "");
@@ -718,10 +797,14 @@
 
   /// 打印机名可以手输：这台机器上没装、但用户打算连上去的那台（共享打印机、以后才加的
   /// 那台）也要能提前配好，和 SSID 同一个道理。
-  const printerDatalist = () => `<datalist id="printer-list">` +
-    printerList.filter(p => p && p.name).map(p =>
-      `<option value="${esc(p.name)}">${esc(p.is_default ? t("editor.printer_is_default") : "")}</option>`
-    ).join("") + `</datalist>`;
+  /// WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select>，底部加 "Other…" 选项支持手输。
+  const printerDatalist = () => {
+    const printers = printerList.filter(p => p && p.name);
+    return `<datalist id="printer-list">` +
+      printers.map(p =>
+        `<option value="${esc(p.name)}">${esc(p.info || (p.is_default ? t("editor.printer_is_default") : ""))}</option>`
+      ).join("") + `</datalist>`;
+  };
 
   function actBlock(pre) {
     const b = scope(pre);
@@ -769,11 +852,17 @@
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>` +
         `<div class="full">${chk(`${p}.action.elevated`, !!act.elevated, "editor.action_elevated", "inline")}</div>`;
     } else if (ty === "set_default_printer") {
-      // 打印机名和 SSID 同理，可以手输：现在没装、连上那台网络后才有的共享打印机，
-      // 也要能提前配好。候选来自系统清单（printerDatalist），当前默认那台带标注。
+      // 打印机名可以手输：现在没装、连上那台网络后才有的共享打印机，也要能提前配好。
+      // WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select> + "Other…" 选项。
+      const cur = String(act.printer ?? "").trim();
+      const printers = printerList.filter(p => p && p.name);
+      const opts = (cur && !printers.some(p => p.name === cur)) ? [{name: cur, info: ""}, ...printers] : printers;
       body += `<div class="full">` +
-        `<input type="text" value="${esc(act.printer ?? "")}" placeholder="HP_LaserJet_M104w"` +
-        ` list="printer-list" data-bind="${p}.action.printer">` +
+        `<select data-bind="${p}.action.printer" style="max-width:260px">` +
+        `<option value=""${cur ? "" : " selected"}>${esc(t("editor.printer_placeholder", "Select printer…"))}</option>` +
+        opts.map(pr => `<option value="${esc(pr.name)}" ${pr.name === cur ? "selected" : ""}>${esc(pr.info || pr.name)}</option>`).join("") +
+        `<option value="__manual__">${esc(t("editor.printer_manual", "Manual entry…"))}</option>` +
+        `</select>` +
         `</div>`;
     } else {
       body += `<div class="full">${txt(`${p}.action.app`, act.app, "/Applications/Slack.app")}</div>` +
@@ -1514,11 +1603,28 @@
     renderApplyConfirm();
   };
 
+  /// 删除确认必须走应用自己的遮罩：主窗口里没有原生对话框的宿主，
+  /// `confirm()` 会永远返回 false，点「删除」就成了没有反应的死按钮。
+  function askDelete(msg) {
+    return new Promise((resolve) => {
+      const close = (r) => { $("del-mask").hidden = true; resolve(r); };
+      $("del-modal").innerHTML = `<h3>${esc(t("editor.delete"))}</h3>` +
+        `<div class="mv">${esc(msg)}</div>` +
+        `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">` +
+        `<button id="del-no">${esc(t("editor.confirm_cancel"))}</button>` +
+        `<button class="danger" id="del-yes">${esc(t("editor.delete"))}</button>` +
+        `</div>`;
+      $("del-mask").hidden = false;
+      $("del-no").onclick = () => close(false);
+      $("del-yes").onclick = () => close(true);
+    });
+  }
+
   $("btn-delete").onclick = async () => {
     if (!sel) return;
     if (sel.kind === "profile") {
       const name = draft ? draft.name : sel.id;
-      if (!confirm(t("editor.confirm_delete", { name }))) return;
+      if (!(await askDelete(t("editor.confirm_delete", { name })))) return;
       try {
         await invoke("delete_profile", { id: sel.id });
         toast(t("editor.deleted", { name }));

@@ -9,8 +9,9 @@
 //! 打印机走 CUPS 客户端命令（`lpstat` / `lpoptions`），与 macOS 共用同一套解析。
 
 use super::{
-    extract_mac, poll_ssid_watch, printers_from_lpstat, run, timeout_secs, Health, InterfaceStatus,
-    NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
+    extract_mac, poll_ssid_watch, printers_from_lpstat, run, run_env, timeout_secs, C_LOCALE,
+    Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
+    WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
@@ -787,12 +788,12 @@ impl NetworkPlatform for LinuxPlatform {
 
     fn list_printers(&self) -> Vec<PrinterInfo> {
         // CUPS 的客户端命令，与 macOS 同一套（Linux 上 CUPS 就是打印子系统本身）。
-        // 没装 CUPS 时 `lpstat` 起不来 → 空清单；界面上表现为「没有候选，请手输」。
-        let Ok(names) = run("lpstat", &["-e"]) else {
-            return Vec::new();
-        };
-        let default = run("lpstat", &["-d"]).unwrap_or_default();
-        printers_from_lpstat(&names, &default)
+        // 没装 CUPS 时 `lpstat` 起不来 → 三条都拿到空文本 → 空清单；界面上表现为
+        // 「没有候选，请手输」。
+        let long = run_env("lpstat", &["-l", "-p"], &C_LOCALE).unwrap_or_default();
+        let names = run_env("lpstat", &["-e"], &C_LOCALE).unwrap_or_default();
+        let default = run_env("lpstat", &["-d"], &C_LOCALE).unwrap_or_default();
+        printers_from_lpstat(&long, &names, &default)
     }
 
     fn set_default_printer(&self, printer: &str) -> Result<(), String> {

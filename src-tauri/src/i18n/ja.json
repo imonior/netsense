@@ -92,8 +92,8 @@
   "editor.conditions_column": "条件",
   "editor.automation_column": "自動化アクション",
   "editor.nic_vpn": "VPN",
-  "editor.nic_gateway_mac": "ゲートウェイ MAC",
   "editor.use_value": "反映",
+  "editor.ssid_manual": "手動入力…",
   "editor.state_active_profile": "適用中のプロファイル",
   "editor.state_conditions": "一致した条件",
   "editor.state_network": "現在のネットワーク",
@@ -108,6 +108,8 @@
   "editor.action_path": "パス",
   "editor.action_printer": "プリンタ",
   "editor.printer_is_default": "（現在の既定）",
+  "editor.printer_placeholder": "プリンタを選択…",
+  "editor.printer_manual": "手動入力…",
   "editor.action_elevated": "管理者権限",
   "editor.action_delete": "削除",
   "editor.action_none": "アクションなし",
@@ -453,5 +455,6 @@
   "upd.sha256_ok": "更新: {asset} の SHA256 検証が通りました",
   "upd.brew_target": "更新: Homebrew cask 経由、対象 {version}",
   "upd.brew_update_failed": "brew update に失敗しましたが続行します: {error}",
-  "upd.brew_trust_retry": "更新: tap がまだ信頼されていないため、imonior/tap を信頼して再試行します"
+  "upd.brew_trust_retry": "更新: tap がまだ信頼されていないため、imonior/tap を信頼して再試行します",
+  "logs.printers_failed": "プリンタ一覧の読み取りに失敗しました：{error}"
 }

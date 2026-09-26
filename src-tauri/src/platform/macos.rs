@@ -21,9 +21,9 @@
 //! 不可用时自动回落 `osascript ... with administrator privileges`，功能不中断。
 
 use super::{
-    extract_mac, parse_kv, poll_ssid_watch, printers_from_lpstat, run, sh_q, timeout_secs, Health,
-    InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
-    WatcherHandle,
+    extract_mac, parse_kv, poll_ssid_watch, printers_from_lpstat, run, run_env, sh_q, timeout_secs,
+    C_LOCALE, Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget,
+    TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
@@ -792,6 +792,64 @@ fn all_devices() -> Vec<String> {
     out.split_whitespace().map(|s| s.to_string()).collect()
 }
 
+/// 一条接口在 `ifconfig` 眼里的三个事实。
+#[derive(Debug, PartialEq)]
+struct IfaceSnap {
+    /// 链路层是否 UP（拔了网线的以太网卡是 false）
+    running: bool,
+    /// `inet` 地址。`ipconfig getifaddr` 只认得部分接口，隧道上要靠这里兜住。
+    inet: Option<String>,
+    /// 是否有非 link-local 的 `inet6` 地址（有些 VPN 隧道只在 v6 上有地址）
+    v6_global: bool,
+}
+
+/// 一次 `ifconfig` 取回所有接口的状态，替代逐条 `ifconfig <dev>`。
+fn iface_snapshot() -> std::collections::HashMap<String, IfaceSnap> {
+    let Ok(out) = run("ifconfig", &[]) else {
+        return std::collections::HashMap::new();
+    };
+    parse_iface_snapshot(&out)
+}
+
+/// 解析 `ifconfig` 的输出。设备行形如
+/// `en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500`，
+/// 缩进行是它的属性。`fe80::` 每个接口都有一条，不能当成「这条接口有地址」。
+fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSnap> {
+    let mut map: std::collections::HashMap<String, IfaceSnap> = std::collections::HashMap::new();
+    let mut cur: Option<String> = None;
+    for line in out.lines() {
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            let dev = line.split(':').next().unwrap_or("").trim().to_string();
+            if dev.is_empty() {
+                cur = None;
+            } else {
+                map.insert(
+                    dev.clone(),
+                    IfaceSnap {
+                        running: line.contains("RUNNING"),
+                        inet: None,
+                        v6_global: false,
+                    },
+                );
+                cur = Some(dev);
+            }
+            continue;
+        }
+        let Some(dev) = &cur else { continue };
+        let Some(e) = map.get_mut(dev) else { continue };
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("inet ") {
+            e.inet = rest.split_whitespace().next().map(|s| s.to_string());
+        } else if let Some(rest) = t.strip_prefix("inet6 ") {
+            let a = rest.split_whitespace().next().unwrap_or("");
+            if !a.is_empty() && !a.starts_with("fe80") {
+                e.v6_global = true;
+            }
+        }
+    }
+    map
+}
+
 /// 这些设备是系统内部用途（回环 / AirDrop / 桥接 / 虚拟机网络…），
 /// 展示出来只会把"当前连着哪些网"这个问题搅浑。
 fn is_noise_device(dev: &str) -> bool {
@@ -1117,7 +1175,8 @@ impl NetworkPlatform for MacPlatform {
 
     /// 枚举当前在用的全部网卡。
     ///
-    /// 「在用」= 拿到 IPv4，或者是已关联的无线网卡（刚连上还没拿到地址的瞬间也要能看到）。
+    /// 「在用」= 链路 UP，并且有一条真实地址（IPv4 / 非 link-local IPv6）或已关联上无线
+    /// 网络（刚连上还没拿到地址的那一瞬也要能看到）。
     /// 每次调用会拉起若干子进程，故整体经 [`super::cached_nics`] 做 TTL 缓存
     /// —— 面板每次状态广播都要一份快照。
     fn list_interfaces(&self) -> Vec<super::NicInfo> {
@@ -1125,6 +1184,7 @@ impl NetworkPlatform for MacPlatform {
             let hw = hardware_ports();
             let routes = default_routes();
             let wifi_dev = wifi_iface();
+            let snaps = iface_snapshot();
             let mut out: Vec<super::NicInfo> = Vec::new();
 
             for dev in all_devices() {
@@ -1133,10 +1193,16 @@ impl NetworkPlatform for MacPlatform {
                 }
                 let port = hw.iter().find(|p| p.dev == dev);
                 let kind = kind_of(&dev, port.map(|p| p.port.as_str()));
+                let snap = snaps.get(&dev);
+                let running = snap.map(|s| s.running).unwrap_or(false);
+                // 判据不是「有没有 IPv4」：VPN 隧道常常只在 IPv6 上有地址，`ipconfig
+                // getifaddr` 也认不全这些设备 —— 只看 IPv4 的话用户那条 VPN 就凭空消失。
+                let addressed = snap.map(|s| s.inet.is_some() || s.v6_global).unwrap_or(false);
                 let ipv4 = run("ipconfig", &["getifaddr", &dev])
                     .ok()
                     .map(|o| o.trim().to_string())
-                    .filter(|s| !s.is_empty());
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| snap.and_then(|s| s.inet.clone()));
                 let netmask = run("ipconfig", &["getoption", &dev, "subnet_mask"])
                     .ok()
                     .map(|o| o.trim().to_string())
@@ -1146,7 +1212,7 @@ impl NetworkPlatform for MacPlatform {
                 } else {
                     None
                 };
-                if ipv4.is_none() && ssid.is_none() {
+                if !running || (ipv4.is_none() && ssid.is_none() && !addressed) {
                     continue;
                 }
 
@@ -1164,7 +1230,7 @@ impl NetworkPlatform for MacPlatform {
                     name: dev,
                     label: port.map(|p| p.port.clone()),
                     kind,
-                    up: true,
+                    up: running,
                     ssid,
                     mac: port.and_then(|p| p.mac.clone()),
                     ipv4,
@@ -1303,12 +1369,12 @@ impl NetworkPlatform for MacPlatform {
     }
 
     fn list_printers(&self) -> Vec<PrinterInfo> {
-        let Ok(names) = run("lpstat", &["-e"]) else {
-            return Vec::new();
-        };
-        // 默认那一行读不到（比如根本没设过默认）不该让整张清单消失，所以按空文本继续
-        let default = run("lpstat", &["-d"]).unwrap_or_default();
-        printers_from_lpstat(&names, &default)
+        // 三条命令各司其职（为什么主清单换成 `-l -p`，见 `printers_from_lpstat`）。任何一条
+        // 拿不到都按空文本继续：`-l -p` 失败时还有 `-e` 兜底，默认行失败只是没人亮。
+        let long = run_env("lpstat", &["-l", "-p"], &C_LOCALE).unwrap_or_default();
+        let names = run_env("lpstat", &["-e"], &C_LOCALE).unwrap_or_default();
+        let default = run_env("lpstat", &["-d"], &C_LOCALE).unwrap_or_default();
+        printers_from_lpstat(&long, &names, &default)
     }
 
     fn set_default_printer(&self, printer: &str) -> Result<(), String> {
@@ -1326,6 +1392,42 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// VPN 隧道在 `ifconfig` 里长得跟以太网口不一样：有的只有 `inet6`，有的干脆没地址。
+    /// 网卡枚举直接读这张表，所以解析错一条就等于面板上少一类网卡。
+    #[test]
+    fn iface_snapshot_reads_running_state_and_real_addresses() {
+        let out = concat!(
+            "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n",
+            "\tinet 10.20.20.168 netmask 0xffffff00 broadcast 10.20.20.255\n",
+            "\tinet6 fe80::18ae:1ff:fe2b:1c1%en0 prefixlen 64 secured scopeid 0x4\n",
+            "en4: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n",
+            "\tether d6:0f:20:b7:9a:f9\n",
+            "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n",
+            "utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280\n",
+            "\tinet6 fd1c:b7b7:1::2 prefixlen 64 \n",
+            "ppp0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500\n",
+            "\tinet 192.0.2.7 --> 192.0.2.8 netmask 0xffffffff\n",
+            "anpi1: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500\n",
+            "\tstatus: nocarrier\n",
+        );
+        let m = parse_iface_snapshot(out);
+        // 有 IPv4 的无线口
+        assert_eq!(m.get("en0").unwrap().inet.as_deref(), Some("10.20.20.168"));
+        // link-local 那一条不算地址：只有 fe80:: 的口（en4）仍然算「没地址」
+        assert_eq!(m.get("en4").unwrap().inet, None);
+        assert!(!m.get("en4").unwrap().v6_global);
+        // 建了但没起来的隧道：RUNNING 为真、地址为空 → 枚举时被丢掉的正是这种
+        assert_eq!(
+            m.get("utun3"),
+            Some(&IfaceSnap { running: true, inet: None, v6_global: false })
+        );
+        // 只有 IPv6 地址的隧道必须留下，否则用户的 VPN 在面板上凭空消失
+        assert!(m.get("utun4").unwrap().v6_global);
+        // 隧道行的 `inet A --> B` 取本端地址
+        assert_eq!(m.get("ppp0").unwrap().inet.as_deref(), Some("192.0.2.7"));
+        assert_eq!(m.len(), 6);
     }
 
     #[test]

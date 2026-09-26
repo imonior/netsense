@@ -215,6 +215,17 @@
       : kind === "wired" ? t("popup.kind_wired", "Wired")
       : kind === "vpn" ? t("popup.kind_vpn", "VPN") : t("popup.kind_other", "Other");
 
+    /// 网卡怎么称呼自己：光有设备名不够，`en0` 后面要跟上「这是哪一口」。
+    /// 系统给的设备标签（macOS 的 Hardware Port、Windows 的 InterfaceDescription）本身
+    /// 就带类型信息，优先用它；它已经含设备名时不再重复一遍。隧道口在系统服务表里没有
+    /// 条目（标签为空），这时退回按种类标注。
+    const nicTitle = (n) => {
+      const label = (n.label || "").trim();
+      if (!label) return `${n.name} (${kindLabel(n.kind)})`;
+      return label.toLowerCase().includes(n.name.toLowerCase())
+        ? label : `${n.name} (${label})`;
+    };
+
     /// 一行明细：值为空就整行不给看（面板窄，`—` 排成一片等于没有信息）
     const setRow = (id, v) => {
       const el = document.getElementById("v-" + id);
@@ -236,7 +247,7 @@
       if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
       return `<div class="nic-card">
         <div class="nic-head">
-          <span class="nic-name">${esc(n.name)}</span>
+          <span class="nic-name">${esc(nicTitle(n))}</span>
           <span class="nic-tag${n.kind === "vpn" ? " vpn" : ""}">${esc(n.app || kindLabel(n.kind))}</span>
         </div>
         ${rows.map(([k, v]) => `<div class="nic-row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("")}
@@ -348,7 +359,7 @@
       // SSID / 信号强度只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络。
       const primary = primaryNic();
       const wireless = !primary || primary.kind === "wireless";
-      setRow("iface", (primary && primary.name) || st.iface);
+      setRow("iface", primary ? nicTitle(primary) : st.iface);
       let ssid = st.ssid || (primary && primary.ssid) || "";
       // 「已连接但读不到 SSID」（macOS 15.6+ 的系统限制）不能显示成「未连接」——
       // 那会与同一面板上的绿点、IP / DNS 行自相矛盾。

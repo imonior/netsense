@@ -171,41 +171,44 @@ pub(crate) fn is_tunnel_device(dev: &str) -> bool {
         .any(|p| d.starts_with(p))
 }
 
+/// [`guess_vpn_app`] 的关键字表。**顺序就是优先级**：兜底的 `"vpn"` 必须留在最后，
+/// 否则 `Tailscale Tunnel` 会被认成一台面目模糊的「VPN」。
+pub(crate) const VPN_APP_TABLE: &[(&str, &str)] = &[
+    ("tailscale", "Tailscale"),
+    ("wireguard", "WireGuard"),
+    ("anyconnect", "Cisco AnyConnect"),
+    ("openvpn", "OpenVPN"),
+    ("tunnelblick", "Tunnelblick"),
+    ("forti", "FortiClient"),
+    ("globalprotect", "GlobalProtect"),
+    ("palo alto", "GlobalProtect"),
+    ("nordlynx", "NordVPN"),
+    ("nordvpn", "NordVPN"),
+    ("expressvpn", "ExpressVPN"),
+    ("surfshark", "Surfshark"),
+    ("proton", "Proton VPN"),
+    ("zerotier", "ZeroTier"),
+    ("softether", "SoftEther"),
+    ("check point", "Check Point"),
+    ("sonicwall", "SonicWall"),
+    ("pptp", "PPTP"),
+    ("l2tp", "L2TP"),
+    ("ikev2", "IKEv2"),
+    ("ipsec", "IPsec"),
+    ("clash", "Clash"),
+    ("sing-box", "sing-box"),
+    ("singbox", "sing-box"),
+    ("mihomo", "Mihomo"),
+    ("vpn", "VPN"),
+];
+
 /// 从一段自由文本里猜 VPN 软件名（Windows 适配器描述 / macOS 服务名 / nmcli 连接名通用）。
 ///
 /// 命中即返回**产品名**（统一大小写，便于展示），未命中返回 `None`，由调用方退回
 /// 更泛的兜底名（如设备名）。
 pub(crate) fn guess_vpn_app(text: &str) -> Option<&'static str> {
     let s = text.to_ascii_lowercase();
-    const TABLE: &[(&str, &str)] = &[
-        ("tailscale", "Tailscale"),
-        ("wireguard", "WireGuard"),
-        ("anyconnect", "Cisco AnyConnect"),
-        ("openvpn", "OpenVPN"),
-        ("tunnelblick", "Tunnelblick"),
-        ("forti", "FortiClient"),
-        ("globalprotect", "GlobalProtect"),
-        ("palo alto", "GlobalProtect"),
-        ("nordlynx", "NordVPN"),
-        ("nordvpn", "NordVPN"),
-        ("expressvpn", "ExpressVPN"),
-        ("surfshark", "Surfshark"),
-        ("proton", "Proton VPN"),
-        ("zerotier", "ZeroTier"),
-        ("softether", "SoftEther"),
-        ("check point", "Check Point"),
-        ("sonicwall", "SonicWall"),
-        ("pptp", "PPTP"),
-        ("l2tp", "L2TP"),
-        ("ikev2", "IKEv2"),
-        ("ipsec", "IPsec"),
-        ("clash", "Clash"),
-        ("sing-box", "sing-box"),
-        ("singbox", "sing-box"),
-        ("mihomo", "Mihomo"),
-        ("vpn", "VPN"),
-    ];
-    for (needle, name) in TABLE {
+    for (needle, name) in VPN_APP_TABLE {
         if s.contains(needle) {
             return Some(name);
         }
@@ -373,9 +376,14 @@ impl PrivChannel {
 /// `Win32_Printer.Name`），也正是 `set_default_printer` 要写回配置的那个值 —— 中间不留
 /// 第二套标识（显示名 / 驱动名 / 设备 URI），否则「界面上选的」和「下发时找的」就不是
 /// 同一个东西了。
+///
+/// `info` 只给人看：系统给这台队列起的说明与位置（CUPS 的 Description/Location、Windows
+/// 的 Comment/Location）。用 IP 命名的队列（`_10_20_20_30`）在这里才变成人话；取不到就是
+/// `None`，界面回落到队列名 —— 名字永远是对的，说明可能没有。
 #[derive(Debug, Clone, Serialize)]
 pub struct PrinterInfo {
     pub name: String,
+    pub info: Option<String>,
     pub is_default: bool,
 }
 
@@ -496,7 +504,27 @@ pub trait NetworkPlatform: Send + Sync {
 
 /// 普通执行（无需提权），返回 stdout 文本，失败返回 stderr 文本。
 pub(crate) fn run(program: &str, args: &[&str]) -> Result<String, String> {
+    run_env(program, args, &[])
+}
+
+/// 调 CUPS 客户端时要钉住的环境变量（见 [`run_env`] 与 [`printers_from_lpstat`]）。
+///
+/// 只给 CUPS 那几条命令，不做成 `run` 的默认行为：`networksetup`、`ipconfig`、`ifconfig`
+/// 的输出形状本来就和 locale 无关，而 `arp -a` 这类我们要解析**本地化表头**的命令，
+/// 钉成 C 反而会改变它的输出。
+#[allow(dead_code)] // Windows 那一腿走 CIM，不叫 lpstat
+pub(crate) const C_LOCALE: [(&str, &str); 2] = [("LANG", "C"), ("LC_ALL", "C")];
+
+/// [`run`] 的带环境变量版本。
+///
+/// 只有一个用途：解析**结构文本**的子命令必须先把 locale 钉住。CUPS 客户端（`lpstat`）
+/// 会把整句消息翻译成系统语言，Linux 上装了语言包就连 `printer`/`Description` 这些关键字
+/// 都不是英文了，解析规则会随用户界面语言而变化 —— 加两个环境变量换一条规则，值得。
+pub(crate) fn run_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
     let mut cmd = Command::new(program);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     cmd.args(args);
     // Windows：GUI 程序（windows_subsystem="windows"）拉起 powershell/netsh/arp/ping/curl 等
     // 控制台子系统子进程时，若不隐藏窗口，Windows 会为子进程分配一个**可见控制台窗口**，
@@ -585,25 +613,124 @@ pub(crate) fn parse_kv(text: &str, key: &str) -> Option<String> {
     None
 }
 
-/// 由 CUPS 的两条命令输出拼出打印机清单（macOS 与 Linux 共用同一套客户端命令）。
+/// 由 CUPS 的三条命令输出拼出打印机清单（macOS 与 Linux 共用同一套客户端命令）。
 ///
-/// - `names` —— `lpstat -e`：一行一个目的地名，**没有**任何标签文字，所以与系统语言无关。
+/// - `long_out` —— `lpstat -l -p`：一台打印机一段，段首 `printer <队列名> is <状态> …`，
+///   段内缩进的 `Description:` / `Location:` 就是那台机器的说明与位置。这里是**唯一**能
+///   拿到人话标签的来源。
+/// - `names` —— `lpstat -e`：一行一个目的地名，没有任何标签文字。只当作降级备份用（见下）。
 /// - `default_out` —— `lpstat -d`：形如 `system default destination: HP_Office`。这里取
 ///   **最后一个冒号之后**的那段，而不是去匹配那句英文：`lpstat` 的消息会被 CUPS 翻译成
 ///   系统本地语言，而目的地名本身不含冒号。没有默认打印机时 CUPS 打印的是
 ///   「no system default destination」这类句子（不含冒号），于是取到 `None` —— 正好是对的。
+///
+/// 为什么主清单是 `-l -p` 而不是 `-e`：`-e` 列的是调度器知道的**所有目的地**，里面混着
+/// DNS-SD 浏览出来的临时队列（在 `lpstat -l -e` 里类型是 `network`，`-p` 根本不列它），
+/// 于是界面上会出现一台系统设置里没有、选中也下不去的打印机。`-p` 那一批才是用户自己
+/// 配置的队列，与系统设置显示的是同一批。
+///
+/// `names` 的备份不能省：万一 `-l -p` 的段首没解析出任何东西（输出形状被改版、被本地化
+/// 成我们不认的样子），退回旧清单只是标签少了人话，不至于把面板变成一个空下拉。
 #[allow(dead_code)] // Windows 那一腿走 CIM，不解析 lpstat
-pub(crate) fn printers_from_lpstat(names: &str, default_out: &str) -> Vec<PrinterInfo> {
+pub(crate) fn printers_from_lpstat(long_out: &str, names: &str, default_out: &str) -> Vec<PrinterInfo> {
     let def = lpstat_default(default_out);
-    names
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(|name| PrinterInfo {
-            name: name.to_string(),
-            is_default: def.as_deref() == Some(name),
-        })
-        .collect()
+    let mut list = lpstat_long_printers(long_out);
+    if list.is_empty() {
+        list = names
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|name| PrinterInfo {
+                name: name.to_string(),
+                info: None,
+                is_default: false,
+            })
+            .collect();
+    }
+    for p in &mut list {
+        p.is_default = def.as_deref() == Some(p.name.as_str());
+    }
+    list
+}
+
+/// 解析 `lpstat -l -p` 的长格式：队列名 + 人话标签（说明 · 位置）。
+///
+/// 段首靠「第一个词是 printer/class、第二个词是队列名、后面跟 `is`」来认，缩进行才装
+/// 说明与位置 —— 段首不缩进，所以缩进本身就是「这行属于上一台」的信号。
+/// 关键字按英文匹配（调用方已用 `run_env` 钉住 C locale），值本身可以是任何语言。
+#[allow(dead_code)] // 同上
+fn lpstat_long_printers(long_out: &str) -> Vec<PrinterInfo> {
+    #[derive(Default)]
+    struct Row {
+        name: String,
+        description: String,
+        location: String,
+    }
+
+    /// 说明与位置拼成人话标签；两句都和队列名重复时干脆不给（`None` → 界面用队列名）。
+    fn push_row(row: Row, out: &mut Vec<PrinterInfo>) {
+        out.push(PrinterInfo {
+            info: printer_label(&row.name, &row.description, &row.location),
+            name: row.name,
+            is_default: false,
+        });
+    }
+
+    let mut out: Vec<PrinterInfo> = Vec::new();
+    let mut cur: Option<Row> = None;
+    for line in long_out.lines() {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if !indented {
+            if let Some(r) = cur.take() {
+                push_row(r, &mut out);
+            }
+            // 段首：`printer HP_Office is idle.  enabled since …` / `class Office is idle.`
+            let mut w = line.split_whitespace();
+            let kind = w.next().unwrap_or("");
+            let name = w.next().unwrap_or("");
+            let verb = w.next().unwrap_or("");
+            if (kind.eq_ignore_ascii_case("printer") || kind.eq_ignore_ascii_case("class"))
+                && !name.is_empty()
+                && verb.eq_ignore_ascii_case("is")
+            {
+                cur = Some(Row {
+                    name: name.to_string(),
+                    ..Default::default()
+                });
+            }
+            continue;
+        }
+        // 缩进行属于上一台；`Description:` / `Location:` 之后可能什么都没有（CUPS 允许空值）
+        let Some(row) = cur.as_mut() else { continue };
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let v = v.trim();
+        match k.trim().to_ascii_lowercase().as_str() {
+            "description" => row.description = v.to_string(),
+            "location" => row.location = v.to_string(),
+            _ => {}
+        }
+    }
+    if let Some(r) = cur.take() {
+        push_row(r, &mut out);
+    }
+    out
+}
+
+/// 把系统给打印机写的两句备注（说明、位置）拼成界面上那一行。三平台共用。
+///
+/// 规则只有一条：标签只装**新信息**。说明常常就是把队列名原样填了一遍（CUPS 里
+/// `CanonG3860` 的 Description 就是 `CanonG3860`），那它什么都不说明；但同一台的位置
+/// （`XSMS`）仍然有用，于是留下 `CanonG3860 · XSMS`。两句都没信息时返回 `None`，
+/// 让界面回落到队列名 —— 名字永远是对的。
+pub(crate) fn printer_label(name: &str, description: &str, location: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for p in [description, location] {
+        let p = p.trim();
+        if !p.is_empty() && p != name && !parts.contains(&p) {
+            parts.push(p);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// 见 [`printers_from_lpstat`]：`lpstat -d` 那一行里的目的地名。
@@ -782,7 +909,7 @@ pub use linux::{priv_channel, LinuxPlatform as Platform};
 
 #[cfg(test)]
 mod tests {
-    use super::{printers_from_lpstat, provider_in, sh_q, tunnel_name_eq, TunnelTarget};
+    use super::{printer_label, printers_from_lpstat, provider_in, sh_q, tunnel_name_eq, TunnelTarget};
 
     #[test]
     fn sh_q_neutralises_shell_metacharacters() {
@@ -929,25 +1056,64 @@ mod tests {
         assert_eq!(wg.name(), "office-wg");
     }
 
-    /// `lpstat -e` 与 `lpstat -d` 的真实输出（macOS 上抓的，Linux 同形状）。
+    /// `lpstat -l -p` / `-e` / `-d` 的真实输出（macOS 上抓的，Linux 同形状）。
     /// 名字里带下划线与前缀点号是这台机器上真实存在的队列名，不是编出来的。
+    ///
+    /// 这条同时钉住两件事：`-e` 里那台 DNS-SD 浏览出来的 `HP_LaserJet_M104w_01502A_`
+    /// 不该出现在清单上（系统设置里也没有它），以及 IP 命名的队列要靠 Description 说人话。
     #[test]
-    fn the_cups_printer_list_marks_only_the_default() {
+    fn the_cups_printer_list_drops_browsed_destinations_and_labels_the_rest() {
+        let long = "\
+printer _10_20_20_30 is idle.  enabled since Thu Sep 24 07:46:35 2026
+\tForm mounted:
+\tContent types: any
+\tPrinter types: unknown
+\tDescription: 10.20.20.30
+\tAlerts: toner-low-warning
+\tLocation: JYH
+\tConnection: direct
+printer _10_30_30_30 is idle.  enabled since Wed Aug 26 11:56:27 2026
+\tDescription: 10.30.30.30
+\tLocation: WJ
+printer CanonG3860 is disabled.
+\tDescription: CanonG3860
+\tLocation: XSMS
+";
         let names = "_10_20_20_30\n_10_30_30_30\nCanonG3860\nHP_LaserJet_M104w_01502A_\n";
-        let list = printers_from_lpstat(names, "system default destination: CanonG3860\n");
-        let flags: Vec<(&str, bool)> = list
+        let list = printers_from_lpstat(
+            long,
+            names,
+            "system default destination: CanonG3860\n",
+        );
+        let got: Vec<(&str, Option<&str>, bool)> = list
             .iter()
-            .map(|p| (p.name.as_str(), p.is_default))
+            .map(|p| (p.name.as_str(), p.info.as_deref(), p.is_default))
             .collect();
         assert_eq!(
-            flags,
+            got,
             vec![
-                ("_10_20_20_30", false),
-                ("_10_30_30_30", false),
-                ("CanonG3860", true),
-                ("HP_LaserJet_M104w_01502A_", false),
+                ("_10_20_20_30", Some("10.20.20.30 · JYH"), false),
+                ("_10_30_30_30", Some("10.30.30.30 · WJ"), false),
+                // 说明就是把队列名重抄了一遍，于是只留位置； disabled 也照样在清单上
+                // （用户要的正是「能选到它」，状态由下发时的成败说话）
+                ("CanonG3860", Some("XSMS"), true),
             ]
         );
+    }
+
+    /// 长格式一行都没解析出来时（输出形状被改版），退回 `-e` 的裸名单：宁可少标签，
+    /// 也不能把整个下拉变成空的。
+    #[test]
+    fn an_unparsable_long_listing_falls_back_to_the_plain_destination_names() {
+        let list = printers_from_lpstat(
+            "",
+            "HP_Office\n",
+            "system default destination: HP_Office\n",
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "HP_Office");
+        assert_eq!(list[0].info, None);
+        assert!(list[0].is_default);
     }
 
     /// 没有默认打印机时 CUPS 打印的是「no system default destination」这一类句子。
@@ -959,7 +1125,7 @@ mod tests {
             "system default destination: \n",
             "",
         ] {
-            let list = printers_from_lpstat("HP\n", out);
+            let list = printers_from_lpstat("printer HP is idle.\n", "HP\n", out);
             assert_eq!(list.len(), 1);
             assert!(!list[0].is_default, "默认行 {:?} 不该点亮任何打印机", out);
         }
@@ -969,10 +1135,36 @@ mod tests {
     /// 这条钉住的是**规则**（不匹配英文句子），标签文字本身只是示意。
     #[test]
     fn the_default_is_taken_from_after_the_colon_not_from_an_english_label() {
-        let list = printers_from_lpstat("Büro-HP\n", "Systemstandardziel: Büro-HP\n");
+        let list = printers_from_lpstat(
+            "printer Büro-HP is idle.\n",
+            "Büro-HP\n",
+            "Systemstandardziel: Büro-HP\n",
+        );
         assert!(list[0].is_default);
         // 默认指向一台已经不在清单里的打印机时，没有人该亮（宁可少亮，不猜）
-        let list = printers_from_lpstat("Büro-HP\n", "system default destination: Gone\n");
+        let list = printers_from_lpstat(
+            "printer Büro-HP is idle.\n",
+            "Büro-HP\n",
+            "system default destination: Gone\n",
+        );
         assert!(!list[0].is_default);
+    }
+
+    /// 队列名 + 说明 + 位置 → 界面上那一行。三平台共用，所以规则只在这一处钉死：
+    /// 只装新信息，重复的与空的都不算。
+    #[test]
+    fn a_printer_label_carries_only_what_the_queue_name_does_not_say() {
+        assert_eq!(
+            printer_label("HP_Office", "HP LaserJet in the office", "3F").as_deref(),
+            Some("HP LaserJet in the office · 3F")
+        );
+        // 说明只是把队列名重抄一遍（CUPS 新建队列的默认行为）时，它不带来任何信息
+        assert_eq!(printer_label("CanonG3860", "CanonG3860", "").as_deref(), None);
+        // 但同一台的位置仍然要说
+        assert_eq!(printer_label("CanonG3860", "CanonG3860", "XSMS").as_deref(), Some("XSMS"));
+        // 两句都一样时不重复一遍
+        assert_eq!(printer_label("HP", "前台", "前台").as_deref(), Some("前台"));
+        // 什么都没有 → 界面回落到队列名
+        assert_eq!(printer_label("HP", "  ", "").as_deref(), None);
     }
 }

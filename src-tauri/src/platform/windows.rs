@@ -18,8 +18,8 @@
 //!    不做字符串拼接，避免接口名含空格/特殊字符时被重新切分。
 
 use super::{
-    poll_ssid_watch, run, timeout_secs, Health, InterfaceStatus, NetworkPlatform, PrinterInfo,
-    PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
+    poll_ssid_watch, printer_label, run, timeout_secs, Health, InterfaceStatus, NetworkPlatform,
+    PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
@@ -362,6 +362,76 @@ fn prefix_to_mask(prefix: u32) -> Option<String> {
         (bits >> 8) & 0xFF,
         bits & 0xFF
     ))
+}
+
+/// 一行网卡快照（脚本 `NIC_ROWS_PS_BODY` 的一个对象）→ 界面用的 `NicInfo`。
+///
+/// 返回 `None` 表示这一行**没有可核对的信息**：一张没在用、也没有地址的适配器，
+/// 出现在清单上只会挤掉真正那几张。例外是 VPN —— 没连上的隧道同样值得列出来，
+/// 因为「装了但没连」正是 3B2 与托盘都要看见的状态。
+///
+/// `up` 取自 `Status`，不再写死 `true`：以前能进到这个函数的行必然是 `Up`（筛选在
+/// PowerShell 里做完了），所以现在多了「已知的虚拟口」这一类，状态必须原样带出来。
+fn nic_from_row(r: &serde_json::Value) -> Option<super::NicInfo> {
+    let get = |k: &str| -> Option<String> {
+        r.get(k)
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let name = get("name")?;
+    let ipv4 = get("ip");
+    let ipv6 = get("v6");
+    let media = get("media").unwrap_or_default();
+    let desc = get("desc").unwrap_or_default();
+    let ssid = get("ssid");
+    let up = get("status").is_some_and(|s| s.eq_ignore_ascii_case("Up"));
+
+    let kind = if media == "Native 802.11" {
+        super::NicKind::Wireless
+    } else if super::guess_vpn_app(&desc).is_some() || super::guess_vpn_app(&name).is_some() {
+        super::NicKind::Vpn
+    } else if media == "802.3" || desc.to_ascii_lowercase().contains("ethernet") {
+        super::NicKind::Wired
+    } else {
+        super::NicKind::Other
+    };
+    if kind != super::NicKind::Vpn && ipv4.is_none() && ipv6.is_none() && ssid.is_none() {
+        return None;
+    }
+
+    let gateway = get("gw");
+    let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
+    let netmask = r
+        .get("prefix")
+        .and_then(|x| x.as_u64())
+        .and_then(|p| prefix_to_mask(p as u32));
+
+    // VPN 归属要在 `name` 搬进 `NicInfo` 之前算完：这个函数只有 Windows 腿会编译，
+    // 写在字面量字段里就是一次 use-after-move。
+    let app = if kind == super::NicKind::Vpn {
+        super::guess_vpn_app(&desc)
+            .or_else(|| super::guess_vpn_app(&name))
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    Some(super::NicInfo {
+        name,
+        label: if desc.is_empty() { None } else { Some(desc) },
+        kind,
+        up,
+        ssid: if kind == super::NicKind::Wireless { ssid } else { None },
+        mac: get("mac"),
+        ipv4,
+        netmask,
+        ipv6,
+        gateway,
+        gateway_mac,
+        dns: get("dns"),
+        app,
+    })
 }
 
 /// 网关 IP → MAC（`arp -a` 邻居表；输出仅取 MAC 形态字符串，编码无关）。
@@ -861,24 +931,55 @@ fn rasdial(entry: &str) -> Result<(), String> {
 
 // —————————————————————————— 打印机（3B1 set_default_printer） ——————————————————————————
 
-/// 「这台机器有哪些打印机、哪台是默认」，一台一行，`名字<TAB>True|False`。
+/// 「这台机器有哪些打印机」，一台一行，`名字<TAB>True|False<TAB>备注<TAB>位置`。
 ///
 /// 走 CIM 的 `Win32_Printer` 而不是 `Get-Printer`：本文件的读取一律走 CIM 对象
 /// （语言无关、编码可控，见模块头），而 `Default` 标志本来就在这张表上，不需要再问一次。
-const PRINTER_ROWS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
-$rows = Get-CimInstance -ClassName Win32_Printer | ForEach-Object { "$($_.Name)`t$($_.Default)" };
+/// 后两列只是给界面看的说明（`Comment`/`Location`），下发时仍然只用第一列。
+///
+/// 出错时**必须**留话：这一版之前脚本挂着 `SilentlyContinue`，Rust 侧又是
+/// `.unwrap_or_default()`，于是「CIM 查询失败」和「这台机器没有打印机」在界面上长成
+/// 同一个空下拉，谁也没法知道是哪一种。现在失败走 stderr + 退出码 1，由
+/// [`WindowsPlatform::list_printers`] 记进日志（清单为空仍然按用户之前的决策只说
+/// 「没有候选，请手输」，不弹框 —— 弹框是给自动化配置用的，不是给一次下拉刷新用的）。
+const PRINTER_ROWS_PS: &str = r#"$ErrorActionPreference='Stop';
+try {
+$rows = @(Get-CimInstance -ClassName Win32_Printer | ForEach-Object { "$($_.Name)`t$($_.Default)`t$($_.Comment)`t$($_.Location)" })
+} catch {
+[Console]::Error.Write($_.Exception.Message); exit 1
+}
 [Console]::Out.Write(($rows -join "`n"))"#;
 
 /// 解析 [`PRINTER_ROWS_PS`] 的行。名字为空的行丢掉 —— 那是 CIM 里没填名字的条目，
 /// 选中它只会让下一次下发拿空串去找打印机。
+///
+/// 认一条打印机的凭据是**第二列必须是 CIM 打出来的 `True`/`False`**：报错文本、进度条
+/// 之类的杂行没有这个形状，于是进不了清单（宁可少一台，不要把一句英文变成候选）。
+/// 备注与位置里真出现制表符时，多出来的列一起并进标签 —— 标签只是给人看的，
+/// 下发用的永远是第一列。
 fn parse_printer_rows(out: &str) -> Vec<PrinterInfo> {
     out.lines()
         .filter_map(|l| {
-            let (name, flag) = l.split_once('\t')?;
-            let name = name.trim();
-            (!name.is_empty()).then(|| PrinterInfo {
+            let mut it = l.split('\t');
+            let name = it.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let flag = it.next()?;
+            let is_default = if flag.eq_ignore_ascii_case("True") {
+                true
+            } else if flag.eq_ignore_ascii_case("False") {
+                false
+            } else {
+                return None;
+            };
+            let rest: Vec<&str> = it.map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let comment = rest.first().copied().unwrap_or("");
+            let location = rest.get(1..).map(|r| r.join(" ")).unwrap_or_default();
+            Some(PrinterInfo {
                 name: name.to_string(),
-                is_default: flag.trim().eq_ignore_ascii_case("true"),
+                info: printer_label(name, comment, &location),
+                is_default,
             })
         })
         .collect()
@@ -960,17 +1061,33 @@ impl NetworkPlatform for WindowsPlatform {
     /// Adapter for Windows x64"），因此用描述文本匹配即可（见 [`super::guess_vpn_app`]）。
     fn list_interfaces(&self) -> Vec<super::NicInfo> {
         super::cached_nics(|| {
-            let script = r#"$ErrorActionPreference='SilentlyContinue';
+            /// 「有哪些网卡、各自现在什么状态」的脚本体。`$vpn`（关键字数组）由下面的
+            /// `format!` 从 Rust 侧的同源表拼在最前面。
+            ///
+            /// 筛选条件是「正在用」或「认得出是 VPN 产品」：一条没连上的隧道也要出现在
+            /// 清单上 —— 它的存在本身就是信息（这个软件装了，现在没连），而托盘面板与
+            /// 3B2 的「维持连接」动作都要能找到它。之前只留 `Status -eq 'Up'`，于是所有
+            /// 没连上的虚拟网卡一起消失了。
+            ///
+            /// 为什么 VPN 判据要下进 PowerShell、而不是回到 Rust 再筛：一台装过几个 VPN
+            /// 客户端的机器上有十几个「未连接的非物理适配器」（WAN Miniport 一家就占满），
+            /// 每张都要先问四遍地址/路由/DNS 才被丢掉，而 PowerShell 的启动开销本来就躲
+            /// 不掉 —— 拉取之前筛，比拉回来再筛便宜得多。判据也不能在这里抄一份：抄了
+            /// 就会有「Rust 说是 VPN、界面没显示」和反过来两种分歧。
+            const NIC_ROWS_PS_BODY: &str = r#"$ErrorActionPreference='SilentlyContinue';
 $list = New-Object System.Collections.Generic.List[object];
-Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
-  $n = $_; $idx = $n.ifIndex;
+foreach ($n in @(Get-NetAdapter)) {
+  $t = ("$($n.InterfaceDescription) $($n.Name)").ToLower();
+  $isVpn = @($vpn | Where-Object { $t.Contains($_) }).Count -gt 0;
+  if ($n.Status -ne 'Up' -and -not $isVpn) { continue };
+  $idx = $n.ifIndex;
   $ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1;
   $v6   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Link' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1;
   $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
   $dns  = Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4;
   $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
   $list.Add([pscustomobject]@{
-    name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType;
+    name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status;
     ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop;
     dns=(($dns | ForEach-Object { $_.ServerAddresses }) -join ',');
     ssid=$prof.Name;
@@ -978,7 +1095,13 @@ Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
 };
 if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
 
-            let raw = match ps(script) {
+            let needles: Vec<&str> = super::VPN_APP_TABLE
+                .iter()
+                .map(|(needle, _)| *needle)
+                .collect();
+            let script = format!("$vpn={};\n{}", ps_arr(&needles), NIC_ROWS_PS_BODY);
+
+            let raw = match ps(&script) {
                 Ok(o) => o,
                 Err(_) => return Vec::new(),
             };
@@ -991,68 +1114,7 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                 other => vec![other],
             };
 
-            let mut out: Vec<super::NicInfo> = Vec::new();
-            for r in rows {
-                let get = |k: &str| -> Option<String> {
-                    r.get(k)
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                };
-                let Some(name) = get("name") else { continue };
-                let ipv4 = get("ip");
-                let media = get("media").unwrap_or_default();
-                let desc = get("desc").unwrap_or_default();
-                let ssid = get("ssid");
-
-                let kind = if media == "Native 802.11" {
-                    super::NicKind::Wireless
-                } else if super::guess_vpn_app(&desc).is_some()
-                    || super::guess_vpn_app(&name).is_some()
-                {
-                    super::NicKind::Vpn
-                } else if media == "802.3" || desc.to_ascii_lowercase().contains("ethernet") {
-                    super::NicKind::Wired
-                } else {
-                    super::NicKind::Other
-                };
-                if ipv4.is_none() && !(kind == super::NicKind::Wireless && ssid.is_some()) {
-                    continue;
-                }
-
-                let gateway = get("gw");
-                let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
-                let netmask = r
-                    .get("prefix")
-                    .and_then(|x| x.as_u64())
-                    .and_then(|p| prefix_to_mask(p as u32));
-
-                // VPN 归属要在 `name` 搬进 `NicInfo` 之前算完：这个文件只有 Windows 腿会
-                // 编译，写在字面量字段里就是一次 use-after-move。
-                let app = if kind == super::NicKind::Vpn {
-                    super::guess_vpn_app(&desc)
-                        .or_else(|| super::guess_vpn_app(&name))
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                };
-
-                out.push(super::NicInfo {
-                    name,
-                    label: if desc.is_empty() { None } else { Some(desc.clone()) },
-                    kind,
-                    up: true,
-                    ssid: if kind == super::NicKind::Wireless { ssid } else { None },
-                    mac: get("mac"),
-                    ipv4,
-                    netmask,
-                    ipv6: get("v6"),
-                    gateway,
-                    gateway_mac,
-                    dns: get("dns"),
-                    app,
-                });
-            }
+            let mut out: Vec<super::NicInfo> = rows.into_iter().filter_map(nic_from_row).collect();
 
             let rank = |k: super::NicKind| match k {
                 super::NicKind::Wireless => 0,
@@ -1236,9 +1298,15 @@ $names = Get-ChildItem -Path $d -Recurse -Filter *.xml -ErrorAction SilentlyCont
     }
 
     fn list_printers(&self) -> Vec<PrinterInfo> {
-        ps(PRINTER_ROWS_PS)
-            .map(|out| parse_printer_rows(&out))
-            .unwrap_or_default()
+        match ps(PRINTER_ROWS_PS) {
+            Ok(out) => parse_printer_rows(&out),
+            Err(e) => {
+                // 空下拉对用户说的是「没有打印机」，而真实原因可能是 CIM 查不动 ——
+                // 这个区别只在日志里留得下，所以按用户既有的决策不弹框，只记一条。
+                crate::log::warn(&i18n::tf("logs.printers_failed", &[("error", &e)]));
+                Vec::new()
+            }
+        }
     }
 
     fn set_default_printer(&self, printer: &str) -> Result<(), String> {
@@ -1257,7 +1325,7 @@ mod tests {
     #[test]
     fn printer_rows_keep_the_exact_name_and_only_one_default() {
         let rows = parse_printer_rows(
-            "Microsoft Print to PDF\tFalse\nHP OfficeJet Pro 476\tTrue\n\\\\filesrv\\Lobby\tFalse\n",
+            "Microsoft Print to PDF\tFalse\t\t\nHP OfficeJet Pro 476\tTrue\t476 on 3F\tOffice\n\\\\filesrv\\Lobby\tFalse\t\t前台\n",
         );
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].name, "HP OfficeJet Pro 476");
@@ -1265,8 +1333,57 @@ mod tests {
         assert!(!rows[0].is_default);
         assert_eq!(rows[2].name, r"\\filesrv\Lobby");
         assert!(!rows[2].is_default);
+        // 备注与位置只给人看，队列名才是下发用的
+        assert_eq!(rows[1].info.as_deref(), Some("476 on 3F · Office"));
+        assert_eq!(rows[2].info.as_deref(), Some("前台"));
+        assert_eq!(rows[0].info, None);
         // 没有 `\t` 的行（PowerShell 报错文本混进来时）与空名字的行都不该变成一条打印机
         assert!(parse_printer_rows("Get-CimInstance : Access denied\n\tTrue\n").is_empty());
+        // 第二列不是 CIM 的布尔 → 这一行不是打印机
+        assert!(parse_printer_rows("Some header column\tmaybe\t\n").is_empty());
+    }
+
+    /// 网卡行的取舍规则。这条钉住的是用户报的那个现象：**没连上的虚拟网卡整批消失**
+    /// （脚本按 `Status -eq 'Up'` 筛完，Rust 又要求「有 IPv4」）。
+    ///
+    /// 夹具刻意不带 `gw`：那一列会让我们去跑一次 `arp -a`，测试不该依赖邻居表。
+    #[test]
+    fn a_row_without_an_ipv4_still_counts_when_it_is_a_tunnel_or_has_some_address() {
+        use serde_json::json;
+
+        let wifi = nic_from_row(&json!({
+            "name": "Wi-Fi", "desc": "Intel(R) Wi-Fi 6E AX211 160MHz",
+            "status": "Up", "media": "Native 802.11", "ip": "192.168.1.23", "ssid": "Office_5G"
+        }))
+        .expect("在用的 Wi-Fi 必须在清单上");
+        assert_eq!(wifi.kind, super::super::NicKind::Wireless);
+        assert!(wifi.up);
+        assert_eq!(wifi.ssid.as_deref(), Some("Office_5G"));
+
+        // 没连上的隧道：一条地址都没有，但「装了没连」本身就是要看的信息
+        let off = nic_from_row(&json!({
+            "name": "Tailscale", "desc": "Tailscale Tunnel", "status": "Disconnected"
+        }))
+        .expect("未连接的 VPN 隧道也要列出来");
+        assert_eq!(off.kind, super::super::NicKind::Vpn);
+        assert!(!off.up, "状态要原样带出来，不能假称在用");
+        assert_eq!(off.app.as_deref(), Some("Tailscale"));
+
+        // IPv6-only：曾经因为「没有 IPv4」被丢掉
+        let v6only = nic_from_row(&json!({
+            "name": "Ethernet", "desc": "Realtek Gaming 2.5GbE", "status": "Up",
+            "media": "802.3", "v6": "2001:db8::1"
+        }))
+        .expect("只有全局 IPv6 的网卡也是在用的");
+        assert_eq!(v6only.ipv6.as_deref(), Some("2001:db8::1"));
+
+        // 没有地址、又不是隧道的行（WAN Miniport 那一类）不该占位
+        assert!(nic_from_row(&json!({
+            "name": "WAN Miniport (IP)", "desc": "WAN Miniport (IP)", "status": "Disconnected"
+        }))
+        .is_none());
+        // 连名字都没有的行不是网卡，是脚本没吐全
+        assert!(nic_from_row(&json!({ "status": "Up", "ip": "10.0.0.2" })).is_none());
     }
 
     /// 打印机名是一段自由文本，而这里要把它交进一段 PowerShell 里。它只能出现在

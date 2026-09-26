@@ -92,8 +92,8 @@
   "editor.conditions_column": "条件区域",
   "editor.automation_column": "自动化动作信息",
   "editor.nic_vpn": "VPN 网卡",
-  "editor.nic_gateway_mac": "网关 MAC",
   "editor.use_value": "填入",
+  "editor.ssid_manual": "手动输入…",
   "editor.state_active_profile": "当前生效的配置",
   "editor.state_conditions": "生效的条件",
   "editor.state_network": "当前网络信息",
@@ -108,6 +108,8 @@
   "editor.action_path": "路径",
   "editor.action_printer": "打印机",
   "editor.printer_is_default": "（当前默认）",
+  "editor.printer_placeholder": "选择打印机…",
+  "editor.printer_manual": "手动输入…",
   "editor.action_elevated": "提权",
   "editor.action_delete": "删除",
   "editor.action_none": "暂无动作",
@@ -453,5 +455,6 @@
   "upd.sha256_ok": "更新：{asset} 的 SHA256 校验已通过",
   "upd.brew_target": "更新：走 Homebrew cask，目标版本 {version}",
   "upd.brew_update_failed": "brew update 失败，继续执行: {error}",
-  "upd.brew_trust_retry": "更新：tap 尚未被信任，正在信任 imonior/tap 后重试"
+  "upd.brew_trust_retry": "更新：tap 尚未被信任，正在信任 imonior/tap 后重试",
+  "logs.printers_failed": "读取打印机列表失败：{error}"
 }

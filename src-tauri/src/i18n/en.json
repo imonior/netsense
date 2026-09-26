@@ -92,8 +92,8 @@
   "editor.conditions_column": "Match Conditions",
   "editor.automation_column": "Automation Actions",
   "editor.nic_vpn": "VPN",
-  "editor.nic_gateway_mac": "Gateway MAC",
   "editor.use_value": "Use",
+  "editor.ssid_manual": "Manual entry…",
   "editor.state_active_profile": "Active profile",
   "editor.state_conditions": "Why it matched",
   "editor.state_network": "Current network",
@@ -108,6 +108,8 @@
   "editor.action_path": "Path",
   "editor.action_printer": "Printer",
   "editor.printer_is_default": "(current default)",
+  "editor.printer_placeholder": "Select printer…",
+  "editor.printer_manual": "Manual entry…",
   "editor.action_elevated": "Elevated",
   "editor.action_delete": "Remove",
   "editor.action_none": "No actions",
@@ -453,5 +455,6 @@
   "upd.sha256_ok": "update: {asset} SHA256 verified",
   "upd.brew_target": "update: via Homebrew cask, target {version}",
   "upd.brew_update_failed": "brew update failed, continuing: {error}",
-  "upd.brew_trust_retry": "update: the tap is not trusted yet, trusting imonior/tap and retrying"
+  "upd.brew_trust_retry": "update: the tap is not trusted yet, trusting imonior/tap and retrying",
+  "logs.printers_failed": "Could not read the printer list: {error}"
 }
