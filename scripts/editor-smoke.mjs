@@ -549,8 +549,8 @@ eq("同一行里：启用勾选 + 类型下拉 + 值控件 + 徽标 + 删除按�
    crow0.filter((e) => e.dataset?.act === "del-cond").length],
   [2, 1, 1, 1]);
 const ssidInput = byBind("rules.0.conditions.0.value");
-eq("SSID 值是输入框，且挂着已存网络的候选", [ssidInput?.tagName, ssidInput?.attributes.list], ["INPUT", "ssid-list"]);
-eq("候选来自系统已保存的 SSID", findById("ssid-list")?.children.map((o) => o.value), ["Office_5G", "Café"]);
+eq("SSID 值是下拉选择框", ssidInput?.tagName, "SELECT");
+eq("候选来自系统已保存的 SSID", ssidInput?.children.map((o) => o.value), ["", "Office_5G", "Café"]);
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
 eq("下拉里只有非 VPN 的硬件出口，外加一个空选项",
@@ -645,18 +645,18 @@ check("其他动作没有被连带标上提权", p?.then?.one_shot?.[0]?.action?
 
 group("3B 动作：默认打印机的候选来自系统，不是让用户手抄名字");
 const prInput = byBind("then.one_shot.3.action.printer");
-eq("打印机那一项是输入框，且挂着系统清单当候选", [prInput?.tagName, prInput?.attributes.list], ["INPUT", "printer-list"]);
+eq("打印机那一项是下拉选择框", prInput?.tagName, "SELECT");
 eq("候选就是系统里的打印机名（顺序照后端）",
-  findById("printer-list")?.children.map((o) => o.value), ["Office LaserJet", "Home Inkjet"]);
+  prInput?.children.map((o) => o.value), ["", "Office LaserJet", "Home Inkjet"]);
 eq("当前默认的那台在候选里带说明，其余留空",
   findById("printer-list")?.children.map((o) => o.textContent), [strings["editor.printer_is_default"], ""]);
 check("整列只挂一份候选清单：THEN 与 ELSE 共用同一个 id，重复的那份会被浏览器忽略",
   findAll((e) => e.id === "printer-list").length === 1);
 resetSaves();
 choose(byBind("then.one_shot.0.action.type"), "set_default_printer");
-eq("换类型会重建卡片：app 框没了，换成打印机输入框",
-  [byBind("then.one_shot.0.action.app"), byBind("then.one_shot.0.action.printer")?.tagName], [null, "INPUT"]);
-type(byBind("then.one_shot.0.action.printer"), "Home Inkjet");
+eq("换类型会重建卡片：app 框没了，换成打印机下拉框",
+  [byBind("then.one_shot.0.action.app"), byBind("then.one_shot.0.action.printer")?.tagName], [null, "SELECT"]);
+choose(byBind("then.one_shot.0.action.printer"), "Home Inkjet");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 eq("改了类型的动作只带自己那一个字段（app / args 都不会残留）",
@@ -668,15 +668,15 @@ check("动作区有「+ 打印机」这一颗按钮", !!addPrinter);
 click(addPrinter);
 eq("新加的是一张干净的空卡片：没有 args，也没有 app/path 占位",
   h.draft.then.one_shot[4].action, { type: "set_default_printer", printer: "" });
-type(byBind("then.one_shot.4.action.printer"), "Studio Display");
+choose(byBind("then.one_shot.4.action.printer"), "Home Inkjet");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
-eq("清单里没有的名字照样收：那台共享打印机要连上这个网络后才出现",
+eq("选择的打印机原样送达",
   [p?.then?.one_shot?.[4]?.action, p?.then?.one_shot?.[4]?.priority, "args" in (p?.then?.one_shot?.[4]?.action || {})],
-  [{ type: "set_default_printer", printer: "Studio Display" }, 100, false]);
+  [{ type: "set_default_printer", printer: "Home Inkjet" }, 100, false]);
 check("执行清单讲得出这条动作：类型词 + 目标名字",
   h.planList(p.then.one_shot.slice(4), null).includes(strings["editor.action_printer"]) &&
-  h.planList(p.then.one_shot.slice(4), null).includes("Studio Display"));
+  h.planList(p.then.one_shot.slice(4), null).includes("Home Inkjet"));
 
 group("3B2 常驻动作：表单往返与 worker 徽标");
 resetSaves();
