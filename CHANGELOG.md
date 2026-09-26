@@ -12,7 +12,7 @@ All notable changes to NetSense are documented here. The format is based on
 - **SSID picker** converted from datalist to real `<select>` with manual entry option for hidden networks
 - **Interface picker** shows human-readable labels (e.g., "en0 (Wi-Fi)") instead of bare device names
 - **Printer picker** converted from datalist to real `<select>` with human-readable labels, excluding auto-discovered queues
-- Removed unused i18n key `editor.nic_gateway_mac`; added `editor.ssid_manual`, `editor.printer_placeholder`, `editor.printer_manual`
+- Removed unused i18n keys `editor.nic_gateway_mac`, `editor.printer_manual`; added `editor.ssid_manual`, `editor.printer_placeholder`
 
 ## [1.0.0] - 2026-09-23
 

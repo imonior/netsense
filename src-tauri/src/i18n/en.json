@@ -94,6 +94,7 @@
   "editor.nic_vpn": "VPN",
   "editor.use_value": "Use",
   "editor.ssid_manual": "Manual entry…",
+  "editor.ssid_placeholder": "Select SSID…",
   "editor.state_active_profile": "Active profile",
   "editor.state_conditions": "Why it matched",
   "editor.state_network": "Current network",

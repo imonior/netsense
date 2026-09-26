@@ -115,6 +115,9 @@ pub(crate) fn status_of(outcomes: &[ActionOutcome]) -> BatchStatus {
 }
 
 /// 动作在留痕与界面上显示的那一行。路径与应用名是用户写的，原样拼进去。
+///
+/// `SetDefaultPrinter` 走裸队列名：这里拿不到系统清单。有清单的地方用
+/// [`printer_display`] 换成说人话的标签，超时/线程死掉的留痕宁可土一点也要出得来。
 fn label_of(kind: &OneShotActionType) -> String {
     match kind {
         OneShotActionType::LaunchApp { app, .. } => i18n::tf("act.label_launch", &[("app", app)]),
@@ -148,12 +151,29 @@ pub fn timeout_for(a: &OneShotAction) -> Duration {
     }
 }
 
+/// 队列名 → 界面上的那行话（说明·位置）。清单里查不到或没有标签就原样回队列名 ——
+/// 名字永远是对的，只是未必好认。
+fn printer_display<P: NetworkPlatform>(plat: &P, printer: &str) -> String {
+    plat
+        .list_printers()
+        .iter()
+        .find(|p| p.name == printer)
+        .and_then(|p| p.info.clone())
+        .unwrap_or_else(|| printer.to_string())
+}
+
 fn outcome_of<P: NetworkPlatform>(
     plat: P,
     allowed: &AllowedScripts,
     a: &OneShotAction,
 ) -> ActionOutcome {
-    let label = label_of(&a.action);
+    let label = match &a.action {
+        OneShotActionType::SetDefaultPrinter { printer } => i18n::tf(
+            "act.label_printer",
+            &[("printer", &printer_display(&plat, printer))],
+        ),
+        other => label_of(other),
+    };
     let res = match &a.action {
         OneShotActionType::LaunchApp { app, args } => plat.launch_app(app, args),
         OneShotActionType::SetDefaultPrinter { printer } => plat.set_default_printer(printer),

@@ -45,8 +45,9 @@ function eq(label, got, want) {
 
 // —————————————————————— 最小 DOM ——————————————————————
 //
-// 只实现 editor.html 真正碰到的那部分（它全程用 innerHTML 字符串建表单，从不
-// createElement / querySelector）。`innerHTML` 的 getter 故意返回空串：断言一律走
+// 只实现 editor.html 真正碰到的那部分（它全程用 innerHTML 字符串建表单；createElement /
+// replaceWith 只有一处 —— SSID「手动输入」把下拉换成输入框 —— 所以也只补那一处）。
+// `innerHTML` 的 getter 故意返回空串：断言一律走
 // 真实函数的返回值或数据，不去解析序列化结果 —— 那种断言只会绑死标签顺序。
 
 const VOID = new Set(["INPUT", "BR", "IMG", "HR", "META", "LINK"]);
@@ -142,6 +143,18 @@ class El {
     }
     return null;
   }
+  /// 界面脚本只用到这两个方法（SSID「手动输入」把下拉换成输入框）：
+  /// 原位替换与拿焦点。别的 DOM API 一概没实现，也不需要。
+  replaceWith(node) {
+    const p = this.parent;
+    if (!p) return;
+    const i = p.children.indexOf(this);
+    if (i < 0) return;
+    p.children[i] = node;
+    node.parent = p;
+    this.parent = null;
+  }
+  focus() {}
 }
 
 function parse(html) {
@@ -272,6 +285,7 @@ const documentElement = new El("html");
 const document = {
   body,
   documentElement,
+  createElement: (tag) => new El(tag),
   addEventListener(type, fn) {
     (handlers[type] ||= []).push(fn);
   },
@@ -370,7 +384,7 @@ function fakeInvoke(cmd, args) {
       // 「设为默认打印机」的候选。这里返回 JSON 字符串，是为了让 asArray 那条兼容分支
       // 一直有人走：后端改形状时这边会立刻红。
       return Promise.resolve(JSON.stringify([
-        { name: "Office LaserJet", is_default: true },
+        { name: "Office LaserJet", info: "LaserJet 476 · 3F", is_default: true },
         { name: "Home Inkjet", is_default: false },
       ]));
 
@@ -551,6 +565,8 @@ eq("同一行里：启用勾选 + 类型下拉 + 值下拉 + 徽标 + 删除按�
 const ssidInput = byBind("rules.0.conditions.0.value");
 eq("SSID 值是下拉选择框", ssidInput?.tagName, "SELECT");
 eq("候选来自系统已保存的 SSID，外加手动输入项", ssidInput?.children.map((o) => o.value), ["", "Office_5G", "Café", "__manual__"]);
+eq("空选项是占位文案，不是一条长得像真 SSID 的假候选",
+  ssidInput?.children[0].textContent, strings["editor.ssid_placeholder"]);
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
 eq("下拉里只有非 VPN 的硬件出口，外加一个空选项",
@@ -562,6 +578,23 @@ const gone = byBind("rules.0.conditions.2.value");
 eq("已存但本机已经没有的网卡：原样列出并选中，不会被悄悄改成别的卡",
   [gone?.children.map((o) => o.value), gone?.children.filter((o) => o.selected).map((o) => o.value)],
   [["", "en9", "en0", "en5"], ["en9"]]);
+// 换类型 = 换值的语义。旧值不跟着清，就会被新类型的下拉当成「系统里没有的已存值」
+// 顶进候选列表 —— SSID 与接口互相串台就是这么来的。
+choose(byBind("rules.0.conditions.2.type"), "wifi_ssid");
+eq("接口条件切成 SSID 类型后：en9 不混进候选，值也被清空",
+  [byBind("rules.0.conditions.2.value")?.children.map((o) => o.value),
+   h.draft.rules[0].conditions[2].value],
+  [["", "Office_5G", "Café", "__manual__"], undefined]);
+// 「手动输入」是切输入框的入口，`__manual__` 这个哨兵绝不能落成配置值。
+choose(byBind("rules.0.conditions.2.value"), "__manual__");
+const manualInp = byBind("rules.0.conditions.2.value");
+eq("选手动输入后换成文本框，哨兵值不进配置",
+  [manualInp?.tagName, h.draft.rules[0].conditions[2].value], ["INPUT", undefined]);
+type(manualInp, "Hidden Lab WiFi");
+resetSaves();
+await h.$("btn-save").onclick();
+eq("手输的 SSID 原样送达（含空格的名字不会被截断）",
+  saveOf("save_profile")?.payload?.rules?.[0]?.conditions?.[2]?.value, "Hidden Lab WiFi");
 h.pick("profile", "office");
 
 group("文本编辑与 save_profile");
@@ -648,10 +681,10 @@ const prInput = byBind("then.one_shot.3.action.printer");
 eq("打印机那一项是下拉选择框（只能从系统已添加的打印机中选择）", prInput?.tagName, "SELECT");
 eq("候选就是系统里的打印机名（顺序照后端），无手动输入项",
   prInput?.children.map((o) => o.value), ["", "Office LaserJet", "Home Inkjet"]);
-eq("当前默认的那台在候选里带说明，其余留空",
-  findById("printer-list")?.children.map((o) => o.textContent), [strings["editor.printer_is_default"], ""]);
-check("整列只挂一份候选清单：THEN 与 ELSE 共用同一个 id，重复的那份会被浏览器忽略",
-  findAll((e) => e.id === "printer-list").length === 1);
+eq("下拉文字说人话：有标签用标签、当前默认那台带标注；value 仍是下发用的队列名",
+  prInput?.children.map((o) => o.textContent),
+  [strings["editor.printer_placeholder"],
+   `LaserJet 476 · 3F ${strings["editor.printer_is_default"]}`, "Home Inkjet"]);
 resetSaves();
 choose(byBind("then.one_shot.0.action.type"), "set_default_printer");
 eq("换类型会重建卡片：app 框没了，换成打印机下拉框",

@@ -12,7 +12,7 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 - **SSID 피커**를 datalist에서 실제 `<select>`로 변경, 숨겨진 네트워크 수동 입력 옵션 추가
 - **인터페이스 피커**가 "en0 (Wi-Fi)"와 같은 인간 가독 라벨 표시
 - **프린터 피커**를 datalist에서 실제 `<select>`로 변경, 인간 가독 라벨 표시, 자동 발견 큐 제외
-- 사용되지 않는 i18n 키 `editor.nic_gateway_mac` 삭제; `editor.ssid_manual`, `editor.printer_placeholder`, `editor.printer_manual` 추가
+- 사용되지 않는 i18n 키 `editor.nic_gateway_mac`, `editor.printer_manual` 삭제; `editor.ssid_manual`, `editor.printer_placeholder` 추가
 
 ## [1.0.0] - 2026-09-23
 

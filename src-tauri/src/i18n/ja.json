@@ -94,6 +94,7 @@
   "editor.nic_vpn": "VPN",
   "editor.use_value": "反映",
   "editor.ssid_manual": "手動入力…",
+  "editor.ssid_placeholder": "SSID を選択…",
   "editor.state_active_profile": "適用中のプロファイル",
   "editor.state_conditions": "一致した条件",
   "editor.state_network": "現在のネットワーク",

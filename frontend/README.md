@@ -26,16 +26,16 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 - **条件值来自系统实况**：SSID 是可输入的下拉（`get_networks`），接口是只能选的下拉
   （`get_interfaces`，VPN/虚拟网卡不进候选）。读得到的值才给「用作条件」按钮 ——
   把读不到的值写进条件，等于凭空造一条永远不成立的条件。同一个口径也管动作的目标：
-  「设为默认打印机」的候选来自 `get_printers`（当前默认那台带标注），可框本身仍是
-  `<input list=…>` 而不是 `<select>` —— 那台共享打印机要连上这个网络之后才出现，
-  配置的人此刻正需要填它的名字。
+  「设为默认打印机」的候选来自 `get_printers`（显示「说明 · 位置」，当前默认那台带标注），
+  且只能从清单里选 —— 队列名打错，就等于给一台不存在的打印机下发配置；机器上还没有
+  那台共享打印机时，先连上对应网络再回来配。
 - **THEN 与 ELSE 在同一列里上下并列**（没有页签）：两支同时可见，改一支不会牵动另一支，
   也让人看见「ELSE 那支还配了常驻动作」这类互相打架的配置。
 
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 457 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 458 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -124,7 +124,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `force_dhcp` | — | 把当前网络切回 DHCP（异步，结果走 `netsense://action`） |
 | `probe_network` | — | 手动探测（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字） |
-| `get_printers` | — | 本机打印机清单 `[{name, is_default}]`（第 4 列「设为默认打印机」的候选，仍可手输列表外的名字）。枚举不到就是空表：没装打印系统的机器是正常状态 |
+| `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |
 | `set_language` | `code` | 切换 UI 语言并写进**软件配置**；不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
 | `get_app_settings` | — | 软件设置窗口的一次性快照（JSON 字符串）：语言、开机启动的**系统实况**（问不出来时 `autostart:false` + `autostart_error`）、三份路径、日志保留天数及上下限、提权通道、平台、版本 |
 | `set_autostart` | `enable` | 开 / 关「登录时启动」，返回系统里**实际**的状态（写 plist / `.desktop` / 注册表，真相不在本进程里） |

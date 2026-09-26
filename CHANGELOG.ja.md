@@ -10,9 +10,9 @@ NetSense のすべての重要な変更をここに記録する。形式は
 
 - **エディターの現在のネットワークブロック**がトレイポップアップと一致する完全なNIC詳細を表示（インターフェース → SSID → 信号 → MAC → IPv4 → ネットマスク → ゲートウェイ → IPv6 → DNS）
 - **SSIDピッカー**をdatalistから実際の`<select>`に変更、隠しネットワークの手動入力オプションを追加
-- **インターフェースピッカー**が「en0 (Wi-Fi)」のような人間可读ラベルを表示
-- **プリンターピッカー**をdatalistから実際の`<select>`に変更、人間可读ラベルを表示、自動検出キューを除外
-- 未使用のi18nキー`editor.nic_gateway_mac`を削除；`editor.ssid_manual`、`editor.printer_placeholder`、`editor.printer_manual`を追加
+- **インターフェースピッカー**が「en0 (Wi-Fi)」のような人間可読ラベルを表示
+- **プリンターピッカー**をdatalistから実際の`<select>`に変更、人間可読ラベルを表示、自動検出キューを除外
+- 未使用のi18nキー`editor.nic_gateway_mac`、`editor.printer_manual`を削除；`editor.ssid_manual`、`editor.printer_placeholder`を追加
 
 ## [1.0.0] - 2026-09-23
 

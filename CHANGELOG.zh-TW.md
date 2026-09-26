@@ -12,7 +12,7 @@ NetSense 的所有重要變更都記錄於此。格式依據
 - **SSID 選擇器**從 datalist 改為真正的下拉式選單，支援手動輸入隱藏網路
 - **介面選擇器**顯示人類可讀的標籤（如 "en0 (Wi-Fi)"）而非裸設備名
 - **印表機選擇器**從 datalist 改為真正的下拉式選單，顯示人類可讀標籤，排除自動發現的佇列
-- 刪除未使用的 i18n key `editor.nic_gateway_mac`；新增 `editor.ssid_manual`、`editor.printer_placeholder`、`editor.printer_manual`
+- 刪除未使用的 i18n key `editor.nic_gateway_mac`、`editor.printer_manual`；新增 `editor.ssid_manual`、`editor.printer_placeholder`
 
 ## [1.0.0] - 2026-09-23
 

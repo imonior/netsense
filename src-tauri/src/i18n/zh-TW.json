@@ -94,6 +94,7 @@
   "editor.nic_vpn": "VPN 網卡",
   "editor.use_value": "填入",
   "editor.ssid_manual": "手動輸入…",
+  "editor.ssid_placeholder": "選擇 SSID…",
   "editor.state_active_profile": "目前生效的配置",
   "editor.state_conditions": "生效的條件",
   "editor.state_network": "目前網路資訊",

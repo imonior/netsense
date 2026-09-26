@@ -398,7 +398,8 @@
 
   const COND_TYPES = () => [["wifi_ssid", t("editor.match_ssid")], ["gateway_mac", t("editor.match_gateway_mac")],
     ["bssid", t("editor.match_bssid")], ["network_interface", t("editor.match_interface")]];
-  const COND_PH = { wifi_ssid: "Office_5G", gateway_mac: "aa:bb:cc:dd:ee:ff", bssid: "00:11:22:33:44:55" };
+  // wifi_ssid 不在这张表里：它的空选项/输入走专用下拉（condValue），示例名当占位会像一条假 SSID。
+  const COND_PH = { gateway_mac: "aa:bb:cc:dd:ee:ff", bssid: "00:11:22:33:44:55" };
 
   /// 系统硬件网络出口：条件比的是「在用的普通网卡」，VPN 隧道不是出口，不能选。
   const ifaceNames = () => nicList
@@ -620,16 +621,13 @@
         ["network_events_and_polling", t("editor.detection_events_polling")],
         ["polling_only", t("editor.detection_polling")]])) +
       row("editor.change_delay", int("detection.change_delay_secs", d.change_delay_secs, "5")) +
-      row("editor.poll_interval", int("detection.poll_interval_secs", d.poll_interval_secs, "30")) +
-      ssidDatalist();
+      row("editor.poll_interval", int("detection.poll_interval_secs", d.poll_interval_secs, "30"));
     box.innerHTML = html;
   }
 
-  const ssidDatalist = () => `<datalist id="ssid-list">` +
-    wifiList.filter(Boolean).map(s => `<option value="${esc(s)}"></option>`).join("") + `</datalist>`;
-
   /// SSID 可以手输（隐藏网络、还没连上过的环境都要能提前配好）。
-  /// WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select>，底部加 "Other…" 选项支持手输。
+  /// WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select>，底部加「手动输入」项：
+  /// 选中它当场换成输入框（见 change 委托与 toManualInput），哨兵值本身不进配置。
   function condValue(b, c) {
     const type = c.type || "wifi_ssid";
     if (type === "wifi_ssid") {
@@ -637,8 +635,9 @@
       const ssids = wifiList.filter(Boolean);
       // 如果当前值不在列表里，保留它作为第一个选项
       const opts = (cur && !ssids.includes(cur)) ? [cur, ...ssids] : ssids;
-      return `<select data-bind="${b}.value" style="max-width:220px" onchange="if(this.value==='__manual__'){this.outerHTML='<input type=text class=in data-bind='+this.dataset.bind+' value=\\''+esc(cur)+'\\' style=max-width:220px>'}">` +
-        `<option value=""${cur ? "" : " selected"}>${esc(COND_PH.wifi_ssid)}</option>` +
+      // 手动输入项由 change 委托统一处理（toManualInput）：哨兵值绝不写进配置。
+      return `<select data-bind="${b}.value" style="max-width:220px">` +
+        `<option value=""${cur ? "" : " selected"}>${esc(t("editor.ssid_placeholder", "Select SSID…"))}</option>` +
         opts.map(s => `<option value="${esc(s)}" ${s === cur ? "selected" : ""}>${esc(s)}</option>`).join("") +
         `<option value="__manual__">${esc(t("editor.ssid_manual", "Manual entry…"))}</option>` +
         `</select>`;
@@ -674,6 +673,21 @@
         `</select>`;
     }
     return txt(`${b}.value`, c.value, COND_PH[type] || "");
+  }
+
+  /// SSID 下拉选「手动输入」后：把 select 换成输入框，让用户打的名字（而不是
+  /// `__manual__` 这个哨兵）成为写进配置的值。属性一律走 DOM API 设置，
+  /// 拼接字符串会在含空格的名字上截断、并漏出垃圾属性。
+  function toManualInput(selEl) {
+    const root = editRoot();
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.className = "in";
+    inp.dataset.bind = selEl.dataset.bind;
+    inp.style.maxWidth = "220px";
+    inp.value = String(getPath(root, selEl.dataset.bind) ?? "");
+    selEl.replaceWith(inp);
+    inp.focus();
   }
 
   /* —————————————————————— 第 3 列：3A 网络（先 THEN 后 ELSE） —————————————————————— */
@@ -790,21 +804,8 @@
       box.innerHTML = `<div class="empty">${esc(t("editor.action_none"))}</div>`;
       return;
     }
-    // 候选清单挂在列上而不是每个分支上：THEN 与 ELSE 两张列块若各带一份
-    // `<datalist id="printer-list">`，那个 id 就重复了，浏览器只会认第一份。
-    box.innerHTML = BRANCHES().map(pre => actBlock(pre)).join("") + printerDatalist();
+    box.innerHTML = BRANCHES().map(pre => actBlock(pre)).join("");
   }
-
-  /// 打印机名可以手输：这台机器上没装、但用户打算连上去的那台（共享打印机、以后才加的
-  /// 那台）也要能提前配好，和 SSID 同一个道理。
-  /// WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select>，底部加 "Other…" 选项支持手输。
-  const printerDatalist = () => {
-    const printers = printerList.filter(p => p && p.name);
-    return `<datalist id="printer-list">` +
-      printers.map(p =>
-        `<option value="${esc(p.name)}">${esc(p.info || (p.is_default ? t("editor.printer_is_default") : ""))}</option>`
-      ).join("") + `</datalist>`;
-  };
 
   function actBlock(pre) {
     const b = scope(pre);
@@ -839,6 +840,14 @@
   };
   const actionTarget = (a) => {
     const act = (a && a.action) || {};
+    if (act.type === "set_default_printer") {
+      // 目标要说人话：系统给的标签（说明·位置）优先，队列名只是兜底 ——
+      // 按 IP 自动命名的队列（`_10_20_20_30`）用户认不出，但下发用的仍是队列名。
+      const name = String(act.printer || "").trim();
+      const pr = printerList.find(p => p && p.name === name);
+      if (pr) return pr.info || pr.name;
+      return act.printer || "—";
+    }
     return act.path || act.app || act.printer || act.tunnel || act.profile || "—";
   };
 
@@ -859,7 +868,7 @@
       body += `<div class="full">` +
         `<select data-bind="${p}.action.printer" style="max-width:260px">` +
         `<option value=""${cur ? "" : " selected"}>${esc(t("editor.printer_placeholder", "Select printer…"))}</option>` +
-        printers.map(pr => `<option value="${esc(pr.name)}" ${pr.name === cur ? "selected" : ""}>${esc(pr.info || pr.name)}</option>`).join("") +
+        printers.map(pr => `<option value="${esc(pr.name)}" ${pr.name === cur ? "selected" : ""}>${esc((pr.info || pr.name) + (pr.is_default ? " " + t("editor.printer_is_default") : ""))}</option>`).join("") +
         `</select>` +
         `</div>`;
     } else {
@@ -1130,6 +1139,9 @@
       const rawCfg = await invoke("get_config");
       cfg = typeof rawCfg === "string" ? JSON.parse(rawCfg) : rawCfg;
       cfg.profiles ||= [];
+      // 旧版下拉会把「手动输入」的哨兵值当普通选项写进配置：读进来时清掉（保存时才落盘）。
+      for (const r of cfg.profiles.flatMap(p => p.rules || []))
+        for (const c of r.conditions || []) if (c.value === "__manual__") delete c.value;
       globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
       wifiList = (await invoke("get_networks").catch(() => [])) || [];
       nicList = asArray(await invoke("get_interfaces").catch(() => []));
@@ -1175,6 +1187,9 @@
     if (/__(new|health)$/.test(path)) return;
     const val = castValue(el);
     setPath(root, path, val === "" && el.tagName === "SELECT" ? undefined : val);
+    // 条件换了类型，旧值必须一起清掉：值的语义跟着类型走，留着它会被新类型的
+    // 下拉当成「系统里没有的已存值」顶进候选列表 —— 接口名与 SSID 互相串台就是这么来的。
+    if (/\.conditions\.\d+\.type$/.test(path)) setPath(root, path.replace(/\.type$/, ".value"), undefined);
     // 会改变表单结构的字段必须重画；其余保持 DOM 不动，免得输入中途丢焦点
     if (/(^|\.)mode$|\.v6mode$|\.type$/.test(path)) renderAll();
   }
@@ -1199,6 +1214,8 @@
       const owner = path.slice(0, path.lastIndexOf("network"));
       if (/__new$/.test(path)) { toggleNetwork(el.checked, owner); return; }
       if (/__health$/.test(path)) { toggleHealth(el.checked, owner); return; }
+      // 手动输入哨兵：换成输入框，值本身不进配置。
+      if (el.value === "__manual__") { toManualInput(el); return; }
       onField(el);
       // 名字与勾选框在第 1 列那一行上：改了要让那一行的状态跟着变（生效描边、脏点）。
       // 只重建第 1 列与状态条 —— 重建第 2~4 列会把用户正在输入的东西冲掉。

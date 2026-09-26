@@ -94,6 +94,7 @@
   "editor.nic_vpn": "VPN",
   "editor.use_value": "채우기",
   "editor.ssid_manual": "수동 입력…",
+  "editor.ssid_placeholder": "SSID 선택…",
   "editor.state_active_profile": "현재 적용된 프로파일",
   "editor.state_conditions": "일치한 조건",
   "editor.state_network": "현재 네트워크",
