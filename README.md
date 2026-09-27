@@ -58,18 +58,25 @@ network ──▶ │  Rule = enabled Conditions ANDed         │ ──▶ 1 m
 - A configuration editor covering the whole model — Rules, Conditions, 3A, routes, actions, ELSE
   and the global fallback — with the engine's live verdicts rendered in place.
 - A software settings window, holding the settings that are not about any network: interface language,
+  color scheme (follow the system, light or dark),
   launch at login (read from the operating system every time the window opens, never from a copy in a
-  file), where `config.json` and the logs live, and how many days of logs to keep.
-- Passwordless where it can be: a macOS `sudoers` allow-list installed once, an elevated Windows
-  run, or `sudo -n` on Linux. Where it cannot, NetSense falls back to the system authorization
-  dialog instead of failing.
+  file), where `config.json` and the logs live, how many days of logs to keep, which route the update
+  check and the installer download take (direct, the system's own proxy, or one address you set), and a
+  one-file export / restore of the automation config, these settings and the trusted scripts.
+- Passwordless where it can be: on macOS the first network change installs a `sudoers` allow-list
+  inside the one authorization dialog that change already requires, so every later change asks for
+  nothing; on Windows, an elevated run; on Linux, `sudo -n`. Where it cannot, NetSense falls back
+  to the system authorization dialog instead of failing. Settings can remove the macOS channel
+  again, and the next change then reinstalls it.
 - Online upgrade: checks GitHub Releases and picks this platform's asset. A Homebrew install
   upgrades through `brew upgrade --cask` and never downloads anything; otherwise NetSense downloads
   the asset and installs it only once its SHA256 matches this release's `SHA256SUMS` — when that check
   cannot be made (the release has no `SHA256SUMS`, this asset is not listed in it, or it cannot be
   fetched), the update stops and you are pointed at the release page instead.
 - Five interface languages (English, 简体中文, 繁體中文, 日本語, 한국어), validated for parity;
-  English is the default. Every window on every platform follows the selection — tray panel, editor,
+  the default follows the system's own UI language, and English is what's left when there is
+  nothing to follow.
+  Every window on every platform follows the selection — tray panel, editor,
   settings, log viewer, the tray tooltip and the native error dialogs included — and a static-text
   check in `scripts/validate.py` keeps it that way.
 
@@ -116,8 +123,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Installer # 
 cd src-tauri && cargo build --release   # executable
 cd src-tauri && cargo tauri build       # installer (needs tauri-cli)
 
-# macOS, optional: install the passwordless privilege channel so changing a network
-# no longer asks for authorization every time
+# macOS, optional: install the passwordless privilege channel by hand — the same two files
+# the app installs for you during the first authorization dialog. Changing a network does not
+# ask for a password once the channel is in place.
 sh scripts/install-priv-helper.sh
 ```
 
@@ -137,7 +145,7 @@ point (settings · open log folder · set current network to DHCP · probe now �
 interfaces and tunnels it shows. It is configured by two files, because the two kinds of setting have
 nothing in common. Which network gets which treatment is the automation configuration, a single
 `config.json` you edit in the editor window. How the application itself behaves - interface language,
-log retention, launch at login - is the software configuration, `settings.json`, edited in the settings
+log retention, launch at login, the route update traffic takes - is the software configuration, `settings.json`, edited in the settings
 window that the panel's "Settings" button opens; changing it never re-applies a network setting.
 `config.json` and `settings.json` both sit in NetSense's own per-user directory —
 `~/Library/Application Support/NetSense` on macOS, `%APPDATA%\NetSense` on Windows,
@@ -147,8 +155,8 @@ read-only `Program Files` must not be written to. Logs go to NetSense's per-user
 
 > Elevation for network config on Windows asks UAC **once per app run** (the first apply spawns a
 > resident elevated helper that later batches ride; decline it, or lose the helper, and NetSense
-> falls back to asking per batch). Running as administrator removes even that; the privilege channel
-> then reports "no authorization needed".
+> falls back to asking per batch — the log window says why, once). Running as administrator removes
+> even that; the privilege channel then reports "no authorization needed".
 
 ## Configuration
 

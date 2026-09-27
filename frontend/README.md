@@ -9,8 +9,9 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 |------|------------------|------|
 | `popup.html` | `popup` | **状态栏弹窗面板**（主入口，托盘唯一的交互面）：当前网络信息（含在用网卡明细）+ 其他在用网卡 + VPN/虚拟网卡 + Profile 快速切换（带实时状态徽标）+ 在线升级 |
 | `editor.html` | `main` | **配置编辑器**：三层 —— 顶部「当前状态」条（生效方案 / 命中它的条件 / 当前网络 / 生效的动作，四格与下面四列一一对应）+ 中部四列（Profile 列表含兜底 · 条件 · 3A 网络 · 3B 动作）+ 底部动作键。THEN 与 ELSE **同时呈现**（THEN 在上、ELSE 在下），校验按钮在「3A 网络」列标题里 |
-| `settings.html` | `settings` | **软件设置**：界面语言 · 开机启动（读系统实况）· 自动化配置与日志的位置（打开文件夹）· 脚本白名单 · 日志保留天数 · 提权通道/平台/版本 |
+| `settings.html` | `settings` | **软件设置**：界面语言（默认跟随系统的界面语言）· 界面配色（跟随系统 / 浅色 / 深色）· 开机启动（读系统实况）· 升级代理（直连 / 跟随系统 / 手填一个地址）· 检查更新与就地升级（和面板同一套判定，同三条命令）· 自动化配置与日志的位置（打开文件夹）· 脚本白名单 · 日志保留天数 · 备份（导出一份 / 从列表恢复） · 提权通道/平台/版本（macOS 且通道已装时可在这里撤销免密） |
 | `logs.html` | `logs` | **日志窗口**：按天的日志文件下拉（新→旧）· 只读尾部若干行 · 级别上色 · 子串过滤 · 「跟随」定时刷新（窗口隐藏时不刷） |
+| `theme.css` | —（四座窗口共用） | **唯一的颜色真相来源**：`--t-*` 一套 token 写两遍 —— 深色在 `:root`，浅色在 `html[data-theme="light"]`，加上一条 `color-scheme`；四座窗口的内联样式只引用它，不再各自写字面值 |
 | `serve.sh` | — | 开发期静态服务器（`http://localhost:1420`），对应 `beforeDevCommand` |
 
 编辑器的界面结构是**有意的**，改动前先读 `DEVELOPMENT.md` §5–§8：Rules 之间 OR、Rule 内
@@ -23,8 +24,10 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 - **顶部四格与下面四列是同一份事实的两个视图**（`EngineView` 出发的 `renderStrip()` 与
   各列的徽标必须同口径）。所以「生效的那一行发绿」这件事，徽标和行描边要一起跟着广播走 ——
   只更新其中一个就会分裂：用户看到的行说 A 在生效，状态条说 B。
-- **条件值来自系统实况**：SSID 是可输入的下拉（`get_networks`），接口是只能选的下拉
-  （`get_interfaces`，VPN/虚拟网卡不进候选）。读得到的值才给「用作条件」按钮 ——
+- **条件值来自系统实况**：SSID 是可输入的下拉（`get_networks`：系统里保存过的无线网络），
+  接口是只能选的下拉（`get_adapters`：本机装着的网卡，**含现在没插线、没连上的口**；
+  VPN/虚拟网卡不进候选，因为条件比对的集合里根本没有它们）。下拉里另有一条「任意网卡」，
+  存的是通配值 `*`（任何一张在用的普通网卡都算命中）。读得到的值才给「用作条件」按钮 ——
   把读不到的值写进条件，等于凭空造一条永远不成立的条件。同一个口径也管动作的目标：
   「设为默认打印机」的候选来自 `get_printers`（显示「说明 · 位置」，当前默认那台带标注），
   且只能从清单里选 —— 队列名打错，就等于给一台不存在的打印机下发配置；机器上还没有
@@ -32,10 +35,27 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 - **THEN 与 ELSE 在同一列里上下并列**（没有页签）：两支同时可见，改一支不会牵动另一支，
   也让人看见「ELSE 那支还配了常驻动作」这类互相打架的配置。
 
+配色也同理：四座窗口共用 `theme.css` 那一套 `--t-*` token，**里面没有一个字面颜色** ——
+面、字、状态点、徽标、浮层各有一档，深色写在 `:root`，浅色写在 `html[data-theme="light"]`，
+两套各自声明自己的 `color-scheme`（不声明那一句，原生下拉弹层、滚动条、复选框会往深色的窗口里
+嵌一块浅色底，或者反过来，Windows 上最明显）。`editor.html` 的 token **名字**（`--bg-panel`、
+`--btn-primary` 这一批）与另外三扇不同，只是在内联 `:root` 里别名到 `--t-*`；markup 与
+`scripts/editor-smoke.mjs` 都按名字引用，所以改名不如改值。
+
+浅色不是深色的反相：徽标、状态行、路径块这类「底色 + 底上的字」成对出现的东西，在亮底上要换
+另一档（深底是压暗的色相配亮字，亮底是淡底配深字），所以每一处成对取值都取 `--t-tint-*` 与
+`--t-tint-*-fg` 那一对，不单独挑颜色。文字与它所在的那块底至少差 4.5:1，两套按同一句话核对过
+（占位符除外 —— 它是提示不是内容）。
+
+改档由后端定：`theme` 存在 `settings.json` 里的是**那一档选择**（`system` / `light` / `dark`），
+而窗口渲染的是**算出来的那一个值** —— 「跟随系统」时由 PAL 现问操作系统（见 `platform.rs` 的
+`ui_prefers_dark`）。四座窗口于是只有两种拿法：随状态广播里的 `theme` 换（面板、编辑器），或者
+自己 `get_theme` 问一次（软件设置、日志窗口）。
+
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 458 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 508 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -109,13 +129,14 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 所以它只染徽标、不动状态。`pending`（worker 起了、第一次核对还没回）由后端报，前端不替它补；
 表单里有这条动作、`workers[]` 里却没有 = 引擎此刻没在维持它，这时徽标留空。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，32 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，43 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
 | `get_status` | — | 上面的 `status_payload`（JSON 字符串） |
 | `get_engine_status` | — | 只取 `EngineView`（JSON 字符串），**不**重新采样，补齐广播漏掉的窗口 |
-| `get_interfaces` | — | 全部在用网卡（有线/无线/VPN），**首位＝Rust 判定的主网卡**（`automation::primary_nic`），平台层 TTL 缓存（JSON 字符串）。编辑器第 2 列的「接口」候选就来自这里，VPN/虚拟网卡被排除在候选之外 |
+| `get_interfaces` | — | 全部在用网卡（有线/无线/VPN），**首位＝Rust 判定的主网卡**（`automation::primary_nic`），平台层 TTL 缓存（JSON 字符串）。面板与设置窗口的「网络硬件信息」列来自这里 |
+| `get_adapters` | — | 本机**装着**的网卡 `[{name,label,kind,up}]`（第 2 列「接口」条件值的候选）：含现在没插线、没连上的物理口，好让用户提前给另一个口配好网络；没有地址类字段，也不做 TTL 缓存（刚插上扩展坞之后那次刷新就该看到新口） |
 | `get_config` | — | 全量自动化配置 JSON（schema 1），编辑器回填用。里面**没有**界面语言 —— 那是软件配置 |
 | `save_profile` | `payload: Profile`（JSON 字符串） | 按 `id` 新增或替换一个 Profile；**整份配置**校验通过才落盘 |
 | `save_global` | `payload: {fallback, allowed_scripts}` | 保存 Profile 之外的全局项（零命中兜底 + 脚本白名单）。兜底**不是** Profile：它没有条件，不参与匹配与冲突。**整份替换**这两个字段，所以两侧都必须带齐 —— 白名单的编辑面在软件设置窗口，编辑器保存兜底时必须把读到的 `allowed_scripts` 原样传回去，反之亦然，否则一次保存就清空另一项 |
@@ -125,11 +146,21 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `probe_network` | — | 手动探测（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字） |
 | `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |
-| `set_language` | `code` | 切换 UI 语言并写进**软件配置**；不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
-| `get_app_settings` | — | 软件设置窗口的一次性快照（JSON 字符串）：语言、开机启动的**系统实况**（问不出来时 `autostart:false` + `autostart_error`）、三份路径、日志保留天数及上下限、提权通道、平台、版本 |
+| `set_language` | `code` | 切换 UI 语言并写进**软件配置**；`code` 为 `system` 时是「跟随系统」—— 字段从 `settings.json` 里删掉，本次生效的语言现问操作系统。不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
+| `set_theme` | `code` | 切换界面配色并写进**软件配置**：`system` / `light` / `dark` 三档之一，存的就是用户选的这一档，返回值才是当下生效的那一套（`light`/`dark`）。认不出的 `code` 一律拒绝（`sett.theme_rejected`）而不是退回默认档 —— 界面发出一个后端不认的值说明前端有 bug，静默收下只会把它藏起来。与语言同一条判据：不碰 `config.json`，不触发热重载，只广播一次 `netsense://status`（载荷里的 `theme` 是算出来的那一套），并记一条 `notify.theme_set` |
+| `get_theme` | — | 界面**此刻**该用哪套配色（`light` / `dark`）。给的是算出来的那一套，不是 `settings.json` 里存的那一档：`system` 要说清现在是什么颜色必须问操作系统（`platform::ui_prefers_dark`，答案缓存 60s），而这一句问话属于后端 —— 决定做一次，四座窗口才是同一份答案。软件设置与日志窗口用它；面板与编辑器跟着状态广播里的 `theme` 走，不单独问 |
+| `get_app_settings` | — | 软件设置窗口的一次性快照（JSON 字符串）：语言（以及它是不是「跟随系统」在起作用）、配色那一档（存的是选择，不是算出来的那一个值 —— 这条命令每次窗口获得焦点都会被调，不在这里问操作系统）、开机启动的**系统实况**（问不出来时 `autostart:false` + `autostart_error`）、三份路径与受信脚本目录、备份目录、日志保留天数及上下限、提权通道、平台、版本 |
 | `set_autostart` | `enable` | 开 / 关「登录时启动」，返回系统里**实际**的状态（写 plist / `.desktop` / 注册表，真相不在本进程里） |
 | `set_log_retention` | `days` | 设日志保留天数（越界按 1–365 夹紧），落盘 + 立刻按新窗口清一次，返回夹紧后的值 |
+| `uninstall_priv_channel` | — | 撤销 macOS 的免密通道：在一次授权之内删掉白名单包装脚本与 `/etc/sudoers.d/netsense`，并把 `notify.priv_removed` 记进日志。**没有配套的「安装」命令**：通道不在的时候，下一次应用配置会在那个本来就要弹的授权框里顺手把它装好（`platform::macos` 的 bootstrap 分支），所以装是下发的副产品，不是独立入口。非 macOS 平台回一条 `pal.priv_unsupported`；界面上那颗按钮只在 `platform == "macos"` 且 `priv == "direct"` 时出现 |
 | `open_config_folder` | — | 在系统文件管理器里打开 `config.json` 所在目录（路径由后端现算，界面不自己拼） |
+| `open_app_settings_folder` | — | 打开 `settings.json` 所在目录。**不**复用上一条：自动化配置可以来自可执行文件同级，那时两条路径不是一个目录 |
+| `get_proxy_state` | — | 升级请求出口的现状，JSON 字符串 `{mode,url,system_proxy}`：`mode` 是磁盘上那三态之一，`system_proxy` 只在 mode 为 system 时**现问**操作系统（macOS 一条 `scutil --proxy`，Linux 几条 `gsettings`），问不到就是 `null`。这条命令只在设置窗口打开与保存之后各调一次 —— 不进 `get_app_settings`，那个每次窗口获得焦点都会被调，popup.html 也调它 |
+| `set_update_proxy` | `mode`, `url` | 设升级请求走哪条出口：`direct` / `system` / `manual` + 一个 `scheme://host[:port]` 形状的地址。认不出的 mode 或地址一律拒绝（`sett.proxy_rejected`）而不是退回默认值 —— 这一句改的是这台机器的对外流量走哪条路。落盘 + 更新内存里的 `settings`，返回并记一条 `notify.proxy_set`；**不**惊动引擎，这份设置不参与条件求值与下发 |
+| `export_backup` | — | 导出一份备份：把自动化配置、软件配置、受信脚本目录里的脚本打成一个 JSON 文件写进 `<配置目录>/backups/`，返回文件名。脚本报错只回文本 —— 那里是 `run_script` 的 allow-list，一次静默失败会让用户以为备份是全的 |
+| `get_backups` | — | 现存备份清单（JSON 字符串，新→旧）：`[{name,bytes,modified}]`。只列形状认得出的名字，手放进去的文件不会出现在恢复选项里 |
+| `import_backup` | `name` | 恢复这份备份。先解析 + `validate()` 再动盘，落盘前把当前文件另存一份进同一个目录；成功文本走 `notify.backup_restored`。恢复后的 `settings.json` 会重设语言与日志保留，并回推 `netsense://status` |
+| `open_backups_folder` | — | 在系统文件管理器里打开备份目录（需要时先建出来） |
 | `get_strings` | — | 当前语言全部文案（一次拉全，避免逐 key 往返） |
 | `get_language` | — | 当前语言的代码，只用于给 `<html lang>` 定值；取词表一律走 `get_strings` |
 | `open_editor` / `close_editor` | — | 显示 / 隐藏编辑器（隐藏 = 收回菜单栏常驻） |

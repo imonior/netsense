@@ -76,8 +76,10 @@ netsense/
 │       ├── tray.rs            # tray icon only: any button click toggles the popup panel (no native menu)
 │       ├── state.rs           # AppState（config/engine 锁、config_path、广播）+ status_payload
 │       ├── paths.rs           # 用户级数据目录（配置/日志）解析；exe 同级只作兜底来源
-│       ├── appconfig.rs       # 软件配置 settings.json（语言 / 日志保留）+ 三平台开机启动（问系统，不猜文件）
-│       ├── ipc.rs             # 32 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
+│       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
+│       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
+│       ├── ipc.rs             # 43 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -99,7 +101,7 @@ netsense/
 │       │   └── provider.rs    # 3B2 的动作语义层：把 PersistentActionType 翻成一次 `Tick`
 │       ├── platform.rs        # ★ PAL trait contract + shared types + shared utils + compile-time platform selection
 │       ├── platform/
-│       │   ├── macos.rs       # macOS: networksetup / arp / airport / route / osascript
+│       │   ├── macos.rs       # macOS: networksetup / arp / airport / route / osascript + the one-time sudoers channel install
 │       │   ├── windows.rs     # Windows: PowerShell(CIM) read + netsh write + UAC elevation
 │       │   ├── win_helper.rs  # Windows 常驻提权 helper：同一 exe 的 `--netsense-helper` + 命名管道 RPC（一次授权/会话）
 │       │   └── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec
@@ -111,13 +113,14 @@ netsense/
 ├── frontend/
 │   ├── popup.html             # status-bar popup panel (window label = popup)
 │   ├── editor.html            # config editor (window label = main)
-│   ├── settings.html          # 软件设置窗口（窗口 label = settings）：语言 / 开机启动 / 配置与日志位置
+│   ├── settings.html          # 软件设置窗口（窗口 label = settings）：语言 / 开机启动 / 升级代理 / 检查更新 / 配置与日志位置
 │   ├── logs.html              # 日志窗口（窗口 label = logs）：按天文件下拉 / 尾部行 / 级别上色 / 过滤 / 跟随
+│   ├── theme.css              # 四座窗口共用的配色：`--t-*` token 两套（深色在 :root，浅色在 html[data-theme="light"]）
 │   ├── README.md              # frontend notes + IPC command table
 │   └── serve.sh               # dev static server on :1420
 ├── scripts/
-│   ├── netsense-priv.sh       # macOS privilege allow-list wrapper script (root-owned, authorized by sudoers)
-│   ├── install-priv-helper.sh # macOS install/uninstall privilege channel (writes /etc/sudoers.d/netsense)
+│   ├── netsense-priv.sh       # macOS privilege allow-list wrapper script (root-owned, authorized by sudoers; compiled into the app for install)
+│   ├── install-priv-helper.sh # macOS install/uninstall privilege channel by hand (writes /etc/sudoers.d/netsense)
 │   ├── validate.py            # ★ platform-independent static checks (JSON / i18n parity / PAL boundary / docs alignment), also run in CI
 │   ├── editor-smoke.mjs       # ★ headless editor harness (stubbed DOM + fake IPC); asserts the binding rules and can dump the payloads the editor really sends
 │   ├── build-windows.ps1      # ★ one-click Windows build (with MSVC/WebView2/disk preflight)
@@ -288,7 +291,7 @@ different is rejected with an actionable error, **not** migrated: the loader can
 file means when two Profiles match at once, and guessing would push a static IP nobody confirmed onto
 the user's NIC. Rewriting by hand against `config.example.json` is the documented path.
 
-这份文件里只有**自动化配置**。界面语言与日志保留天数属于软件配置，存在同一目录下的 `settings.json`
+这份文件里只有**自动化配置**。界面语言、界面配色与日志保留天数属于软件配置，存在同一目录下的 `settings.json`
 （`appconfig.rs`），判据是一句话：「改了它会改变自动化行为吗？」—— 不会的都不进 `config.json`。
 因此改语言既不会触发热重载，也不会让引擎重新评估一次网络；反过来，编辑器保存 `config.json`
 也不会顺手改掉用户的界面语言。
@@ -525,9 +528,13 @@ GUI process (unprivileged) ──sudo -n──▶ /usr/local/libexec/netsense-pr
 - **Script-side second check**: `scripts/netsense-priv.sh` validates the shape of each argument (IPv4 octet 0–255 and rejects leading zeros, prefix 0–128, route target `a.b.c.d[/len]`, DNS as comma-separated IPv4 set, service name non-empty and not starting with `-`); unknown subcommands are rejected outright.
 - **Authorization surface**: `/etc/sudoers.d/netsense` authorizes only the script's absolute path (`NOPASSWD:`), not arbitrary user commands; the script and its directory are root-owned and not writable by normal users.
 - **Fallback**: if the wrapper script is missing, or `sudo -n` reports "password required / no tty / not allowed", it automatically falls back to `osascript ... with administrator privileges` (the original per-change auth dialog), with no feature breakage.
-- **Self-check**: the install script runs `sudo -n <script> --batch` once as the current user at the end to verify the channel works.
+- **Batches the allow-list cannot express also fall back**: config validation only requires a route destination to be non-empty, while the wrapper accepts `a.b.c.d[/len]` — so `route -n add -net default <gw>` is a config that works through the prompt and cannot go through the channel. `exec_ops` therefore asks `allow_list_takes()` first, a Rust mirror of the script's per-argument validators used **only** to pick the channel: root still enforces its own copy. The mirror is deliberately stricter where the two could differ (a newline inside an argument — `is_service` only looks for `-` and `|`, while a newline silently creates a second operation; a zero-padded prefix like `0064`), because the two failure directions are not equal — wrongly refusing the channel costs one extra prompt, wrongly trusting it makes the whole batch fail. `rust_never_admits_a_batch_the_wrapper_would_reject` runs the script's own validator section over a sample table and asserts the second direction never happens.
+- **The app installs it inside the prompt that was coming anyway** (`exec_ops_bootstrap`). On a machine without the channel, the one `do shell script` the first change already needs runs `<installer> ; <that batch>`: the password the user was going to type sets the channel up, and every later change goes through `sudo -n` with no dialog at all. Installing is a side benefit, never a precondition — if the installer cannot be staged (an unusable temp directory, a username that does not fit a sudoers token), that batch is delivered exactly as it was before.
+- **What the installer touches, and how it is built**: the wrapper that lands in `/usr/local/libexec` is `scripts/netsense-priv.sh` **verbatim** (`include_str!`), so the script root executes is the script in the repository rather than a second copy of it that could drift; both temp files (wrapper + installer) go through the updater's exclusive-create private-path rules (§9.3), and the login name is shape-checked first because a sudoers line is split on whitespace and a stray `=` or space would turn one rule into something else. `visudo -cf` runs **before** the file lands: a syntactically broken `/etc/sudoers.d/*` breaks `sudo` for the whole machine.
+- **Self-check**: after installing, the app runs the empty `sudo -n <script> --batch` itself and writes what it found to the log — "both files are in place" is not the same statement as "this machine grants passwordless" (directory-service account names, a `netsense` sudoers file someone else owns, or a policy that never gives that user sudo all look installed and still ask). A failed probe changes nothing else: the fallback keeps working.
+- **Revoke**: Settings → Runtime → **Remove password-free changes** (`uninstall_priv_channel`) deletes the wrapper and that one sudoers line behind one authorization. The *next* change then re-installs it, in its own prompt — revoking means "take it away for now", not "this app can never do it again".
 
-Install / uninstall:
+Install / uninstall by hand (the same two files; the in-app path is the one users normally hit):
 
 ```bash
 sh scripts/install-priv-helper.sh            # install (needs sudo)
@@ -539,7 +546,7 @@ sh scripts/install-priv-helper.sh uninstall  # uninstall
 A `launchd` resident + Unix socket approach needs its own socket authentication (macOS has no `SO_PEERCRED`, requires `getpeereid` FFI) and protocol version compatibility — clearly larger complexity and attack surface.
 sudoers + allow-list script achieves the same goal using the system's built-in authorization mechanism, and with **a narrower privilege scope** (only network-configuration operations are allowed). If stronger isolation beyond passwordless is needed later (e.g. SMJobBless signature checks), revisit the open items in §14.
 
-Windows ended up taking the helper route anyway (§9.6 "Four key Windows backend designs" rule 3) because what makes this section's launchd+socket plan expensive is nearly free there: the kernel's own named-pipe DACL plus a client-process image-path check authenticate the caller, and the protocol is just "run this already-rendered batch" — no new privilege is ever minted. On macOS the complexities named above still argue for the sudoers allow-list; a Windows-style helper is not on the roadmap.
+Windows ended up taking the helper route anyway (§9.6 "Four key Windows backend designs" rule 3) because what makes this section's launchd+socket plan expensive is nearly free there: the kernel's own named-pipe DACL, the pipe's mandatory integrity label and a client-process image-path check authenticate the caller, and the protocol is just "run this already-rendered batch" — no new privilege is ever minted. On macOS the complexities named above still argue for the sudoers allow-list; a Windows-style helper is not on the roadmap.
 
 > If a `run` automation action declares `elevated: true`, it does **not** go through the allow-list channel but still uses the `osascript` auth dialog —
 > user scripts must be treated separately from network-configuration operations, guaranteeing the user is informed every time a privileged script runs.
@@ -577,6 +584,12 @@ earlier, so it keeps its own rules:
   page instead. Fail-closed at install time stays exactly as strict — this only moves the bad news
   earlier, so nobody spends a download on an update that was going to be refused. Homebrew installs
   skip both the question and the request.
+- **One verdict, two entry points.** The settings window's Updates card runs the same three commands the
+  panel's modal runs (`check_update`, then `run_update` or `open_url`) and borrows the `popup.*` strings
+  rather than defining a second set, so "can this update be installed here" cannot answer differently
+  depending on which window was asked. The silent once-per-session check stays the panel's job: the card
+  only ever speaks up when its button is pressed. Both entry points resolve the same proxy choice (§10.6),
+  so a check and the download that follows it never take different routes out of the machine.
 - Windows and Linux stage the *installer* under a per-user directory (`%LOCALAPPDATA%`,
   `$XDG_DATA_HOME` / `~/.local/share`), which is private already — only the Linux relaunch script
   lives in temp, and it goes through the same private-path helper.
@@ -633,7 +646,7 @@ On each focus (when opened) it auto-refreshes via `get_status`, and also passive
 
 面板的「设置」打开的是**软件设置**，不是编辑器 —— 两份配置各有一个入口，编辑器从这座窗口里再进去
 （`open_settings` → 窗口内 `open_editor`）。窗口内容一次问一次：`get_app_settings` 返回语言、开机启动的
-**系统实况**、`config.json` / `settings.json` / 日志目录三个路径、日志保留天数与其上下限、提权通道、平台、版本。
+**系统实况**、配色那一档（存的选择，不是算出来的颜色）、`config.json` / `settings.json` / 日志目录三个路径、日志保留天数与其上下限、提权通道、平台、版本。
 
 - **语言切换必须一次点击就看得见**：`set_language` 之后立刻重拉 `get_strings` 并重绘本窗口，其余窗口靠
   `netsense://status` 广播跟随（面板比较 `status_payload.language`，只在真的变了时才重取词表）。托盘 tooltip
@@ -676,7 +689,7 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Tunnel up? (3B2 read) | `scutil --nc list` (`WireGuard for macOS` registers each tunnel as a NEVPN config, so it appears here too) | `Get-NetAdapter` — the adapter **description** is the provider hint | `nmcli -t connection show` → `ip link show <dev>` (flags, not `state`) |
 | Connect tunnel (3B2 write) | `scutil --nc start <label>` | `wireguard.exe /installtunnelservice <conf>` / `rasdial <name>` | `nmcli connection up <name>` → `ip link set <name> up` |
 | Elevate = Direct | sudoers allow-list script (`sudo -n`, no dialog) | process already admin | `sudo -n` available |
-| Elevate = Prompt | `osascript ... with administrator privileges` | config batches: resident helper (`win_helper.rs`, one UAC per GUI session, same `Start-Process -Verb RunAs` to spawn it); fallback / user scripts: UAC per call (`Start-Process -Verb RunAs`) | `pkexec` |
+| Elevate = Prompt | `osascript ... with administrator privileges` — the first change on a machine without the channel installs it in that same prompt (§9.1) | config batches: resident helper (`win_helper.rs`, one UAC per GUI session, same `Start-Process -Verb RunAs` to spawn it); fallback / user scripts: UAC per call (`Start-Process -Verb RunAs`) | `pkexec` |
 | Saved SSID list | `networksetup -listpreferredwirelessnetworks` | read WLAN config XML (`[xml]` parse) | `nmcli con show` filtered to `802-11-wireless` |
 | Open log folder | `open` | `explorer` | `xdg-open` |
 
@@ -741,7 +754,8 @@ Rules that follow from it:
 3. **Elevation commands always pass args as `@('a','b')` arrays, never string-concatenated**:
    `& netsh.exe @('interface','ipv4','set','address','name=Wi-Fi','static',...)`.
    Interface names with spaces/special chars are not re-split. The whole batch is rendered into a PowerShell script and handed to `Start-Process -Verb RunAs` via `-EncodedCommand` (UTF-16LE + base64, self-implemented, zero-dependency) for **one UAC covering all operations**.
-   Config batches first try the **resident helper** (`platform/win_helper.rs`): the same exe re-launched elevated once per GUI session (`--netsense-helper`), executing batches over a named pipe whose DACL is owner-only and whose server verifies the connecting process is the *same executable*. Trust model: a batch's content comes from a config this very user edited, so the helper — reachable only by that same user — asks nothing new; user scripts (`run_script elevated`) **deliberately keep their per-run UAC**. Any helper failure (prompt declined, pipe dead, hostile same-user process hogging the slot) falls back to the plain per-batch UAC path above, and since every batch op (`netsh set …`) is an idempotent setting, the one retry after a half-delivered request costs nothing.
+   Config batches first try the **resident helper** (`platform/win_helper.rs`): the same exe re-launched elevated once per GUI session (`--netsense-helper`), executing batches over a named pipe whose security descriptor is `D:(A;;GA;;;CO)S:(ML;;NW;;;MM)`. The DACL half admits only the creating account; the SACL half pins the mandatory label to **Medium**, and that half is not decoration — the helper is a High-IL process, a created object inherits its creator's label, and `NO_WRITE_UP` then refuses the *non-elevated GUI of the same user* write access to its own channel. That is the "UAC every time, and nobody can say why" failure this pipe would otherwise ship with. Medium rather than Lower: the GUI sits at Medium so same-level writes are fine, while a Low-IL (sandboxed) process still cannot reach it. On top of both, the server verifies the connecting process is the *same executable*. The pipe is deliberately created **without** `FILE_FLAG_OVERLAPPED`: the line protocol runs over `std::fs::File`, and std hands `ReadFile`/`WriteFile` a NULL `OVERLAPPED` — an overlapped handle plus NULL is the "behaviour not guaranteed" pair (it can report an unfinished operation as finished). A handle that honestly blocks is the one we can hand to std. Trust model: a batch's content comes from a config this very user edited, so the helper — reachable only by that same user — asks nothing new; user scripts (`run_script elevated`) **deliberately keep their per-run UAC**.
+   The fallback is not silent. A batch that cannot reach the helper writes one log line per session carrying the `CreateFile` code, because the codes are the diagnosis: 2 = the pipe never appeared (helper did not start, or exited on arrival), 5 = it exists but its owner is a different account (the UAC step was answered with someone else's credentials, so the owner-only DACL is right to refuse us), 231 = every instance of it is busy, 109 = a live connection was dropped. Without that split, "the helper never came up" and "the helper came up but will not take work" look identical on screen, and nobody can tell which machine is at fault. Two such batches in a row close the channel for the rest of the session — spawning the helper *itself* costs a UAC prompt, so re-trying a channel this machine cannot use would add a prompt of our own making to **every** apply, which is worse than the pre-helper behaviour. Every batch op (`netsh set …`) is an idempotent setting, so re-running a half-delivered batch down the fallback path costs nothing.
 4. **Never slice a `&str` by byte offset — command output is *lossily* decoded.**
    CP936 Chinese becomes 3-byte `U+FFFD` (the `�` in logs), so `&line[i..i + 17]` panics the instant `i` lands inside one (`byte index N is not a char boundary`).
    `platform.rs::extract_mac` therefore scans `line.as_bytes()`, skips any window containing a non-ASCII byte, and only then builds the `&str`; the regression test uses the bytes captured from a real Chinese Windows box.
@@ -765,9 +779,10 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 ### 10.1 i18n (`src-tauri/src/i18n.rs` + `i18n/*.json`)
 
 - 5 languages (zh / en / zh-TW / ja / ko), **`en.json` is the baseline**; dictionaries are embedded into the binary at compile time via `include_str!`, so no file is read at runtime and no packaging omission can occur.
-- **English is the default on every platform, and any other language is a user choice** — nothing depends on a locale guess. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary.
+- **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
+  The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`pal`/`act`/`net`/`upd`/`dlg` today, **458 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **508 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -811,7 +826,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 ### 10.4 Software settings (`src-tauri/src/appconfig.rs`)
 
 `config.json` 决定网络怎么配，`settings.json` 决定这个应用怎么表现。两者的分界不是「哪些字段碰巧放在
-哪里」，而是一句判据：**改了它会改变自动化行为吗？** 不会的（语言、日志保留天数）才进软件配置。
+哪里」，而是一句判据：**改了它会改变自动化行为吗？** 不会的（语言、日志保留天数、升级请求走哪条出口）才进软件配置。
 这条分界换来两个可验证的性质：编辑器保存不会改掉用户的界面语言，换语言也不会让引擎 Wake 重评估一次。
 
 - **位置**：`paths::settings_path()`，即用户配置目录下的 `settings.json`。与 `config_path()` 的差别是刻意的 ——
@@ -819,7 +834,13 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
   这台机器上这个用户的偏好，从源码树里带一份出来，等于让仓库替每个用户决定他的界面语言。
 - **读取时机**：主流程最开始（在 `log::init` 之前），因为日志要用它里面的保留天数；读不出来时不终止进程，
   用默认值起界面并记一条 `app.settings_failed`。文件不存在 = 全部默认值；格式错误 = 一条会写进日志的 `Err`。
-- **只有两个字段**是故意的。第三个字段该不该进来，先问上面那句判据。
+- **只有四个字段**（语言、配色、日志保留天数、升级代理）是故意的。第五个字段该不该进来，先问上面那句判据。
+- **配色存的是那一档选择，不是当时算出来的颜色**：`theme` 取 `system` / `light` / `dark`，加载时认不出的值
+  归到 `system`；渲染哪一套由 `appconfig::theme_now` 现算 —— `system` 那一档要问操作系统
+  （PAL 的 `ui_prefers_dark`，macOS 读 `defaults read -g`、Windows 读 `AppsUseLightTheme`、Linux 读
+  `gsettings`，问不到时退深色，因为深色是这套界面的设计基准）。把算出来的那一个写回文件就等于养一份缓存，
+  而它会在系统自己换档（日落后）的那一刻开始说谎。四座窗口因此不各自实现一遍深浅判定：值随
+  `netsense://status` 的 `theme` 广播（面板、编辑器跟着换），或由 `get_theme` 现问一次（软件设置、日志窗口）。
 - **开机启动不在文件里**：它的真相在操作系统里 —— macOS 是 `~/Library/LaunchAgents/com.netsense.app.plist`
   （`RunAtLoad`），Linux 是 `$XDG_CONFIG_HOME/autostart/netsense.desktop`（变量未设时即
   `~/.config/autostart/netsense.desktop`，桌面环境只按这个变量找条目），Windows 是
@@ -830,6 +851,65 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **平台分支用运行时的 `std::env::consts::OS`**，不是 `#[cfg]`：三条分支因此在同一台 macOS 上就能
   编译、lint、测试（含生成的 plist / `.desktop` / 注册表参数这些纯函数），而 `NetworkPlatform` trait 不必
   为这一个功能长出一个方法。注册表值里的引号一律剥掉，路径不能把自己的值闭合出去再拼参数。
+
+### 10.5 Backup（`src-tauri/src/backup.rs`）
+
+一份备份就是一个 JSON，装下三样：`config.json`、`settings.json`、受信脚本目录里的脚本。备份目录是
+「config.json 所在目录」下的 backups/，文件名为 netsense-backup-YYYYmmdd-HHMMSS[-n].json。
+
+- **三份路径只从 `AppState` 取**（`ipc::backup_sources`）。模块不接受「配置目录」这种字符串参数，也不从
+  `config_path()` 反推 `settings_path()`：前者有「可执行文件同级」那一档兜底而后者故意没有，两条路径因此
+  可以不在同一个目录里。猜出来的那一份会备到别处去，而「备份成功」的提示照样出现。脚本目录名同理只有
+  `paths::SCRIPTS_DIR` 一处定义 —— 备的那一个和 `run_script` 信任的那一个不可能是两个目录。
+- **恢复的门槛按顺序排在动盘之前**：文件名形状 → 读盘 → JSON → `kind` / `version` → 「里面至少有一样」 →
+  配置 `validate()` + 软件配置 `clamped()` → 把当前文件另存一份（就是 `export()`）→ 落盘 → 重建脚本
+  （Unix 上补回执行位）。前面几道全过才动手，所以一个被拒绝的备份不会留下半个状态。`clamped()` 是必需的：
+  一份备份不该把 `log_retention_days = 9999` 塞进日志模块，就像它不该塞进一个不在 allow-list 里的脚本。
+- **`import` 只认自己写过的文件名**，`list` 用同一个 `is_backup_name` 过滤，于是界面递不出目录外的路径，
+  手放进备份目录的文件也不会成为恢复选项。形状校验发生在任何文件系统访问之前 —— 有一条测试专门问：
+  只递进一个坏名字时，backups 目录有没有被顺手建出来。
+- **导出先写 `.part` 临时文件再 rename**：那个后缀正落在 `is_backup_name` 拒绝的那一类名字里，所以一次
+  被中断的导出永远不会被认成一个备份。
+- **落盘之后内存里那份也得跟上**：`ipc::import_backup` 写回 `AppState.config` / `settings`，重设界面语言与
+  日志保留窗口，并把 `config_mtime` 对齐到刚写入文件的 mtime。引擎是按 mtime 判「配置变了没有」的，不
+  对齐就会在恢复之后记一条假的「配置已重载」，让用户以为恢复了两次。
+- **体积上限**（单文件 1 MiB / 合计 8 MiB / 200 个文件）在导出与读取两侧都判。脚本按**字节**存 base64，
+  不按文本：Windows 上的 `.ps1` 常常是 UTF-16，那份字节流根本不是合法 UTF-8，按文本读会在还没落盘之前
+  就失败 —— 而一份备不下脚本的备份，用户看不出它少了一样。
+
+### 10.6 Update proxy（`src-tauri/src/netproxy.rs`）
+
+本应用只有两次对外请求：检查更新时拉 GitHub API，以及下载安装包与 `SHA256SUMS`。这一节管的就是这两次
+请求走哪条出口。它不参与任何条件求值、不改任何下发内容 —— 按 §10.4 那句判据，它属于软件配置。
+
+- **三态，而不是一个输入框**：`direct` / `system` / `manual` + 一个地址，缺省 `system`。三态各挡一种实况：
+  代理客户端没在跑而系统里留着一条旧地址（`direct` 就是那个开关）；换了网络希望自动跟上（`system`，每次
+  请求现问一次操作系统）；本机的代理只监听某个端口而操作系统里根本没配（`manual`）。「跟随系统」不缓存
+  读到的值 —— 缓存会造出一个「昨天还通、今天不明不白不通」的状态，而代理恰恰是用户随时会在系统设置里
+  改的东西。
+- **`direct` 发的是 `--noproxy "*"`，不是「不加参数」**：Linux 桌面会话里 `http_proxy` 这类环境变量很常见，
+  只省略参数等于让环境变量继续生效，用户按下的那个开关并没有落下。
+- **地址形状只认 `scheme://host[:port]`**（允许 `user:pass@` 前缀），scheme 白名单是 `curl --proxy` 认的那
+  六个：`http` / `https` / `socks4` / `socks4a` / `socks5` / `socks5h`；整串不许出现空白与控制字符；不接受
+  路径段。两条严格都是功能性的：白名单顺带挡掉 `file://` / `data://` / `ftp://`，否则一个「代理地址」就有
+  本事把更新请求变成本地文件读取；不许空白是因为这个字符串会原样成为一个进程的参数（Windows 上还会进
+  PowerShell 的单引号串），空格与换行是拼出第二条参数的唯一途径。路径段被收下只会让人以为它起了作用。
+- **认不出形状的手填地址退回 `direct`**（见 `AppConfig::clamped()`），而不是退回 `system`：退到跟随系统
+  等于把这台机器的出口换成另一个用户在这台机器上配的东西 —— 那是用户刚亲手否掉的选择；直连至少是
+  「没有代理时本来会怎么走」。
+- **系统代理怎么问**：macOS 跑一次 `scutil --proxy`，按 HTTPS → HTTP → SOCKS 取第一个 `*Enable` 为 1、
+  有 host 且 port>0 的条目（只有 PAC 时算「没有代理」）；Linux 走 `gsettings`（`mode=manual` 时先 HTTP
+  再 SOCKS）；Windows 不读。两个解析器都是纯函数，输入输出即字典，所以三条分支在任何一台机器上都测得全。
+- **Windows 上 `system` 仍走 PowerShell `Invoke-WebRequest`**（与已实测过的那条命令逐字相同），`direct` /
+  `manual` 走 `curl.exe`：`Invoke-WebRequest -Proxy` 表达不了 socks，而 Windows 10 1803 起自带 curl ——
+  下载那一腿本来就在用它。已知边界：curl 在 Windows 上不读 WinINET 里那份系统代理，所以那一腿的
+  「跟随系统」只能由 PowerShell 实现；这是既有行为，不是这一版引入的。
+- **探测只挂在显式动作上**：`get_proxy_state` 由设置窗口打开时与保存后各调一次，**不进** `get_app_settings`
+  —— 那个每次窗口获得焦点都会被调，popup.html 也调它，而 Linux 上「问一次系统代理」是好几条 `gsettings`
+  子进程。界面上「现在走……」那一行说的是磁盘上那份选择会怎么落地，不是实时监视器。
+- **不进 `NetworkPlatform` trait**：这一项不需要任何平台 API，只有两个纯解析函数加一次子进程调用。先例是
+  §10.4 那条开机启动（运行时 `std::env::consts::OS` 分支）和 `platform::system_ui_language()` 这类 PAL 自由
+  函数。为它给三条腿各加一个方法，换来的是「三平台都要覆盖」的成本而没有一分类型安全收益。
 
 ---
 
@@ -908,7 +988,7 @@ Linux `$XDG_CONFIG_HOME/netsense/config.json`，默认 `~/.config/netsense/`）�
 按用户存放意味着重装不掉配置，而签过名的 macOS `.app` 与只读的 `Program Files` 都不该被写入。把 `config.example.json` 复制一份改名即用。
 Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writable, otherwise `<temp>/NetSense/logs`. `scripts/` is resolved against the directory that actually holds the chosen `config.json`, so the README's "relative path = next to config.json" stays true wherever the config lives. The panel's **Logs** button opens the log window, and that window prints the directory it is really reading —— 目录可能被后端换过（用户目录不可写时退到临时目录），界面自己拼的那个路径会说谎。 A panic hook writes panics into that same file, so a silent exit is never silent any more.
 
-> **Windows asks UAC once per app session** (the first apply spawns the resident elevated helper, §9.6 "Four key Windows backend designs" rule 3; later batches ride the pipe). To remove that prompt too: launch once as administrator (after that the in-process privilege channel shows "no authorization needed"). Elevation for user scripts still asks every run by design.
+> **Windows asks UAC once per app session** (the first apply spawns the resident elevated helper, §9.6 "Four key Windows backend designs" rule 3; later batches ride the pipe). On a machine that cannot use that channel the count is back to one per batch, and the first such batch says why in the log. To remove the prompt too: launch once as administrator (after that the in-process privilege channel shows "no authorization needed"). Elevation for user scripts still asks every run by design.
 
 ---
 
@@ -1215,7 +1295,9 @@ What no automated gate can reach, and therefore what needs a real machine per OS
 - **Popup panel**: keyboard focus / the blur-collapse rule and Retina coordinate conversion (§9.5).
 - **Privilege channel**: a first install of `scripts/install-priv-helper.sh`, and the UAC prompt count for
   a non-admin Windows user — with the helper it should be **one per GUI session** (first apply asks; later
-  applies ride the pipe), one per batch if the helper was declined or died, still one per run for `elevated` user scripts.
+  applies ride the pipe). If it is not, look for the one log line the fallback writes: its `CreateFile` code
+  says which kind of "cannot reach" this is (§9.6 rule 3), and two such batches close the channel for the rest
+  of the session. `elevated` user scripts still ask once per run.
 - **Integration tests**: mock the PAL and run the 3A-fail chain through the engine thread itself, so the
   wiring — that `execute_branch` really skips the 3B submission when 3A failed — is pinned and not just
   the state machine (§12).
