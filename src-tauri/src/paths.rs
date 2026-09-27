@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 pub const CONFIG_FILE: &str = "config.json";
 /// 软件配置的文件名（三平台一致）。
 pub const SETTINGS_FILE: &str = "settings.json";
+/// 受信脚本目录的目录名，恒在自动化配置的旁边。
+///
+/// 这个名字必须只有一处定义：`AppState` 按它拼出 `scripts_dir`（引擎执行脚本、
+/// `AllowedScripts` 判定受信），备份模块按它收集与放回脚本。两处各写一遍字面量时，
+/// 备份可以成功地备到另一个目录去 —— 而「恢复了」的提示照样出现。
+pub const SCRIPTS_DIR: &str = "scripts";
 
 /// `$HOME`，POSIX 两侧的用户目录都从它拼出来。
 #[allow(dead_code)] // Windows 腿用不到：那里两个目录直接来自 %APPDATA% / %LOCALAPPDATA%

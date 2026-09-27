@@ -5,12 +5,20 @@
 //! 的界面偏好。混在一起的话，改界面语言会惊动配置热重载与网络重评估，而一份写坏的自动化
 //! 配置也会连带让「日志留几天」一起读不出来。
 //!
-//! ## 只有两个字段
+//! ## 只有四个字段
 //!
-//! `language` 与 `log_retention_days`。看起来该有第三个的「开机启动」**不在这里**：
+//! `language`、`theme`、`log_retention_days`、`proxy`。看起来该有第五个的「开机启动」**不在这里**：
 //! 它的真相在操作系统那一侧（LaunchAgent / 登录项 / 注册表 Run 键），用户也可以绕开本应用
 //! 直接改它（系统设置里就能关掉某个登录项）。存一份布尔值就等于给自己造一个会说谎的缓存 ——
 //! 界面上的勾选框每次都是**读系统**读出来的。
+//!
+//! `theme` 和 `language` 同一条判据，也同一个口径：认不出的值（手改的、从别的机器备过来的）
+//! 退回「跟随系统」，而不是让整份文件一起读不出来 —— 配色错了可远比语言丢了容易发现，
+//! 但它同样不该让用户打不开应用。
+//!
+//! `proxy` 进来是因为它过得了同一句判据：改了它不会改变自动化行为，只改变「检查更新、下载
+//! 安装包」这两次对外请求走哪条路。放在 `config.json` 里就等于让一台机器的网络出口跟着
+//! 自动化配置一起同步给另一台机器。
 //!
 //! ## 三平台的开机启动落地方式
 //!
@@ -27,6 +35,11 @@ use std::path::{Path, PathBuf};
 
 use crate::i18n;
 use serde::{Deserialize, Serialize};
+
+/// 没配过时的界面配色档位。
+pub const DEFAULT_THEME: &str = "system";
+/// 三档配色。认不出的值一律按这一档处理，别让一份手坏的 `settings.json` 拖累整个应用。
+pub const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 /// 没配过时的日志保留天数。
 pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
@@ -48,20 +61,40 @@ pub struct AppConfig {
     /// 但配置文件里不写死它，好让「没设过」和「设成英文」在界面上仍然区分得出来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// 界面配色：`system`（跟随系统）/ `light` / `dark`。缺省 = `system`。
+    ///
+    /// 存的是**用户选的那一档**，不是当下生效的那套颜色：后者是这一档加上操作系统的实况
+    /// 算出来的（见 [`theme_for`]），把它写下来就又造出一个会说谎的缓存 —— 用户在
+    /// 系统设置里把深色改成浅色，本应用记着的那个值立刻就不成立了，界面还照旧。
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// 日志保留天数，按文件名的日期判断（见 `log::cleanup_old`）。
     #[serde(default = "default_retention")]
     pub log_retention_days: u32,
+    /// 「检查更新 / 下载安装包」这两次对外请求走哪条路。缺省 = 跟随系统的代理设置。
+    ///
+    /// 它是唯一一个会影响对外字节流的字段，判据仍然成立：它改变的是本应用怎么上网，
+    /// 不改变任何 Profile 的匹配结果、也不改变任何下发内容。三态与探测都在
+    /// [`crate::netproxy`] 里，这里只管存什么。
+    #[serde(default)]
+    pub proxy: crate::netproxy::ProxySetting,
 }
 
 fn default_retention() -> u32 {
     DEFAULT_LOG_RETENTION_DAYS
 }
 
+fn default_theme() -> String {
+    DEFAULT_THEME.to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             language: None,
+            theme: DEFAULT_THEME.to_string(),
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
+            proxy: crate::netproxy::ProxySetting::default(),
         }
     }
 }
@@ -91,8 +124,24 @@ impl AppConfig {
     ///
     /// 为什么加载时收而不是拒绝：这份文件是用户可以直接编辑的，一句 `0` 或 `9999`
     /// 不该让整个应用起不来；但放过去又会让日志模块按一个荒谬的值删文件（或永远不删）。
+    ///
+    /// 代理地址走同一套思路，只是「收」的方向不同：一个认不出形状的手填地址**退回直连**，
+    /// 而不是退回「跟随系统」。跟随系统等于把这台机器的出口换成这台机器上配着的那个代理 ——
+    /// 那正是用户填一个手动地址时要绕开的东西；直连则至少是「没代理时本来会怎么走」。
+    ///
+    /// 配色退的是**默认档**（跟随系统）：它和日志天数一样，越界值没有「更接近用户意图」的
+    /// 方向可猜，而三档里只有它是「让用户自己挑」以外的兜底。
     pub fn clamped(mut self) -> Self {
+        use crate::netproxy::ProxySetting;
+        self.theme = normalize_theme(&self.theme).to_string();
         self.log_retention_days = clamp_retention(self.log_retention_days);
+        self.proxy = match &self.proxy {
+            ProxySetting::Manual { url } => match crate::netproxy::normalize_proxy_url(url) {
+                Some(u) => ProxySetting::Manual { url: u },
+                None => ProxySetting::Direct,
+            },
+            other => other.clone(),
+        };
         self
     }
 
@@ -109,6 +158,37 @@ impl AppConfig {
 
 pub fn clamp_retention(days: u32) -> u32 {
     days.clamp(MIN_LOG_RETENTION_DAYS, MAX_LOG_RETENTION_DAYS)
+}
+
+/// 配色档位收敛：三档之外的值都当没设过。
+pub fn normalize_theme(s: &str) -> &'static str {
+    THEMES.iter().copied().find(|t| *t == s).unwrap_or(DEFAULT_THEME)
+}
+
+/// 这一档此刻该渲染成哪一套颜色（`"light"` / `"dark"`，写进 `<html data-theme>`）。
+///
+/// `os_prefers_dark` 是 [`crate::platform::NetworkPlatform::ui_prefers_dark`] 的回答，
+/// 由调用方递进来而不是在这里自己问：「跟随系统」要问系统，而**问不到**的时候得有人决定
+/// 按哪套渲染 —— 深色是这套界面的设计基准，也是没有任何线索时的答案。把它做成参数，
+/// 这一条判据就有了单元测试，而不是只能在某台特定机器上眼看。
+pub fn theme_for(setting: &str, os_prefers_dark: Option<bool>) -> &'static str {
+    match normalize_theme(setting) {
+        "light" => "light",
+        "dark" => "dark",
+        // system
+        _ => {
+            if os_prefers_dark.unwrap_or(true) {
+                "dark"
+            } else {
+                "light"
+            }
+        }
+    }
+}
+
+/// [`theme_for`] 的现问系统版本。
+pub fn theme_now(setting: &str) -> &'static str {
+    theme_for(setting, crate::platform::system_prefers_dark())
 }
 
 // —————————————————————————————— 开机启动 ——————————————————————————————
@@ -319,6 +399,7 @@ fn refs(args: &[String]) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netproxy::ProxySetting;
 
     fn home() -> PathBuf {
         PathBuf::from("/home/u")
@@ -415,7 +496,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(AppConfig::load(&p).unwrap(), AppConfig::default());
 
-        let cfg = AppConfig { language: Some("ja".into()), log_retention_days: 30 };
+        let cfg = AppConfig {
+            language: Some("ja".into()),
+            theme: "light".into(),
+            log_retention_days: 30,
+            proxy: ProxySetting::Manual {
+                url: "http://127.0.0.1:7890".into(),
+            },
+        };
         cfg.save(&p).unwrap();
         assert_eq!(AppConfig::load(&p).unwrap(), cfg);
 
@@ -424,7 +512,44 @@ mod tests {
         let got = AppConfig::load(&p).unwrap();
         assert_eq!(got.language.as_deref(), Some("ko"));
         assert_eq!(got.log_retention_days, DEFAULT_LOG_RETENTION_DAYS);
+        // 同样地，缺 proxy 是「跟随系统」而不是「直连」：一份从来没有过这个字段的旧文件
+        // 不该在升级后变成「代理客户端开着也不走代理」。
+        assert_eq!(got.proxy, ProxySetting::System);
+        // 缺 theme 是「跟随系统」。一份从来没有过这个字段的文件不该在升级后被钉死成
+        // 某一套配色 —— 用户要的是界面跟着他自己系统的样子走。
+        assert_eq!(got.theme, DEFAULT_THEME);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 手改坏（或从别的机器备过来）的代理地址在加载时就收掉，而且退向是**直连**：
+    /// 跟随系统等于换回用户刚亲手否掉的那个出口。
+    #[test]
+    fn a_nonsense_proxy_address_falls_back_to_direct() {
+        let bad = AppConfig {
+            language: None,
+            theme: DEFAULT_THEME.into(),
+            log_retention_days: 7,
+            proxy: ProxySetting::Manual {
+                url: "file:///etc/passwd".into(),
+            },
+        }
+        .clamped();
+        assert_eq!(bad.proxy, ProxySetting::Direct);
+        let good = AppConfig {
+            language: None,
+            theme: DEFAULT_THEME.into(),
+            log_retention_days: 7,
+            proxy: ProxySetting::Manual {
+                url: "SOCKS5://10.0.0.1:1080".into(),
+            },
+        }
+        .clamped();
+        assert_eq!(
+            good.proxy,
+            ProxySetting::Manual {
+                url: "socks5://10.0.0.1:1080".into()
+            }
+        );
     }
 
     #[test]
@@ -434,9 +559,33 @@ mod tests {
         assert_eq!(clamp_retention(14), 14);
         // 手改出来的越界值也要在加载时就收住：调用方拿到的永远是可执行的值
         assert_eq!(
-            AppConfig { language: None, log_retention_days: 0 }.clamped().log_retention_days,
+            AppConfig {
+                language: None,
+                theme: DEFAULT_THEME.into(),
+                log_retention_days: 0,
+                proxy: ProxySetting::default(),
+            }
+            .clamped()
+            .log_retention_days,
             MIN_LOG_RETENTION_DAYS
         );
+    }
+
+    /// 配色档位的两条退路：认不出的值当没设过（不能让一份手改坏的 `settings.json` 连带
+    /// 语言与日志保留一起读不出来），而「跟随系统」在问不到系统时按深色渲染 —— 深色是这套
+    /// 界面的设计基准，也是没有任何线索时该给的样子。
+    #[test]
+    fn theme_normalizes_unknown_settings_and_resolves_the_system_step() {
+        assert_eq!(normalize_theme("light"), "light");
+        assert_eq!(normalize_theme("Dark"), DEFAULT_THEME);
+        assert_eq!(normalize_theme("blue"), DEFAULT_THEME);
+        assert_eq!(theme_for("light", Some(true)), "light");
+        assert_eq!(theme_for("dark", Some(false)), "dark");
+        assert_eq!(theme_for("system", Some(true)), "dark");
+        assert_eq!(theme_for("system", Some(false)), "light");
+        assert_eq!(theme_for("system", None), "dark");
+        // 认不出的那一档走的就是「跟随系统」这条路，不是另发明一个第四态。
+        assert_eq!(theme_for("blue", Some(false)), "light");
     }
 
     /// 一份不是 JSON 的文件要报出来：它是用户手改坏的结果，静默用默认值等于

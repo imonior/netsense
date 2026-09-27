@@ -70,8 +70,8 @@ impl AppState {
     ) -> AppState {
         let scripts_dir = config_path
             .parent()
-            .map(|p| p.join("scripts"))
-            .unwrap_or_else(|| PathBuf::from("scripts"));
+            .map(|p| p.join(crate::paths::SCRIPTS_DIR))
+            .unwrap_or_else(|| PathBuf::from(crate::paths::SCRIPTS_DIR));
         let mut engine = Engine::new();
         engine.set_warnings(warnings);
         // 用当前 mtime 作初值：否则引擎第一轮会把刚读出来的配置再「重载」一次，
@@ -233,11 +233,19 @@ pub fn status_payload(state: &Arc<AppState>, st: &platform::InterfaceStatus) -> 
             state.config_path.display().to_string(),
         )
     };
+    // 配色给的是**当下该渲染的那一套**（`light` / `dark`），不是 `settings.json` 里存的档位：
+    // 四座窗口拿它直接写 `<html data-theme>`，不需要各自再问一次系统。「跟随系统」那一档
+    // 在系统设置里被翻过来时，这个值最迟一个缓存周期（60s，见 `system_prefers_dark`）跟着变。
+    let theme = {
+        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        crate::appconfig::theme_now(&s.theme)
+    };
     serde_json::json!({
         "status": st,
         "engine": engine_view,
         "profiles": profiles,
         "language": i18n::current().code(),
+        "theme": theme,
         "priv": priv_channel().code(),
         "config_path": config_path,
     })

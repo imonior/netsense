@@ -48,14 +48,26 @@ fn emit_progress(app: &AppHandle, phase: &str, percent: u32) {
 
 /// 端到端执行升级：Homebrew 安装走 `brew upgrade`，其余走「下载 + 校验 + 安装」。
 /// 出错时返回 Err（前端据此回退到打开 Release 页）。
-pub fn run_update(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
+///
+/// `choice` 是软件设置里选的网络出口，它由调用方（`ipc::run_update`）与 `check_update`
+/// **同一个来源**取出：检查更新用什么出口，下载与取校验值就用什么出口。Homebrew 渠道不带
+/// 它 —— brew 有自己的代理配置，本应用不该越过那条配置。
+pub fn run_update(
+    app: &AppHandle,
+    t: &UpdateTarget,
+    choice: &crate::netproxy::ProxyChoice,
+) -> Result<(), String> {
     if is_brew_install() {
         return run_brew(app, t);
     }
-    native_update(app, t)
+    native_update(app, t, choice)
 }
 
-fn native_update(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
+fn native_update(
+    app: &AppHandle,
+    t: &UpdateTarget,
+    choice: &crate::netproxy::ProxyChoice,
+) -> Result<(), String> {
     // `UpdateTarget` 是前端回传的，按外部输入对待：scheme 只认 https。
     require_https(&t.download_url)?;
     let cu = t
@@ -66,10 +78,10 @@ fn native_update(app: &AppHandle, t: &UpdateTarget) -> Result<(), String> {
     require_https(cu)?;
 
     emit_progress(app, "download", 0);
-    let tmp = download_file(app, &t.download_url, &t.asset_name, t.size)?;
+    let tmp = download_file(app, &t.download_url, &t.asset_name, t.size, choice)?;
 
     // 校验 SHA256：任何一环拿不到可信哈希都中止，不「告警后继续」。
-    let sums = crate::ipc::fetch_url(cu)
+    let sums = crate::ipc::fetch_url(cu, choice)
         .map_err(|e| i18n::tf("upd.sums_fetch", &[("error", &e)]))?;
     let expected = parse_hash(&sums, &t.asset_name)
         .ok_or_else(|| i18n::tf("upd.not_in_sums", &[("asset", &t.asset_name)]))?;
@@ -112,6 +124,7 @@ fn download_file(
     url: &str,
     name: &str,
     expect_size: Option<u64>,
+    choice: &crate::netproxy::ProxyChoice,
 ) -> Result<PathBuf, String> {
     let dest = new_private_file("update", &format!("-{}", sanitize(name)))?;
 
@@ -134,6 +147,7 @@ fn download_file(
             "-o",
         ])
         .arg(&dest)
+        .args(crate::netproxy::curl_proxy_args(choice))
         .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -289,8 +303,11 @@ fn read_uid() -> u32 {
 }
 
 /// 独占写出一个待执行的私有脚本（0600：`/bin/sh <path>` 不需要执行位）。
+///
+/// `pub(crate)`：macOS 的免密通道安装也走这条路 —— 要交给 root 执行的临时脚本，
+/// 独占创建与 `verify_private` 这两条规则没有「只有升级用得上」的道理。
 #[cfg(unix)]
-fn write_private_script(prefix: &str, content: &str) -> Result<PathBuf, String> {
+pub(crate) fn write_private_script(prefix: &str, content: &str) -> Result<PathBuf, String> {
     let p = new_private_file(prefix, ".sh")?;
     std::fs::write(&p, content).map_err(|e| {
         let _ = std::fs::remove_file(&p);
