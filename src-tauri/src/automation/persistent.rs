@@ -120,7 +120,7 @@ pub(crate) struct TickWait {
 ///
 /// 重入闸（`busy`）是这里的要点，而不是优化：两次同一个动作并发执行，等于让第一条
 /// 命令的恢复动作被第二条打断 —— 用户看到的现象是「VPN 每 30 秒被自己踢一次重连」。
-/// 闸由 tick 线程自己在退出时打开（`Drop`），所以超时之后到线程真的结束之前，
+/// 闸由 tick 线程自己在检查跑完那一刻打开（`Drop`），所以超时之后到那次检查真的结束之前，
 /// 后续 tick 都会拿到 `started: false`，这正是我们要的「不再叠加」。
 pub(crate) fn await_tick(tick: Arc<dyn Tick>, budget: Duration, busy: &Arc<AtomicBool>) -> TickWait {
     if busy
@@ -144,7 +144,11 @@ pub(crate) fn await_tick(tick: Arc<dyn Tick>, budget: Duration, busy: &Arc<Atomi
             }
         }
         let _gate = Gate(gate_busy);
-        let _ = tx.send(tick.tick());
+        let outcome = tick.tick();
+        // 先开闸再交回结论：顺序反过来时，收方拿到结论的那一刻闸可能还关着，
+        // 于是「跑完了就该允许下一次检查」这条性质只在多数时候成立。
+        drop(_gate);
+        let _ = tx.send(outcome);
     });
     match rx.recv_timeout(budget) {
         Ok(outcome) => TickWait {

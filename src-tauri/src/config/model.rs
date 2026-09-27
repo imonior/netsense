@@ -228,6 +228,7 @@ pub struct Condition {
     #[serde(rename = "type")]
     pub kind: ConditionType,
     /// 比较值。MAC 类条件两侧都会归一化（大小写与 `:`/`-` 分隔符差异）。
+    /// `network_interface` 额外认 `*`：任何一张网卡在用都算命中。
     pub value: String,
 }
 

@@ -71,10 +71,13 @@ pub fn eval_condition(c: &Condition, snap: &NetworkSnapshot) -> ConditionStatus 
         }
         crate::config::ConditionType::GatewayMac => mac_eq(snap.gateway_mac.as_deref(), &c.value),
         crate::config::ConditionType::Bssid => mac_eq(snap.bssid.as_deref(), &c.value),
-        crate::config::ConditionType::NetworkInterface => snap
-            .interfaces
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case(c.value.trim())),
+        crate::config::ConditionType::NetworkInterface => {
+            // `*` 是接口条件的通配（编辑器下拉里的「任意网卡」）：判据仍是同一份
+            // 「在用的普通网卡」集合，只是不比名字 —— 有任何一张在用就算命中。
+            let want = c.value.trim();
+            (want == "*" && !snap.interfaces.is_empty())
+                || snap.interfaces.iter().any(|n| n.eq_ignore_ascii_case(want))
+        }
     };
     if hit {
         ConditionStatus::Match
@@ -327,6 +330,34 @@ mod tests {
         assert!(
             eval_profile(&p, &snap()).matched,
             "有线+无线同时插着时，第二张网卡也算「在」"
+        );
+    }
+
+    /// 「任意网卡」（`*`）是编辑器下拉里的一条真候选，而它成立与否仍取决于「这台机器有没有
+    /// 在用的普通网卡」：一张都没有时不能命中，否则它就退化成「无条件命中」，
+    /// 和 `always_if_no_other_profile` 那条兜底撞在一起。
+    #[test]
+    fn interface_wildcard_matches_any_live_nic_and_nothing_when_none_is_live() {
+        let p = profile(
+            "o",
+            true,
+            vec![rule(
+                "r1",
+                true,
+                vec![cond("c1", true, ConditionType::NetworkInterface, "*")],
+            )],
+        );
+        assert!(
+            eval_profile(&p, &snap()).matched,
+            "en0 / en7 里任何一张在用都算命中"
+        );
+        let idle = NetworkSnapshot {
+            interfaces: Vec::new(),
+            ..snap()
+        };
+        assert!(
+            !eval_profile(&p, &idle).matched,
+            "没有任何在用网卡时，通配条件不该命中"
         );
     }
 

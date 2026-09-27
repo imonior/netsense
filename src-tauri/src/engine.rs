@@ -292,6 +292,11 @@ pub struct Engine {
     pub decision: Decision,
     scheduler: Scheduler,
     last_sample: Option<Instant>,
+    /// 本机网络刚被本进程改过（3A 下发 / 回落 DHCP），下一轮必须**先重采样再判定**，
+    /// 且不能因为「没有 Profile 到期」而提前收工。不设这个标记时：静态 IP 下发成功之后，
+    /// 指纹里的每一项（SSID / 网关 MAC / BSSID / 网卡集合）都没动，于是没有任何 Profile
+    /// 到期、这一轮什么都不广播，界面上挂着的仍是下发前那份快照。
+    resample_wanted: bool,
     first_pass_done: bool,
     /// 当前生效的 Profile id
     active_id: Option<String>,
@@ -331,6 +336,7 @@ impl Default for Engine {
             decision: Decision::NoActiveProfile,
             scheduler: Scheduler::default(),
             last_sample: None,
+            resample_wanted: false,
             first_pass_done: false,
             active_id: None,
             applied_fp: None,
@@ -367,6 +373,21 @@ impl Engine {
         self.last_sample = Some(now);
         self.snapshot = snap;
         self.scheduler.observe(&self.snapshot, now);
+    }
+
+    /// 记一笔「本机网络刚被改过」：下一轮无条件重采样并重算判定。
+    ///
+    /// 由**本进程动过网络**的那些点调用（3A 下发、fallback 下发、面板与健康监测的
+    /// 回落 DHCP），成败都记 —— 失败分支里可能已经回落过一次，现场同样变了。
+    /// 3B1 的动作不改网络，别把它挂进来：那会让每 N 秒一次的启动脚本也拖着引擎重采一遍。
+    pub fn request_resample(&mut self) {
+        self.resample_wanted = true;
+    }
+
+    /// 取走并清掉 [`Engine::request_resample`] 的请求。取走而不是读：一次下发只需要
+    /// 一次强制轮，留在身上会让之后每一轮都绕过节律判定。
+    fn take_resample_request(&mut self) -> bool {
+        std::mem::replace(&mut self.resample_wanted, false)
     }
 
     /// 本轮到期的 Profile（空 = 什么都不用做）。
@@ -635,6 +656,9 @@ impl Engine {
         // —— 3A：下发 + 回读校验 ——
         let mut three_a = ThreeAOutcome::Skipped;
         if let Some(net) = &branch.network {
+            // 只要真下发过，就得让下一轮重看一遍现场：3A 的读回校验用的是 `fresh_status`
+            // （绕过缓存），而引擎这份快照走的是缓存路径，两者在这里不是一回事。
+            self.request_resample();
             match network::apply_3a(&state.plat, net) {
                 Stage3A::Failed { reason } => {
                     // 保底：探测里开了 fallback 就回落 DHCP（3A 失败处置的一部分）
@@ -818,6 +842,8 @@ impl Engine {
                 eng.fallback_fp = None;
                 eng.active_id = None;
                 eng.monitoring = false;
+                // 和面板上那颗「设为 DHCP」按钮同理：网络刚被改掉，下一轮必须先重采样。
+                eng.request_resample();
             } // 广播必须在锁外（见模块头的加锁纪律）
             log::warn(&i18n::tf("engine.monitor_fallback", &[("name", &name)]));
             crate::state::emit_action(
@@ -1079,11 +1105,19 @@ fn reload_if_changed(state: &Arc<AppState>) -> bool {
 /// 一轮：采样（锁外）→ 评估 → 迁移 → 广播（锁外）。
 fn pass(state: &Arc<AppState>, manual: Option<String>) {
     let now = Instant::now();
-    if state
+    // 上一次下发说过「现场被我改过了」：这一轮跳过采样节律，也跳过「没有 Profile 到期」
+    // 的提前收工，否则会拿旧快照再广播一次，界面继续显示下发之前的参数。
+    let forced = state
         .engine
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .sample_due(now)
+        .take_resample_request();
+    if forced
+        || state
+            .engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sample_due(now)
     {
         let snap = NetworkSnapshot::sample(&state.plat);
         state
@@ -1094,7 +1128,7 @@ fn pass(state: &Arc<AppState>, manual: Option<String>) {
     }
     let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-    if manual.is_none() && eng.due(&cfg, now).is_empty() {
+    if manual.is_none() && !forced && eng.due(&cfg, now).is_empty() {
         return;
     }
     eng.evaluate(&cfg, now);
@@ -1248,7 +1282,11 @@ fn apply_fallback(state: &Arc<AppState>, eng: &mut Engine, cfg: &Config) {
     if eng.fallback_fp.as_deref() == Some(fp.as_str()) {
         return;
     }
-    if let Stage3A::Failed { reason } = network::apply_3a(&state.plat, net) {
+    // 下发的就是本机真实的网络改动：下一轮必须先重采样，否则「零命中 → 回落 DHCP」
+    // 之后引擎还拿着静态 IP 时代的旧快照，指纹里的 primary/接口列表都可能是老的。
+    eng.request_resample();
+    let applied = network::apply_3a(&state.plat, net);
+    if let Stage3A::Failed { reason } = applied {
         log::error(&i18n::tf("engine.fallback_failed", &[("error", &reason)]));
         return;
     }
@@ -1385,6 +1423,10 @@ fn set_dhcp(state: &Arc<AppState>) {
                 eng.applied_fp = None;
                 eng.fallback_fp = None;
                 eng.active_id = None;
+                // 平台状态缓存已由 exec_ops 丢弃，引擎这份快照却不会自己变新：它还是
+                // 切 DHCP 之前采的。不强制重采，下一轮就拿着旧身份判定，面板上的
+                // 匹配状况因此慢一整轮。
+                eng.request_resample();
             }
             let msg = i18n::t("notify.dhcp_done");
             log::info(&msg);
@@ -1750,5 +1792,23 @@ mod tests {
         let mut off = ev("cafe", true);
         off.enabled = false;
         assert_eq!(eng.status_of(&off), DisplayStatus::Disabled, "禁用永远优先于其它判定");
+    }
+
+    /// 静态 IP 下发之后，指纹里的每一项都没动（SSID / 网关 MAC / BSSID / 网卡集合），
+    /// 于是没有任何 Profile「到期」，引擎会提前收工、界面继续挂着下发前那份快照。
+    /// `resample_wanted` 就是为了跳过那条捷径，而它必须**只**管住下一轮。
+    #[test]
+    fn a_resample_request_hands_over_to_exactly_one_pass() {
+        let mut eng = Engine::new();
+        assert!(
+            !eng.take_resample_request(),
+            "没人动过网络，就不该有强制轮"
+        );
+        eng.request_resample();
+        assert!(eng.take_resample_request(), "下发之后那一轮必须被强制");
+        assert!(
+            !eng.take_resample_request(),
+            "取走即清：再往后该回到自己的采样节律"
+        );
     }
 }
