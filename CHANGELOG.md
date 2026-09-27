@@ -4,6 +4,94 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-09-28
+
+### Added
+
+- **Tray popup: an "Automation" button, and the running version in the title.** The automation
+  editor used to be reachable only from the software-settings window, and "which build is this"
+  needed that window too
+- **Double-click the tray icon opens the automation editor** (the popup closes first); a single
+  click still opens and closes the popup
+- **Settings: "Follow system" language, which is also what a first run does.** The system's own UI
+  language is read once at startup — AppleLanguages on macOS, the user interface language on
+  Windows, LANGUAGE / LC_ALL / LANG on Linux — and a language NetSense has no dictionary for still
+  ends up in English. Picking a language from the list pins it
+- **Settings: the software settings file gets its own "Open folder" button.** It opens the directory
+  settings.json lives in — usually the same folder the automation config button opens, but not
+  always: a config read from next to the executable is a different place
+- **Editor: "Any adapter" as an interface condition value.** It holds as soon as one ordinary NIC
+  is in use, so a profile no longer has to name a card the dock may take away
+- **Settings: export and restore a backup.** One JSON file holds the automation config, the
+  software config and the scripts in the trusted folder. A restore parses it and runs `validate()`
+  before touching the disk, and writes the files it replaces into that same folder first
+- **Settings: an exit choice for update traffic.** The update check and the installer download are
+  the only two requests this app makes, and each can now go direct, follow the operating system's own
+  proxy, or use one address you type in. "Follow system" is asked at the moment of the request rather
+  than cached, and goes direct when it finds nothing; "Direct" sends an explicit no-proxy flag, so a
+  proxy left behind in the environment is bypassed too. A typed address counts only as
+  scheme://host[:port] in one of the six forms curl acts on, and one it cannot recognise is stored as
+  direct — never as "follow system"
+- **Settings: an Updates card.** It runs the same three commands the panel's update modal runs and shows the same
+  verdict, so "can this update be installed here" has exactly one answer. The window never checks on its
+  own - prompting once per session stays the panel's job
+- **A light color scheme, and a switch for it: Follow system / Light / Dark.** The four windows now read
+  one palette file (`theme.css`) — dark on `:root`, light on `html[data-theme="light"]` — and each window's
+  own variables are only aliases of it, so no name in the markup had to change. Light is not dark inverted:
+  chips and status badges take another ladder on a bright background (a pale one under dark text), and every
+  piece of text was checked against the background it sits on. "Follow system" is resolved by the backend
+  rather than by CSS — `ui_prefers_dark` asks the operating system once, and the answer travels on the
+  `netsense://status` every window already listens to, so the four change together. `set_theme` stores the
+  choice (`system` / `light` / `dark`) in settings.json — the choice, never the resolved value, which would
+  start lying the moment the system flips on its own — and `get_theme` answers for a window just opened
+
+### Changed
+
+- **macOS: one authorization, then none.** On a machine with no passwordless channel, the first
+  configuration change installs it inside the very dialog that change already had to raise: the prompt
+  that used to repeat for every apply now writes the allow-list wrapper and its sudoers rule, and every
+  later apply the allow-list can express goes through `sudo -n` without asking. When the channel cannot
+  be staged (no usable temporary path, a login name that does not fit a sudoers token), that change is
+  applied exactly as it was before. Settings → Runtime hands the access back (**Remove password-free
+  changes**); the next apply asks once more and sets it up again
+- **The tray popup scrolls as one panel.** Each section used to scroll inside itself, so the wheel
+  moved only whatever the cursor was over
+- **Windows and Linux: the popup is placed within the monitor's work area,** so it no longer covers
+  the taskbar
+- **The editor's current-network block follows every status broadcast,** adapter details included.
+  It was read once when the window opened, so an address applied a moment later still showed up as
+  the old one, and match states lagged until the window was reopened
+- **Settings: the allowed-scripts card says what it guards.** It names the two trusted places,
+  prints the real path of the scripts folder, and states that the backend re-checks every run_script
+  — engine-fired or applied by hand — since a config file you import must not run anything alone
+- **The current-network block lost its "Network Hardware" row:** it repeated interfaces the rows
+  above already name. VPN tunnels keep their own row
+- **One dark palette across all four windows.** The automation editor sat on its own colour set, so
+  one app looked like two of them: panels, borders, text, buttons and status chips now read from a
+  single palette, and every window tells the operating system it is dark — so a native dropdown
+  list, scrollbar or checkbox no longer drops a light rectangle into a dark window. Placeholder text
+  and the keyboard focus ring are visible in every window now, too
+
+### Fixed
+
+- **Editor: the interface dropdown lists the adapters this machine carries, not only the ones with
+  a cable in them** — unplugged, it offered a single entry. The empty "—" choice, which could never
+  be saved, is now a real placeholder plus "Any adapter"
+- **macOS: the SSID dropdown lists the networks this system has saved.** The command that reads
+  them wants a device name (en0) rather than a network service name ("Wi-Fi") and was being handed
+  the latter, so the list came back empty
+- **Windows: a machine that cannot use the resident elevation helper no longer pays for the attempt.**
+  Reaching for that helper costs a UAC prompt of its own, so a channel that never answers used to be
+  re-tried — and re-prompted — at every apply, with a fallback nobody could explain. Two failed batches
+  now close the channel for the rest of the session, and the first one records in the log what it hit
+- **Windows: the elevation helper's pipe can now be reached by the app that spawned it.** The helper
+  runs elevated, and a named pipe inherits its creator's integrity level, so the *non-elevated* GUI of
+  that same user — the account the pipe's own DACL had just admitted — was refused write access to it.
+  The authorization was spent, the pipe was listening, and the batch still went the long way round, one
+  prompt per apply. The pipe now carries an explicit Medium label: level with the app, still out of
+  reach for a sandboxed process. This is the failure that matches "UAC every apply" on a machine where
+  the helper does come up; the log line above names any other one
+
 ## [1.0.2] - 2026-09-26
 
 ### Added

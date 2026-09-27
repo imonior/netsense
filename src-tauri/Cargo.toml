@@ -1,6 +1,6 @@
 [package]
 name = "netsense"
-version = "1.0.2"
+version = "1.0.3"
 description = "Cross-platform SSID-aware network profile switcher"
 edition = "2021"
 rust-version = "1.77"
@@ -28,9 +28,11 @@ objc2-core-wlan = "0.3.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 提权 helper（见 platform/win_helper.rs）需要的裸 Win32 API：命名管道、安全描述符、
-# 客户端进程验证。子进程仍走 std::process，所以 windows-sys 的接触面就这三块。
+# 客户端进程验证；外加读系统界面语言那一个调用（「跟随系统」的启动路径，拉起 PowerShell
+# 去问要秒级，而这一下本来就在启动里）。子进程仍走 std::process。
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
