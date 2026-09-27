@@ -21,6 +21,7 @@
 
 mod appconfig;
 mod automation;
+mod backup;
 mod conditions;
 mod config;
 mod detection;
@@ -28,6 +29,7 @@ mod engine;
 mod i18n;
 mod ipc;
 mod log;
+mod netproxy;
 mod network;
 mod paths;
 mod platform;
@@ -71,9 +73,13 @@ fn main() {
         Ok(s) => (s, None),
         Err(e) => (appconfig::AppConfig::default(), Some(e)),
     };
-    if let Some(l) = &settings.language {
-        i18n::set_language(Language::from_code(l));
-    }
+    // `language` 缺省就是「跟随系统」：这时候问的是操作系统自己的界面语言，而不是
+    // 拿英文当默认。读不到（没有这个概念 / 被拒）时才落回英文 —— 英文是字典的基准语言。
+    let lang = match &settings.language {
+        Some(l) => Language::from_code(l),
+        None => Language::from_code(&platform::system_ui_language().unwrap_or_default()),
+    };
+    i18n::set_language(lang);
 
     // 1) 日志 + panic hook 必须排在其余装配之前。
     //
@@ -265,6 +271,7 @@ fn main() {
             ipc::get_status,
             ipc::get_engine_status,
             ipc::get_interfaces,
+            ipc::get_adapters,
             ipc::get_config,
             ipc::save_profile,
             ipc::save_global,
@@ -280,10 +287,20 @@ fn main() {
             ipc::open_log_viewer,
             ipc::close_log_viewer,
             ipc::set_language,
+            ipc::get_theme,
+            ipc::set_theme,
             ipc::get_app_settings,
             ipc::set_autostart,
             ipc::set_log_retention,
+            ipc::uninstall_priv_channel,
             ipc::open_config_folder,
+            ipc::open_app_settings_folder,
+            ipc::get_proxy_state,
+            ipc::set_update_proxy,
+            ipc::export_backup,
+            ipc::get_backups,
+            ipc::import_backup,
+            ipc::open_backups_folder,
             ipc::open_settings,
             ipc::close_settings,
             ipc::get_strings,

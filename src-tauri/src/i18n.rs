@@ -28,7 +28,7 @@ impl Language {
             "zh-tw" | "zh_tw" | "zht" | "chinese-traditional" => Language::ZhTw,
             "ja" | "jp" | "japanese" => Language::Ja,
             "ko" | "kr" | "korean" => Language::Ko,
-            _ => Language::En,
+            _ => from_language_tag(s),
         }
     }
 
@@ -43,8 +43,40 @@ impl Language {
     }
 }
 
-static DICTS: OnceLock<HashMap<Language, HashMap<String, String>>> = OnceLock::new();
-static CURRENT: OnceLock<Mutex<Language>> = OnceLock::new();
+/// 把**系统**报的语言标签折成这五种之一：`zh-Hans-CN`、`zh_CN.UTF-8`、`ja-JP`、
+/// `ko-KR`、`en-US` 都算；认不出来的语言（`fr-FR`、`C`）折成英文。
+///
+/// 为什么折在这里而不是各平台折一次：三平台上报的形状天生不同（macOS 给 BCP-47 的
+/// `zh-Hans-CN`、Linux 给 POSIX 的 `zh_CN.UTF-8`、Windows 只有数字 LANGID），
+/// 而「哪种标签该用哪份字典」是字典的事，不是平台的事。
+///
+/// 繁体的判据写死在这里：地区是 TW / HK / MO，或脚本段是 `Hant`。其余一律简体 ——
+/// 包括只给一个 `zh` 的情形（那种写法在实践里就是 zh-CN）。
+fn from_language_tag(tag: &str) -> Language {
+    let parts: Vec<String> = tag
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    match parts.first().map(String::as_str).unwrap_or("") {
+        "ja" => Language::Ja,
+        "ko" => Language::Ko,
+        "zh" => {
+            let traditional = parts
+                .iter()
+                .skip(1)
+                .any(|p| p == "tw" || p == "hk" || p == "mo" || p == "hant");
+            if traditional {
+                Language::ZhTw
+            } else {
+                Language::Zh
+            }
+        }
+        _ => Language::En,
+    }
+}
+
+static DICTS: OnceLock<HashMap<Language, HashMap<String, String>>> = OnceLock::new();static CURRENT: OnceLock<Mutex<Language>> = OnceLock::new();
 
 fn parse_dict(s: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -187,6 +219,31 @@ mod tests {
         CURRENT.get_or_init(|| Mutex::new(Language::En));
         set_language(Language::En);
         f();
+    }
+
+    /// 「跟随系统」拿到的标签五花八门：macOS 是 BCP-47 的 `zh-Hans-CN`，Linux 是 POSIX
+    /// 的 `zh_CN.UTF-8`，Windows 那一边由 PAL 自己拼。繁体的判据只有 TW / HK / MO / Hant，
+    /// 其余的 `zh` 一律落简体（只给一个 `zh` 时它实际就是 zh-CN）；没有字典的语言落英文。
+    #[test]
+    fn system_language_tags_fold_to_the_five_dictionaries() {
+        with_dicts(|| {
+            let cases = [
+                ("zh-Hans-CN", Language::Zh),
+                ("zh_CN.UTF-8", Language::Zh),
+                ("zh", Language::Zh),
+                ("zh-Hant-TW", Language::ZhTw),
+                ("zh-HK", Language::ZhTw),
+                ("ja_JP.UTF-8", Language::Ja),
+                ("ko-KR", Language::Ko),
+                ("en-US", Language::En),
+                ("fr-FR", Language::En),
+                ("C", Language::En),
+                ("", Language::En),
+            ];
+            for (tag, want) in cases {
+                assert_eq!(Language::from_code(tag), want, "标签 {tag} 折错了");
+            }
+        });
     }
 
     #[test]
