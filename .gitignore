@@ -27,6 +27,8 @@ __pycache__/
 *.swp
 .idea/
 .vscode/
+# 工具往仓库根落的临时文件（有的只是「这一秒这个路径可写吗」的一次性探针）
+*.tmp
 
 # 助手工具目录（IDE / agent 的本地状态，不是项目发布物）
 .workbuddy/
