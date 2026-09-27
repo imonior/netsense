@@ -9,7 +9,8 @@
 //! 原生右键菜单能放的东西（当前网络明细、VPN 段、提权通道、设置 / 日志 / DHCP / 探测 /
 //! 退出）全是面板的**子集**：同一屏内容维护在两处，五种语言里每句文案都要漂移两次，而且
 //! 菜单要在主线程重建（`run_on_main_thread`），面板却在 WebView 里刷新，两处永远对不齐。
-//! 所以这里只留图标：左键、右键都做同一件事 —— 在图标下方开合 [`crate::popup`]。
+//! 所以这里只留图标：左键、右键都做同一件事 —— 在图标下方开合 [`crate::popup`]；
+//! 双击则收起面板、直接打开自动化配置（见 [`crate::popup::open_automation`]）。
 //!
 //! 顺带解决两个观感问题：把「SSID 读不到」和「每次都要授权」并排放在第一行，看起来像
 //! 「读 SSID 需要授权」（实际是**写**配置需要提权，两件事）；提权通道这种排障信息待在
@@ -24,9 +25,33 @@
 use crate::i18n;
 use crate::log;
 use crate::popup;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// 托盘图标的 id —— `build_tray` 建它时用这个名字，[`refresh_tooltip`] 按它找回。
 const TRAY_ID: &str = "main";
+
+/// 两次「抬起」相隔不到这么久，就当作双击。
+///
+/// 判定自己做，是因为 `TrayIconEvent::DoubleClick` **只有 Windows 会发**：macOS 与 Linux
+/// 的原生托盘上，双击到手的仍然是两次 `Click`。自己数一遍，「双击图标 = 打开自动化配置」
+/// 才是三种系统上的同一个行为，而不是只在一家有。500ms 与系统默认双击间隔同量级，比人手
+/// 有意的「关掉再点开」短，误判方向也温和（开出来的编辑器面板上一键就能关）。
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
+fn last_click() -> &'static Mutex<Option<Instant>> {
+    static LAST_CLICK: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST_CLICK.get_or_init(|| Mutex::new(None))
+}
+
+/// 记一次图标「抬起」，返回这次是否构成双击。命中双击后清空 —— 三连击是
+/// 「双击 + 单击」，那一下单击该去开合面板，不该把编辑器再叫一遍。
+fn register_click() -> bool {
+    let mut last = last_click().lock().unwrap_or_else(|e| e.into_inner());
+    let doubled = last.map(|t| t.elapsed() < DOUBLE_CLICK).unwrap_or(false);
+    *last = if doubled { None } else { Some(Instant::now()) };
+    doubled
+}
 
 /// 建托盘图标。`main.rs` 的 `setup` 里调用，失败只记日志、不阻断启动
 /// （托盘只是交互入口，面板窗口仍然可以打开）。
@@ -64,7 +89,19 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                     tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
                     tauri::Size::Logical(s) => (s.width, s.height),
                 };
-                popup::toggle(tray.app_handle(), popup::anchor_center_bottom(x, y, w, h));
+                if register_click() {
+                    popup::open_automation(tray.app_handle());
+                } else {
+                    popup::toggle(tray.app_handle(), popup::anchor_center_bottom(x, y, w, h));
+                }
+                return;
+            }
+            // Windows 会在这两次 Click 之后再发一次 DoubleClick。编辑器本来就已经被上面
+            // 那下叫出来了，这里再叫一次只是把它重新拉到前台 —— 幂等，而且换来的是不依赖
+            // 「自家 WebView 有没有把第二次抬起也发上来」。
+            if let TrayIconEvent::DoubleClick { .. } = &event {
+                *last_click().lock().unwrap_or_else(|e| e.into_inner()) = None;
+                popup::open_automation(tray.app_handle());
             }
         })
         .build(app)?;
