@@ -498,6 +498,41 @@ pub trait NetworkPlatform: Send + Sync {
 
     /// 已保存的无线网络列表（编辑器下拉填充）。平台不支持时返回 `None`。
     fn list_known_ssids(&self) -> Option<Vec<String>>;
+
+    /// 本机**装着**的网卡（含现在没插线、没连上的），每张一条 [`NicInfo`]。
+    ///
+    /// 与 [`list_interfaces`](NetworkPlatform::list_interfaces) 的分工：那张回答「现在连着
+    /// 哪些网」，面板与身份快照用它；这张回答「这台机器有哪几口」，编辑器的接口条件下拉用
+    /// 它。两者不能合成一张：拔着网线时下拉只剩 `en0`，用户就没法提前给另一个口配好网络。
+    ///
+    /// 实现只需填 `name` / `label` / `kind` / `up`（`up` = 链路是否起来了）；地址类字段留
+    /// `None`，界面也不会去读 —— 这里要的是「有哪些口」，不是「每个口现在拿到了什么」。
+    /// 刻意**不带 TTL 缓存**：只有编辑器打开/刷新时才要一份，而缓存会让刚插上扩展坞的
+    /// 那一次刷新继续显示旧清单。
+    fn list_adapters(&self) -> Vec<NicInfo>;
+
+    /// 系统自己的界面语言标签（`zh-CN` / `ja-JP` / `ko-KR` / `en-US` 这一类）。
+    ///
+    /// 只服务一件事：软件配置里选了「跟随系统」时，启动那一刻要知道该说哪种话。
+    /// 取不到就返回 `None`（系统没有这个概念、或读的方式被拒），调用方按英文渲染 ——
+    /// 英文是字典的基准语言，也是这个应用在没有别的线索时的默认值。
+    ///
+    /// 只在启动与切换语言那一刻调用，别放进轮询路径。
+    fn ui_language(&self) -> Option<String>;
+
+    /// 系统界面此刻是深色还是浅色。
+    ///
+    /// 只服务一件事：软件配置里选了「跟随系统」时，本应用该把 `<html>` 推到哪套配色上。
+    /// 取不到返回 `None`（这个桌面没有「深/浅」这个概念、读它的方式被拒、或压根没装
+    /// 相应的读取工具），调用方按深色渲染 —— 深色是这套界面的设计基准，也是没有别的线索时
+    /// 的样子。
+    ///
+    /// **不要**改用 CSS 的 `prefers-color-scheme`：那一句话问的是「承载这个页面的 WebView
+    /// 自己呈现成什么」，而本应用的四座窗口分属三套不同的 WebView，界面颜色必须是它们共同
+    /// 的**一个**决定 —— 决定在这里做一次，再随状态广播发给四座窗口，它们才会同进同退。
+    ///
+    /// 只在窗口加载与状态广播时调用，别放进轮询路径。
+    fn ui_prefers_dark(&self) -> Option<bool>;
 }
 
 // —————————————————————————— 共享工具 ——————————————————————————
@@ -611,6 +646,68 @@ pub(crate) fn parse_kv(text: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `defaults read -g` 的转储 → 系统此刻是不是深色。
+///
+/// 判据是「这一对键值在不在」，而不是「`AppleInterfaceStyle` 读得到读不到」：浅色模式下
+/// macOS 就是**没有**这个键，`defaults read -g AppleInterfaceStyle` 会以非 0 退出，那条
+/// 错误和「`defaults` 这个二进制起不来」在 `run` 的分界里长得一模一样。整域的转储在两种
+/// 模式下都成功，于是「浅色」和「问不到」分得开 —— 后者要退深色，前者不该退。
+///
+/// 只认 `AppleInterfaceStyle = Dark;` 这一行，因此旁边那行
+/// `AppleInterfaceStyleSwitchesAutomatically = 1;`（用户设的是「自动」）不会被骗成深色；
+/// 自动模式下系统仍然会把 `AppleInterfaceStyle` 写成当下那档，所以跟着走是对的。
+#[allow(dead_code)] // 只有 macOS 的命令输出是这个形状
+pub(crate) fn prefers_dark_from_defaults(text: &str) -> bool {
+    text.lines().any(|line| {
+        let mut it = line.trim().splitn(2, '=');
+        match (it.next(), it.next()) {
+            (Some(k), Some(v)) => {
+                let v = v.trim().trim_end_matches(';').trim();
+                // `defaults` 打字符串时不带引号，但引号是它别处见过的写法，认下来不亏
+                k.trim() == "AppleInterfaceStyle" && v.trim_matches('"') == "Dark"
+            }
+            _ => false,
+        }
+    })
+}
+
+/// `reg query …\Personalize /v AppsUseLightTheme` 的输出 → 系统此刻是不是深色。
+///
+/// 值行形如 `    AppsUseLightTheme    REG_DWORD    0x1`。**1 = 浅色，0 = 深色** —— 这个
+/// 键名是反着说的（它问的是「用不用浅色」），所以这里不许含糊：认不出形状就是 `None`，
+/// 而不是猜一个。取最后一个空白分隔的 token，因为键名本身可以含空格的路径部分不在值行里。
+#[allow(dead_code)] // 只有 Windows 的命令输出是这个形状
+pub(crate) fn prefers_dark_from_reg(text: &str) -> Option<bool> {
+    let line = text.lines().find(|l| l.contains("AppsUseLightTheme"))?;
+    let token = line.split_whitespace().last()?;
+    let hex = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X"))?;
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(v == 0)
+}
+
+/// GNOME 的两条 `gsettings` → 系统此刻是不是深色。
+///
+/// `color-scheme` 是 GNOME 42 起正问「深/浅」的那一条（`prefer-dark` / `prefer-light` /
+/// `default` / `gtk`）；`gtk-theme` 是它的前身，只能从主题名里猜（`Adwaita-dark`）。
+/// 两个都问不到（不是 GNOME 的桌面、`gsettings` 没装、dconf 里没这两个键）时返回 `None`，
+/// 调用方退深色 —— 猜一套并不存在的深色偏好，比承认问不到更糟。
+#[allow(dead_code)] // 只有 Linux 的命令输出是这个形状
+pub(crate) fn prefers_dark_from_gsettings(
+    color_scheme: Option<&str>,
+    gtk_theme: Option<&str>,
+) -> Option<bool> {
+    // gsettings 把字符串值带引号打出来：`'prefer-dark'`。
+    let clean = |s: &str| s.trim().trim_matches('\'').to_string();
+    match color_scheme.map(clean).as_deref() {
+        Some("prefer-dark") => return Some(true),
+        Some("prefer-light") | Some("default") | Some("high-contrast") => return Some(false),
+        // `gtk` 这一档把答案交给主题名，读不到这一条也一样：都往下去看 `gtk-theme`。
+        _ => {}
+    }
+    let theme = gtk_theme.map(clean)?;
+    Some(theme.contains("dark"))
 }
 
 /// 由 CUPS 的三条命令输出拼出打印机清单（macOS 与 Linux 共用同一套客户端命令）。
@@ -866,6 +963,23 @@ pub fn open_path(path: &str) -> Result<(), String> {
     run("xdg-open", &[path]).map(|_| ())
 }
 
+/// 撤销 macOS 的免密通道（删掉白名单包装脚本与 `/etc/sudoers.d/netsense`）。
+///
+/// 走的是自由函数而不是 [`NetworkPlatform`] 的方法：这条通道是 macOS 独有的机制
+/// （Windows 靠常驻提权助手、Linux 靠 sudo/pkexec，两边都没有「撤销一个 sudoers 行」
+/// 这件事），放进 trait 就要在另外两条腿上各写一个空壳。
+/// 界面上的按钮只在 `priv == "direct"` 且平台为 macOS 时出现；下面那条错误是
+/// 「有人绕过界面直接调用命令」时的兜底，不是正常路径。
+#[cfg(target_os = "macos")]
+pub fn uninstall_priv_channel() -> Result<(), String> {
+    macos::uninstall_priv_channel()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn uninstall_priv_channel() -> Result<(), String> {
+    Err(crate::i18n::t("pal.priv_unsupported"))
+}
+
 // —————————————————————————— WebView 渲染运行时 ——————————————————————————
 
 /// WebView2 运行时下载页（Windows 专用；其它平台不会用到，故允许 dead_code）。
@@ -889,6 +1003,33 @@ pub use windows::webview2_available;
 #[allow(dead_code)] // 只有 Windows 的启动检查会调用它
 pub fn webview2_available() -> bool {
     true
+}
+
+/// [`NetworkPlatform::ui_language`] 的免装配版本：启动早期还没有 `AppState`，
+/// 而「跟随系统」必须在那一刻就把语言定下来 —— 第一条日志就该用对的语言写。
+pub fn system_ui_language() -> Option<String> {
+    Platform.ui_language()
+}
+
+/// [`NetworkPlatform::ui_prefers_dark`] 的免装配版本：配色是窗口加载那一刻就要定的事，
+/// 那一刻 `AppState` 可能还没准备好（而「跟随系统」必须和别的界面偏好走同一个来源）。
+///
+/// 答案缓存 60s。这个值现在**每一次状态广播都会被问一遍**（`status_payload` 里带着它，
+/// 好让四座窗口跟着换档），而三条腿的实现都要拉起一个子进程（`defaults` / `reg.exe` /
+/// `gsettings`）—— 引擎一轮评估可不止一次广播。60s 是两头都能接受的那个数：用户在系统设置里
+/// 翻一下深色，面板最迟一分钟后跟着翻，而这一分钟里剩下的那些次问话都是免费的。
+pub fn system_prefers_dark() -> Option<bool> {
+    static CACHE: OnceLock<Mutex<(Option<Instant>, Option<bool>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((None, None)));
+    let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let (Some(at), value) = &*g {
+        if at.elapsed() < Duration::from_secs(60) {
+            return *value;
+        }
+    }
+    let value = Platform.ui_prefers_dark();
+    *g = (Some(Instant::now()), value);
+    value
 }
 
 /// 当前平台标识（日志 / UI / 诊断用）。
@@ -922,7 +1063,10 @@ pub use linux::{priv_channel, LinuxPlatform as Platform};
 
 #[cfg(test)]
 mod tests {
-    use super::{printer_label, printers_from_lpstat, provider_in, sh_q, tunnel_name_eq, TunnelTarget};
+    use super::{
+        prefers_dark_from_defaults, prefers_dark_from_gsettings, prefers_dark_from_reg,
+        printer_label, printers_from_lpstat, provider_in, sh_q, tunnel_name_eq, TunnelTarget,
+    };
 
     #[test]
     fn sh_q_neutralises_shell_metacharacters() {
@@ -1184,5 +1328,74 @@ printer CanonG3860 is disabled.
         );
         // 什么都没有 → 界面回落到队列名
         assert_eq!(printer_label("HP", "  ", "").as_deref(), None);
+    }
+
+    /// macOS 那一条只能看「这一行在不在」：浅色模式下 `AppleInterfaceStyle` 根本不存在。
+    /// 因此「没有这一行」必须是浅色，而不是「不知道」。
+    #[test]
+    fn a_macos_dump_without_the_style_key_is_light_not_unknown() {
+        assert!(!prefers_dark_from_defaults("AppleAquaFontDesign = normal;\n"));
+        assert!(prefers_dark_from_defaults("AppleInterfaceStyle = Dark;\n"));
+        // 旁边那行说的是「自动切换」，它本身不等于深色；当下那档仍由上一行给出
+        assert!(!prefers_dark_from_defaults(
+            "AppleInterfaceStyleSwitchesAutomatically = 1;\n"
+        ));
+        assert!(prefers_dark_from_defaults(
+            "AppleInterfaceStyleSwitchesAutomatically = 1;\nAppleInterfaceStyle = Dark;\n"
+        ));
+        // 值带引号、含空格、结尾分号旁有空格 —— `defaults` 的转储确实会这样
+        assert!(prefers_dark_from_defaults("    AppleInterfaceStyle  =  \"Dark\"  ;\n"));
+        // 判据是值等于 Dark，因此任何别的值（包括被写成 Light）都算浅色：浅色模式下
+        // macOS 本来就没有这个键，写出一个非 Dark 的值只能是「用户/工具想让它浅色」
+        assert!(!prefers_dark_from_defaults("AppleInterfaceStyle = Light;\n"));
+        // 只有键名没有赋值号时不算命中（别把注释行读成设置）
+        assert!(!prefers_dark_from_defaults("// AppleInterfaceStyle = Dark;\n"));
+    }
+
+    /// Windows 的键名是反着问的（`AppsUseLightTheme`），所以 `0x0` 才是深色。
+    /// 问不到形状必须给 `None`：退深色是调用方的决定，不是解析器猜出来的。
+    #[test]
+    fn a_windows_reg_value_is_read_backwards_and_never_guessed() {
+        let dark = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\n    AppsUseLightTheme    REG_DWORD    0x0\n";
+        let light = dark.replace("0x0", "0x1");
+        assert_eq!(prefers_dark_from_reg(dark), Some(true));
+        assert_eq!(prefers_dark_from_reg(&light), Some(false));
+        // 大写十六进制前缀也要认（不同区域/版本的 reg.exe 会给 0X）
+        assert_eq!(prefers_dark_from_reg(&dark.replace("0x0", "0X0")), Some(true));
+        // 键在、值行被截断 → 不知道，而不是「非 0 就是浅色」
+        assert_eq!(prefers_dark_from_reg("    AppsUseLightTheme    REG_DWORD\n"), None);
+        assert_eq!(prefers_dark_from_reg("    AppsUseLightTheme    REG_SZ    yes\n"), None);
+        // 查询失败时输出的是一句错误消息，里面连键名的那一行的形状都不成立
+        assert_eq!(
+            prefers_dark_from_reg("ERROR: The system was unable to find the specified registry key or value.\n"),
+            None
+        );
+        assert_eq!(prefers_dark_from_reg(""), None);
+    }
+
+    /// GNOME 先问 `color-scheme`，只有它答不了（`gtk` 或缺失）才退到主题名。
+    #[test]
+    fn gnome_reads_the_explicit_setting_first_and_the_theme_name_only_as_fallback() {
+        assert_eq!(prefers_dark_from_gsettings(Some("'prefer-dark'"), None), Some(true));
+        assert_eq!(prefers_dark_from_gsettings(Some("'prefer-light'"), None), Some(false));
+        assert_eq!(prefers_dark_from_gsettings(Some("'default'"), None), Some(false));
+        assert_eq!(
+            prefers_dark_from_gsettings(Some("'high-contrast'"), None),
+            Some(false)
+        );
+        // `gtk` 把答案交给主题名：这一档必须往下看，不能就地判成浅色
+        assert_eq!(
+            prefers_dark_from_gsettings(Some("'gtk'"), Some("'Adwaita-dark'")),
+            Some(true)
+        );
+        assert_eq!(
+            prefers_dark_from_gsettings(Some("'gtk'"), Some("'Yaru'")),
+            Some(false)
+        );
+        // 第一条缺失时同样看第二条；引号不带也要认（`--json-output` 就是这么给的）
+        assert_eq!(prefers_dark_from_gsettings(None, Some("Adwaita-dark")), Some(true));
+        // 两条都问不到 → 承认不知道
+        assert_eq!(prefers_dark_from_gsettings(None, None), None);
+        assert_eq!(prefers_dark_from_gsettings(Some("'gtk'"), None), None);
     }
 }

@@ -21,12 +21,15 @@
 //! 授权没给之前它返回 `None`，降级链照旧走完三个 CLI 来源
 //! （`networksetup` → `ipconfig getsummary` → `system_profiler`，最后那个慢，故带 2s 缓存）。
 //!
-//! 提权策略：优先 `/etc/sudoers.d/netsense` 授权的白名单包装脚本（免密、无弹窗），
-//! 不可用时自动回落 `osascript ... with administrator privileges`，功能不中断。
+//! 提权策略：优先 `/etc/sudoers.d/netsense` 授权的白名单包装脚本（免密、无弹窗）。
+//! 通道还没装上时，**第一次**应用配置的那一个授权框顺手把通道装好（见
+//! [`exec_ops_bootstrap`]），此后同一台机器上的每一次应用都不再问；免密不可用
+//! （被撤销 / 需密码 / 装不上）、或这一批的形状白名单表达不了时才回落到逐次授权。
 
 use super::{
-    extract_mac, parse_kv, poll_ssid_watch, printers_from_lpstat, run, run_env, sh_q, timeout_secs,
-    C_LOCALE, Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget,
+    extract_mac, parse_kv, poll_ssid_watch, prefers_dark_from_defaults, printers_from_lpstat, run, run_env,
+    sh_q, timeout_secs, C_LOCALE, Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel,
+    ProbeTarget,
     TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
@@ -36,6 +39,7 @@ use objc2::{class, msg_send};
 use objc2_core_location::CLLocationManager;
 use objc2_core_wlan::CWWiFiClient;
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -191,20 +195,113 @@ pub fn priv_channel() -> PrivChannel {
     }
 }
 
+/// 一个字段能否原样放进免密通道的那一行：非空、不以 `-` 开头、不含 `|` 与换行。
+/// 与包装脚本的 `is_service` 同一套规则。
+fn slot_ok(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with('-') && !s.contains(['|', '\n', '\r'])
+}
+
+/// `a.b.c.d`：恰好四段，每段 1~3 位十进制且 ≤255，且不收 `010` 这种前导零写法 ——
+/// 脚本的 `is_ipv4` 就是这么拒的（那种写法容易被读成八进制）。这边的判定只许比脚本严、
+/// 不许比脚本松：松了就是整批交给 root 之后再被脚本退回来。
+fn ipv4(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let (Some(a), Some(b), Some(c), Some(d), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    [a, b, c, d].iter().all(|p| {
+        !p.is_empty()
+            && p.len() <= 3
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && !(p.len() > 1 && p.starts_with('0'))
+            && p.parse::<u8>().is_ok()
+    })
+}
+
+/// 路由目标：`a.b.c.d` 或 `a.b.c.d/len`（len 为十进制且 ≤32）—— 包装脚本的 `is_route_dest`。
+fn route_dest_ok(s: &str) -> bool {
+    match s.split_once('/') {
+        Some((addr, len)) => {
+            ipv4(addr)
+                && !len.is_empty()
+                && len.len() <= 2
+                && len.bytes().all(|b| b.is_ascii_digit())
+                && len.parse::<u8>().unwrap_or(255) <= 32
+        }
+        None => ipv4(s),
+    }
+}
+
+/// 宽松 IPv6：含 `:` 且只用十六进制、点、冒号 —— 包装脚本的 `is_ipv6`。
+fn ipv6_loose_ok(s: &str) -> bool {
+    s.contains(':') && s.bytes().all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'.'))
+}
+
+/// 前缀长度：十进制且 ≤128 —— 包装脚本的 `is_prefix`。
+fn prefix_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 3
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && s.parse::<u8>().unwrap_or(255) <= 128
+}
+
+/// DNS 列表：空表示清空；否则每一项都得是 IPv4（这里比脚本更严 —— 空项也算不合法）。
+fn dns_ok(servers: &[String]) -> bool {
+    servers.iter().all(|s| ipv4(s))
+}
+
+/// 这一批操作能否走免密通道：**逐条比对包装脚本的形状规则**。
+///
+/// 判错的方向是安全的那一侧。判成「不能走」而其实能走，代价只是这一批多弹一次授权框；
+/// 反过来（以为能走、root 那边却按白名单拒了）会让这一批**直接失败** —— 而白名单一旦在
+/// 第一次下发时自动装上，这种失败就成了新用户会撞上的那条路。所以凡拿不准的都算不行。
+///
+/// 唯一真正走得通却在这里被挡下的是路由目标：配置层只要求 `dest` 非空，`route -n add
+/// -net default <gw>` 之类的写法在 shell 那边有效，白名单却只收 IPv4 / IPv4/len。
+fn allow_list_takes(ops: &[PrivOp]) -> bool {
+    ops.iter().all(|o| match o {
+        PrivOp::SetDhcp { svc } | PrivOp::SetV6Off { svc } | PrivOp::SetV6Auto { svc } => {
+            slot_ok(svc)
+        }
+        PrivOp::SetManual {
+            svc,
+            ip,
+            netmask,
+            gateway,
+        } => slot_ok(svc) && ipv4(ip) && ipv4(netmask) && ipv4(gateway),
+        PrivOp::SetDns { svc, servers } => slot_ok(svc) && dns_ok(servers),
+        PrivOp::SetV6Manual {
+            svc,
+            addr,
+            prefix,
+            gateway,
+        } => slot_ok(svc) && ipv6_loose_ok(addr) && prefix_ok(prefix) && ipv6_loose_ok(gateway),
+        PrivOp::RouteAdd { dest, gateway, .. } => route_dest_ok(dest) && ipv4(gateway),
+        PrivOp::RouteDelete { dest } => route_dest_ok(dest),
+    })
+}
+
 /// 提权执行一组结构化操作。
 /// 优先 `sudo -n <priv script> --batch`（无弹窗，参数经脚本白名单二次校验）；
-/// 免密不可用（未安装 / 需密码）时自动回落 osascript 授权框，功能不中断。
+/// 通道还没装好时走 `exec_ops_bootstrap` —— 那**一次**授权顺手把通道装上，此后不再问；
+/// 免密不可用（被撤销 / 需密码 / 装不上）或这一批**白名单表达不了**时回落 osascript
+/// 授权框，功能不中断。
 pub fn exec_ops(ops: &[PrivOp]) -> Result<(), String> {
     if ops.is_empty() {
         return Ok(());
     }
     let r = match priv_channel() {
-        PrivChannel::Direct => match exec_ops_sudoers(ops) {
+        PrivChannel::Direct if allow_list_takes(ops) => match exec_ops_sudoers(ops) {
             Ok(()) => Ok(()),
             Err(e) if is_nopasswd_unavailable(&e) => exec_ops_osascript(ops),
             Err(e) => Err(e),
         },
-        PrivChannel::Prompt => exec_ops_osascript(ops),
+        // 装好通道的机器上仍会有表达不了的一批（例如目标是 `default` 的路由）：
+        // 这种批次照旧走授权框，不能因为「通道在」就把它判死。
+        PrivChannel::Direct => exec_ops_osascript(ops),
+        PrivChannel::Prompt => exec_ops_bootstrap(ops),
     };
     // 网络刚被本进程改动：丢掉状态快照。3A 的「下发 → 读回校验」紧跟着就要读一次
     // `get_status`，那份读数必须是下发**之后**的实况，否则校验屏障形同虚设。
@@ -266,6 +363,161 @@ fn exec_ops_osascript(ops: &[PrivOp]) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(" ; ");
     run_via_osascript(&chain).map(|_| ())
+}
+
+/// 免密通道的两个落点：包装脚本（`PRIV_SCRIPT`）与授权它的那一行 sudoers 规则。
+/// 安装与卸载只碰这两个路径，不碰别的。
+const SUDOERS_FILE: &str = "/etc/sudoers.d/netsense";
+
+/// 白名单包装脚本的**唯一真源**：编译进二进制的就是仓库 `scripts/netsense-priv.sh`
+/// 那一份字节，安装时按字节写出。在 Rust 里重抄一份会产生两份校验规则，而两份规则
+/// 一旦分叉，后果是「界面下发的行」与「root 那边接受的行」不是同一套东西。
+const PRIV_SCRIPT_SRC: &str = include_str!("../../../scripts/netsense-priv.sh");
+
+/// sudoers 行的用户名形状校验。
+///
+/// sudoers 是按空白切词的一行：用户名里只要出现空格、`=`、引号、反斜杠或换行，写下去的
+/// 就不再是「授权某一个用户」，而是一条被截断过、甚至多出一段规则的文本。首字符还必须
+/// 是字母数字或下划线，否则 `-` 之类的开头会被读成别的东西。取不到合形的名字就宁可不装。
+fn safe_sudoers_user(raw: &str) -> Option<&str> {
+    let name = raw.trim();
+    if name.is_empty() || name.len() > 256 {
+        return None;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' => {}
+        _ => return None,
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return None;
+    }
+    Some(name)
+}
+
+/// 当前登录用户名（写进 sudoers 的那一个）。形状不合的一律当作「拿不到」。
+fn current_user_name() -> Option<String> {
+    let raw = run("id", &["-un"]).ok()?;
+    safe_sudoers_user(raw.trim()).map(str::to_string)
+}
+
+/// 一次提权要执行的安装脚本：装好包装脚本与 sudoers 规则，然后删掉自己的临时输入。
+///
+/// 里面没有一句来自配置文件的自由文本 —— `wrapper` 是本进程刚独占写出的私有临时文件，
+/// `user` 已过 [`safe_sudoers_user`]，两个都再单独 `sh_q`。`visudo -cf` 排在落盘**之前**：
+/// 一个语法错的 `/etc/sudoers.d/*` 会让整台机器的 `sudo` 报错，这里不能赌自己拼得对。
+fn priv_install_script(wrapper: &Path, user: &str) -> String {
+    // 安装目录从脚本路径本身推出来，不留第二个常量：两处各写一遍
+    // `/usr/local/libexec` 的话，改一处就会 `install -d` 一个目录、把脚本装进另一个。
+    let dir = PRIV_SCRIPT
+        .rsplit_once('/')
+        .map_or("/usr/local/libexec", |(d, _)| d);
+    format!(
+        "set -eu\n\
+         PATH=/usr/sbin:/sbin:/usr/bin:/bin; export PATH\n\
+         umask 022\n\
+         install -d -o root -g wheel -m 0755 {dir}\n\
+         install -o root -g wheel -m 0755 {wrapper} {script}\n\
+         rm -f {wrapper}\n\
+         _t=$(mktemp)\n\
+         printf '%s ALL=(root) NOPASSWD: {script}\\n' {user} > \"$_t\"\n\
+         visudo -cf \"$_t\"\n\
+         install -o root -g wheel -m 0440 \"$_t\" {sudoers}\n\
+         rm -f \"$_t\"\n",
+        script = PRIV_SCRIPT,
+        wrapper = sh_q(&wrapper.display().to_string()),
+        user = sh_q(user),
+        sudoers = SUDOERS_FILE,
+    )
+}
+
+/// 独占写出「包装脚本 + 安装脚本」两份临时文件，返回安装脚本的路径。
+///
+/// 两份都是 0600、属主为当前用户：root 读得到，别的用户改不了（`verify_private` 查的
+/// 就是这两点，见 §9.3）。包装脚本由安装脚本装完后自己删；用户在授权框上点了取消时
+/// 它会留在临时目录里 —— 那是系统自管的一块地方，内容又是仓库里那份脚本的原文，
+/// 不值得为它加一条清理路径，更不该因此把下发挡住。安装脚本自己写不出来时，
+/// 先写出的那份由这里删掉：那种失败是本进程的问题，不留半成品。
+fn write_priv_installer(user: &str) -> Result<PathBuf, String> {
+    let wrapper = crate::update::write_private_script("priv-wrapper", PRIV_SCRIPT_SRC)?;
+    match crate::update::write_private_script(
+        "priv-install",
+        &priv_install_script(&wrapper, user),
+    ) {
+        Ok(installer) => Ok(installer),
+        Err(e) => {
+            let _ = std::fs::remove_file(&wrapper);
+            Err(e)
+        }
+    }
+}
+
+/// 免密通道自检：以当前用户跑一次空批。
+///
+/// 装完就查，是因为「文件都到位」不等于「这台机器的 sudoers 真的免密」——目录服务里的
+/// 账号名、已被别人占用的 `/etc/sudoers.d/netsense`、或压根不给该用户 sudo 的策略，都会
+/// 让通道看起来装好了而每次仍要密码。查出来的结果只写日志：下发侧本来就有回落。
+fn nopasswd_probe() -> Result<(), String> {
+    let out = Command::new("sudo")
+        .arg("-n")
+        .arg(PRIV_SCRIPT)
+        .arg("--batch")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if err.is_empty() {
+        i18n::t("pal.privileged_no_stderr")
+    } else {
+        err
+    })
+}
+
+/// 「问一次，之后不再问」：把**装通道**和**下发本批**放进同一个授权框。
+///
+/// 这两件事要的权限是同一个（root），所以没有理由让用户输两次密码：安装脚本串在操作链
+/// 前面、用 `;` 隔开，用户第一次改网络时输那一次密码，此后每一次都走 `sudo -n` 免密通道。
+/// 装不上（用户名取不到、临时目录不可用）时本批仍照常下发 —— 安装是顺手做的，不是前提。
+fn exec_ops_bootstrap(ops: &[PrivOp]) -> Result<(), String> {
+    let chain = ops
+        .iter()
+        .map(|o| o.legacy_shell())
+        .collect::<Vec<_>>()
+        .join(" ; ");
+    let installer = current_user_name().and_then(|u| write_priv_installer(&u).ok());
+    let cmd = match &installer {
+        Some(p) => format!("/bin/sh {} ; {}", sh_q(&p.display().to_string()), chain),
+        None => chain,
+    };
+    let r = run_via_osascript(&cmd).map(|_| ());
+    if let Some(p) = &installer {
+        let _ = std::fs::remove_file(p);
+    }
+    if r.is_ok() && priv_channel() == PrivChannel::Direct {
+        match nopasswd_probe() {
+            Ok(()) => crate::log::info(&i18n::t("notify.priv_installed")),
+            Err(e) => crate::log::warn(&i18n::tf("notify.priv_unverified", &[("error", &e)])),
+        }
+    }
+    r
+}
+
+/// 撤销免密通道：删掉包装脚本与那条 sudoers 规则，一次系统授权。
+///
+/// 之后应用配置回到「每次都问」。**下一次**应用配置会再问一次密码并顺手把通道装回来 ——
+/// 撤销不该变成「以后再也装不上」，而重新安装始终需要用户当场授权。
+pub fn uninstall_priv_channel() -> Result<(), String> {
+    run_via_osascript(&format!(
+        "rm -f {} {}",
+        sh_q(PRIV_SCRIPT),
+        sh_q(SUDOERS_FILE)
+    ))
+    .map(|_| ())
 }
 
 /// 把一份配置编译成按序执行的特权操作，不做任何 I/O。
@@ -1401,8 +1653,11 @@ impl NetworkPlatform for MacPlatform {
     }
 
     fn list_known_ssids(&self) -> Option<Vec<String>> {
-        let svc = wifi_service()?;
-        let out = run("networksetup", &["-listpreferredwirelessnetworks", &svc]).ok()?;
+        // `-listpreferredwirelessnetworks` 要的是**设备名**（en0），不是网络服务名（"Wi-Fi"）。
+        // 传服务名时命令退 10 并打印 "Wi-Fi is not a Wi-Fi interface."，于是这里 `?` 成
+        // None，编辑器上「系统保存过的 SSID」下拉整列是空的（v1.0.2 用户报的 MAC3-②）。
+        let dev = discover_wifi_device()?;
+        let out = run("networksetup", &["-listpreferredwirelessnetworks", &dev]).ok()?;
         Some(
             out.lines()
                 .skip(1) // 首行是标题
@@ -1410,6 +1665,61 @@ impl NetworkPlatform for MacPlatform {
                 .filter(|l| !l.is_empty())
                 .collect(),
         )
+    }
+
+    fn list_adapters(&self) -> Vec<super::NicInfo> {
+        // 硬件端口表就是「有哪几口」的权威答案：它列的是系统装着的口，拔没拔线都在上面。
+        let snaps = iface_snapshot();
+        let mut out: Vec<super::NicInfo> = hardware_ports()
+            .into_iter()
+            .filter(|p| !is_noise_device(&p.dev))
+            .map(|p| {
+                let running = snaps.get(&p.dev).map(|s| s.running).unwrap_or(false);
+                // 端口名要参与判断：`en0` 在带以太网的机型上是 Wi-Fi，只看设备名会把它
+                // 归成有线，下拉里的类型标签就指错了网卡。
+                let kind = kind_of(&p.dev, Some(p.port.as_str()));
+                super::NicInfo {
+                    name: p.dev,
+                    label: Some(p.port),
+                    kind,
+                    up: running,
+                    mac: p.mac,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        // 按设备名排（en0 先于 en3）：类型分组是面板的事，下拉要的是稳定的顺序。
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// 首选语言取 `AppleLanguages` 的第一项 —— 那就是「系统设置 → 语言与地区」排最前的
+    /// 那条，形如 `zh-Hans-CN`。
+    ///
+    /// 不靠 `LANG`：从 Finder / 登录项起来的进程，环境里那份 LANG 常常还是登录时写下的
+    /// 旧值，用户后来在系统设置里换过语言它也不跟着变（开发构建从终端起才会有今天的值）。
+    /// 所以只在 `defaults` 那条读不到时才退回去看一眼，比什么都没有强。
+    fn ui_language(&self) -> Option<String> {
+        let out = run("defaults", &["read", "-g", "AppleLanguages"]).unwrap_or_default();
+        if let Some(tag) = out.split('"').nth(1) {
+            if !tag.is_empty() {
+                return Some(tag.to_string());
+            }
+        }
+        let lang = std::env::var("LANG").unwrap_or_default();
+        match lang.as_str() {
+            "" | "C" | "POSIX" => None,
+            other => Some(other.to_string()),
+        }
+    }
+
+    /// 深/浅问 `defaults` 的**整域**转储，不是单读 `AppleInterfaceStyle` 那一个键：
+    /// 浅色模式下那个键根本不存在，`defaults` 以非 0 退出，那份错误和「读不到」在
+    /// `run` 的分界里是同一个形状，于是浅色会被当成「问不到」而退成深色。整域转储在
+    /// 两种模式下都成功，判据见 [`prefers_dark_from_defaults`]。
+    fn ui_prefers_dark(&self) -> Option<bool> {
+        let out = run("defaults", &["read", "-g"]).ok()?;
+        Some(prefers_dark_from_defaults(&out))
     }
 
     fn list_printers(&self) -> Vec<PrinterInfo> {
@@ -1436,6 +1746,290 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// sudoers 那一行是按空白切词的，所以用户名只能是一个「合形的 token」。
+    /// 这条校验挡住的不是攻击，而是把整机 `sudo` 写坏：一个多出来的空格或 `=` 就能把
+    /// 一行规则变成两行，或者变成一条谁都看不懂的规则。
+    #[test]
+    fn sudoers_user_accepts_one_token_only() {
+        assert_eq!(safe_sudoers_user("imonior"), Some("imonior"));
+        assert_eq!(safe_sudoers_user("  _u.1-2  "), Some("_u.1-2"));
+        for bad in [
+            "",
+            "   ",
+            "root admin",
+            "a=b",
+            "a\"b",
+            "a\\b",
+            "a\nb",
+            "-root",
+            ".hidden",
+            &"u".repeat(300),
+        ] {
+            assert_eq!(safe_sudoers_user(bad), None, "accepted {bad:?}");
+        }
+    }
+
+    /// 安装脚本里三个可变量（临时路径、用户名、固定路径）之外没有任何自由文本，
+    /// 且 `visudo -cf` 必须排在 sudoers 落盘**之前**：语法错的文件会让整机 `sudo` 报错。
+    #[test]
+    fn priv_install_script_quotes_slots_and_checks_before_installing() {
+        let script = priv_install_script(Path::new("/tmp/o'x.sh"), "a b");
+        // 单引号按 shell 规则翻倍续接，绝不留下未闭合的引号
+        assert!(script.contains("'/tmp/o'\\''x.sh'"), "{script}");
+        assert!(script.contains("printf '%s ALL=(root) NOPASSWD: "), "{script}");
+        assert!(script.contains("/etc/sudoers.d/netsense\n"), "{script}");
+        let check = script.find("visudo -cf").expect("no visudo check");
+        let land = script
+            .find("-m 0440")
+            .expect("sudoers never installed");
+        assert!(check < land, "sudoers installed before being validated");
+        // 包装脚本必须是 root 属主、0755，且装完就把临时输入清掉
+        assert!(script.contains("-o root -g wheel -m 0755"), "{script}");
+        assert!(script.contains("rm -f '"), "{script}");
+    }
+
+    /// 形状镜像的**单向**核对：Rust 判「白名单装得下」的每一个值，包装脚本自己也得判合法。
+    /// 判反了的后果不对称 —— 误判成装不下只是这一批多弹一次授权框，误判成装得下则是
+    /// root 那边把整批拒掉、配置直接应用失败。所以断言只压这个危险方向。
+    ///
+    /// 取的是烤进二进制的那份脚本原文里「校验函数」那一段（不含任何真命令），样本同样
+    /// 按 shell 的规则转义。这里不放含换行的样本：换行在校验里就不可能通过（一行一条
+    /// 操作，换行等于凭空多出一条），那一面由 [`shape_helpers_reject_everything_the_channel_cannot_hold`] 单独钉住。
+    #[test]
+    fn rust_never_admits_a_batch_the_wrapper_would_reject() {
+        let head = PRIV_SCRIPT_SRC
+            .split("# ---------- 单条操作执行 ----------")
+            .next()
+            .expect("wrapper has no validator section");
+        // (包装脚本里的校验函数, 样本)：样本按脚本的规则转义后交给 `/bin/sh`，
+        // 这边的判定由同名分支给出 —— 表里没有第三个字段，就不会出现「样本配错了函数」。
+        let cases = [
+            ("is_ipv4", "192.168.1.1"),
+            ("is_ipv4", "0.1.2.3"),
+            ("is_ipv4", "1.2.3.04"),
+            ("is_ipv4", "10.0.0"),
+            ("is_ipv4", "256.0.0.1"),
+            ("is_ipv4", "1.2.3.4."),
+            ("is_ipv4", ""),
+            ("is_service", "Thunderbolt Bridge"),
+            ("is_service", "Wi-Fi"),
+            ("is_service", "-rf"),
+            ("is_service", ""),
+            ("is_route_dest", "10.0.0.0/8"),
+            ("is_route_dest", "192.0.2.0/24"),
+            ("is_route_dest", "0.0.0.0/0"),
+            ("is_route_dest", "192.168.1.1"),
+            ("is_route_dest", "default"),
+            ("is_route_dest", "10.0.0.0/33"),
+            ("is_ipv6", "fe80::1"),
+            ("is_ipv6", "fd00::1234"),
+            ("is_ipv6", "fe80::1%en0"),
+            ("is_prefix", "64"),
+            ("is_prefix", "128"),
+            ("is_prefix", "129"),
+            ("is_prefix", ""),
+        ];
+        let mut script = String::from(head);
+        for (chk, sample) in cases {
+            script.push_str(&format!(
+                "if {chk} {}; then echo 1; else echo 0; fi\n",
+                sh_q(sample)
+            ));
+        }
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("no /bin/sh to check the shape rules with");
+        assert!(out.status.success(), "validator section failed to run");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let verdicts: Vec<&str> = stdout.lines().collect();
+        assert_eq!(verdicts.len(), cases.len(), "one line per sample");
+        for ((chk, sample), verdict) in cases.iter().zip(&verdicts) {
+            let admitted = match *chk {
+                "is_ipv4" => ipv4(sample),
+                "is_service" => slot_ok(sample),
+                "is_route_dest" => route_dest_ok(sample),
+                "is_ipv6" => ipv6_loose_ok(sample),
+                "is_prefix" => prefix_ok(sample),
+                other => panic!("no Rust mirror for {other}"),
+            };
+            if admitted {
+                assert_eq!(
+                    *verdict, "1",
+                    "Rust admitted {sample:?} to {chk}, the wrapper did not"
+                );
+            }
+        }
+    }
+
+    /// 这些判定各自挡住什么：值要么来自配置文件，要么来自操作系统报出的服务名，两边都
+    /// 不由这段代码控制 —— 而它们会拼进 root 执行的那一行里。
+    #[test]
+    fn shape_helpers_reject_everything_the_channel_cannot_hold() {
+        // 换行与 `|` 都能把「一行一条操作」变成两条操作或多出参数；`-` 开头会被下游
+        // 命令当成选项。
+        for bad in ["en0\nroute add", "en0|setdns", "-DHCP", ""] {
+            assert!(!slot_ok(bad), "accepted service {bad:?}");
+        }
+        // 三段的、五段的、前导零的、超 255 的、带空格的，都不是 IPv4。
+        for bad in ["1.2.3", "1.2.3.4.5", "1.2.3.04", "300.1.1.1", " 1.2.3.4"] {
+            assert!(!ipv4(bad), "accepted address {bad:?}");
+        }
+        // 白名单只收 IPv4 与 IPv4/len：`default`、主机名、IPv6 目标一律留给授权框。
+        for bad in ["default", "host.example.com", "10.0.0.0/", "10.0.0.0/x", "10.0.0.256/8"] {
+            assert!(!route_dest_ok(bad), "accepted route dest {bad:?}");
+        }
+        assert!(dns_ok(&[]));
+        assert!(!dns_ok(&["1.1.1.1".into(), "".into()]));
+        assert!(dns_ok(&["1.1.1.1".into(), "8.8.8.8".into()]));
+
+        // 一整批常见操作都在通道内；掺一条 `default` 路由后整批改走授权框。
+        let everyday = vec![
+            PrivOp::SetManual {
+                svc: "Wi-Fi".into(),
+                ip: "192.168.1.20".into(),
+                netmask: "255.255.255.0".into(),
+                gateway: "192.168.1.1".into(),
+            },
+            PrivOp::SetDns {
+                svc: "Wi-Fi".into(),
+                servers: v(&["1.1.1.1", "8.8.8.8"]),
+            },
+            PrivOp::RouteAdd {
+                dest: "10.0.0.0/8".into(),
+                gateway: "192.168.1.1".into(),
+                metric: 300,
+            },
+        ];
+        assert!(allow_list_takes(&everyday));
+        let mut with_default = everyday.clone();
+        with_default.push(PrivOp::RouteAdd {
+            dest: "default".into(),
+            gateway: "192.168.1.1".into(),
+            metric: 0,
+        });
+        assert!(!allow_list_takes(&with_default));
+    }
+
+    /// 这两段文本最终都由 root 执行，语法错的表现形式却是「授权框报一个看不懂的错」，
+    /// 而其中一段还是编译时从仓库原文烤进二进制的。所以让 `/bin/sh -n` 先看一眼 ——
+    /// 只解析、不执行，成本是两条子进程。
+    #[test]
+    fn the_scripts_root_runs_parse_as_shell() {
+        let generated = priv_install_script(Path::new("/tmp/netsense-priv-wrapper.sh"), "imonior");
+        for (name, body) in [
+            ("installer", generated.as_str()),
+            ("wrapper", PRIV_SCRIPT_SRC),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "netsense-shell-check-{}-{name}.sh",
+                std::process::id()
+            ));
+            std::fs::write(&path, body).expect("cannot stage the script under test");
+            let out = Command::new("/bin/sh")
+                .args(["-n", &path.display().to_string()])
+                .output()
+                .expect("no /bin/sh to parse with");
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// 在**不碰系统目录、也不提权**的沙箱里把生成的安装脚本真跑一遍：目标路径换成临时
+    /// 目录、所有权参数去掉，其余文本（`mktemp`、`printf` 那一行、`visudo -cf`、落盘顺序）
+    /// 与 root 那边执行的完全同源。这条挡住的是「拼出来的脚本跑得起来但装错东西」——
+    /// 例如 sudoers 行少一个字段、包装脚本没落到 `PRIV_SCRIPT` 说的那个路径、引号把路径
+    /// 截断。它**挡不住**：`-o root -g wheel` 是否被接受、`/usr/local/libexec` 是否可写、
+    /// 以及这台机器的 sudo 策略最后让不让免密（那要现场输一次密码才知道）。
+    #[test]
+    fn the_installer_script_lands_the_wrapper_and_one_sudoers_line() {
+        let dir = std::env::temp_dir().join(format!("netsense-priv-dryrun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("no temp dir for the dry run");
+        let staged_wrapper = dir.join("staged.sh");
+        std::fs::write(&staged_wrapper, PRIV_SCRIPT_SRC).expect("cannot stage the wrapper");
+        let installed = dir.join("netsense-priv.sh");
+        let sudoers = dir.join("netsense");
+        let script = priv_install_script(&staged_wrapper, "tester")
+            .replace(PRIV_SCRIPT, &installed.display().to_string())
+            // 先换完整路径，剩下的那一处才是 `install -d` 的目标目录
+            .replace("/usr/local/libexec", &dir.display().to_string())
+            .replace(SUDOERS_FILE, &sudoers.display().to_string())
+            .replace("-o root -g wheel", "");
+        let runner = dir.join("install.sh");
+        std::fs::write(&runner, &script).expect("cannot stage the installer");
+        let out = Command::new("/bin/sh")
+            .arg(&runner)
+            .output()
+            .expect("no /bin/sh to run with");
+        assert!(
+            out.status.success(),
+            "installer failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // 包装脚本按字节落到了它该落的路径，临时输入被安装脚本自己清掉了
+        assert_eq!(
+            std::fs::read(&installed).expect("wrapper never installed"),
+            PRIV_SCRIPT_SRC.as_bytes()
+        );
+        assert!(!staged_wrapper.exists(), "staged wrapper left behind");
+        // sudoers 里就是那一行：用户名、(root)、NOPASSWD、脚本的绝对路径
+        assert_eq!(
+            std::fs::read_to_string(&sudoers).expect("sudoers never written"),
+            format!("tester ALL=(root) NOPASSWD: {}\n", installed.display())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `PRIV_SCRIPT_SRC` 是仓库里那份包装脚本的原文：界面下发的行格式（`encode()`）与
+    /// 脚本认的子命令（case 分支）必须一直对齐。这条挡住的是「只改了一边」——
+    /// 分叉之后的后果是配置在免密通道上静默失败。
+    #[test]
+    fn every_encoded_op_is_whitelisted_in_the_embedded_wrapper() {
+        let ops = [
+            PrivOp::SetDhcp { svc: "Wi-Fi".into() },
+            PrivOp::SetManual {
+                svc: "Wi-Fi".into(),
+                ip: "192.168.1.10".into(),
+                netmask: "255.255.255.0".into(),
+                gateway: "192.168.1.1".into(),
+            },
+            PrivOp::SetDns {
+                svc: "Wi-Fi".into(),
+                servers: v(&["192.168.1.1"]),
+            },
+            PrivOp::SetV6Off { svc: "Wi-Fi".into() },
+            PrivOp::SetV6Auto { svc: "Wi-Fi".into() },
+            PrivOp::SetV6Manual {
+                svc: "Wi-Fi".into(),
+                addr: "fe80::1".into(),
+                prefix: "64".into(),
+                gateway: "fe80::ff".into(),
+            },
+            PrivOp::RouteAdd {
+                dest: "10.0.0.0/8".into(),
+                gateway: "192.168.1.1".into(),
+                metric: 0,
+            },
+            PrivOp::RouteDelete {
+                dest: "10.0.0.0/8".into(),
+            },
+        ];
+        assert!(PRIV_SCRIPT_SRC.contains("--batch"), "no batch mode");
+        for op in &ops {
+            let name = op.encode().split('|').next().unwrap_or_default().to_string();
+            assert!(
+                PRIV_SCRIPT_SRC.contains(&format!("{name})")),
+                "{name} is encoded by Rust but not whitelisted by the wrapper"
+            );
+        }
     }
 
     /// VPN 隧道在 `ifconfig` 里长得跟以太网口不一样：有的只有 `inet6`，有的干脆没地址。

@@ -20,7 +20,8 @@
 //!    不做字符串拼接，避免接口名含空格/特殊字符时被重新切分。
 
 use super::{
-    poll_ssid_watch, printer_label, run, timeout_secs, Health, InterfaceStatus, NetworkPlatform,
+    poll_ssid_watch, prefers_dark_from_reg, printer_label, run, timeout_secs, Health, InterfaceStatus,
+    NetworkPlatform,
     PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
@@ -372,6 +373,22 @@ fn prefix_to_mask(prefix: u32) -> Option<String> {
     ))
 }
 
+/// 媒体类型 + 描述 + 适配器名 → 网卡种类。
+///
+/// 两份脚本（在用网卡、本机网卡）的行共用这一份判据：各写一份就会出现「面板说是 VPN、
+/// 下拉说是别的」这种分歧，而用户在两个界面之间来回核对时正是靠这个标签。
+fn kind_from_row(media: &str, desc: &str, name: &str) -> super::NicKind {
+    if media == "Native 802.11" {
+        super::NicKind::Wireless
+    } else if super::guess_vpn_app(desc).is_some() || super::guess_vpn_app(name).is_some() {
+        super::NicKind::Vpn
+    } else if media == "802.3" || desc.to_ascii_lowercase().contains("ethernet") {
+        super::NicKind::Wired
+    } else {
+        super::NicKind::Other
+    }
+}
+
 /// 一行网卡快照（脚本 `NIC_ROWS_PS_BODY` 的一个对象）→ 界面用的 `NicInfo`。
 ///
 /// 返回 `None` 表示这一行**没有可核对的信息**：一张没在用、也没有地址的适配器，
@@ -395,15 +412,7 @@ fn nic_from_row(r: &serde_json::Value) -> Option<super::NicInfo> {
     let ssid = get("ssid");
     let up = get("status").is_some_and(|s| s.eq_ignore_ascii_case("Up"));
 
-    let kind = if media == "Native 802.11" {
-        super::NicKind::Wireless
-    } else if super::guess_vpn_app(&desc).is_some() || super::guess_vpn_app(&name).is_some() {
-        super::NicKind::Vpn
-    } else if media == "802.3" || desc.to_ascii_lowercase().contains("ethernet") {
-        super::NicKind::Wired
-    } else {
-        super::NicKind::Other
-    };
+    let kind = kind_from_row(&media, &desc, &name);
     if kind != super::NicKind::Vpn && ipv4.is_none() && ipv6.is_none() && ssid.is_none() {
         return None;
     }
@@ -641,12 +650,16 @@ fn exec_ops(ops: &[WinOp]) -> Result<(), String> {
     }
     let body: String = ops.iter().map(|o| o.render()).collect::<Vec<_>>().join("\r\n");
     // 优先交给常驻 helper（见 `super::win_helper`）：授权从「每批一次」降到「每会话一次」，
-    // 执行的本就是同一份 PowerShell。够不着 helper 才退回原来的逐批 `run_elevated_ps`。
+    // 执行的本就是同一份 PowerShell。够不着 helper 才退回原来的逐批 `run_elevated_ps`，
+    // 而且退回的那一刻在日志里留下原因（`win_helper::log_fallback`）。
     // 已是管理员（Direct）时 -Verb RunAs 本就不弹窗，不必多绕一条管道。
     let r = if matches!(priv_channel(), PrivChannel::Prompt) {
         match super::win_helper::run_batch(&body) {
             super::win_helper::Outcome::Done(r) => r,
-            super::win_helper::Outcome::Unavailable => run_elevated_ps(&body),
+            super::win_helper::Outcome::Unavailable(reason) => {
+                super::win_helper::log_fallback(&reason);
+                run_elevated_ps(&body)
+            }
         }
     } else {
         run_elevated_ps(&body)
@@ -1146,6 +1159,114 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
             out.sort_by(|a, b| rank(a.kind).cmp(&rank(b.kind)).then_with(|| a.name.cmp(&b.name)));
             out
         })
+    }
+
+    /// 本机装着的网卡（含现在没插线的物理口），供编辑器的接口条件下拉。
+    ///
+    /// 集合要和 `network_interface` 条件**能命中的**那一集对齐：VPN 隧道不在里面
+    /// （`NetworkSnapshot::sample` 把它们归进 `tunnels`），下拉里给一个永远不会命中的
+    /// 名字比少给一个更糟。剩下的问题只是「未连接的非物理适配器算不算本机网卡」：
+    /// `Get-NetAdapter` 会把 WAN Miniport 一家的十几个伪适配器一起端出来，全列出来
+    /// 会把真正的口淹掉，所以这里只留物理口和已经连上的（网桥、vEthernet 这类）。
+    /// 一次 PowerShell 拿全部行；不套 `cached_nics`：编辑器刷新要看到刚插上扩展坞的口。
+    fn list_adapters(&self) -> Vec<super::NicInfo> {
+        const ADAPTER_ROWS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
+$phys = New-Object System.Collections.Generic.HashSet[int];
+foreach ($n in @(Get-NetAdapter -Physical)) { [void]$phys.Add($n.ifIndex) };
+$list = New-Object System.Collections.Generic.List[object];
+foreach ($n in @(Get-NetAdapter)) {
+  $t = ("$($n.InterfaceDescription) $($n.Name)").ToLower();
+  if (@($vpn | Where-Object { $t.Contains($_) }).Count -gt 0) { continue };
+  if ($n.Status -ne 'Up' -and -not $phys.Contains($n.ifIndex)) { continue };
+  $list.Add([pscustomobject]@{ name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status });
+};
+if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
+
+        let needles: Vec<&str> = super::VPN_APP_TABLE.iter().map(|(needle, _)| *needle).collect();
+        let script = format!("$vpn={};\n{}", ps_arr(&needles), ADAPTER_ROWS_PS);
+        let Ok(raw) = ps(&script) else {
+            return Vec::new();
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+            return Vec::new();
+        };
+        // 只有一个口时 PowerShell 把数组退化成单个对象，与 list_interfaces 同一处理
+        let rows: Vec<&serde_json::Value> = match &v {
+            serde_json::Value::Array(a) => a.iter().collect(),
+            other => vec![other],
+        };
+        let get = |r: &serde_json::Value, k: &str| -> String {
+            r.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let mut out: Vec<super::NicInfo> = rows
+            .into_iter()
+            .filter(|r| !get(r, "name").is_empty())
+            .map(|r| {
+                let name = get(r, "name");
+                let desc = get(r, "desc");
+                let mac = get(r, "mac");
+                super::NicInfo {
+                    kind: kind_from_row(&get(r, "media"), &desc, &name),
+                    up: get(r, "status").eq_ignore_ascii_case("Up"),
+                    label: (!desc.is_empty()).then_some(desc),
+                    mac: (!mac.is_empty()).then_some(mac),
+                    name,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        // 名称字典序（Ethernet / Ethernet 2 / Wi-Fi）：类型分组是界面的事，下拉要稳定顺序
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// 系统的 UI 语言。`GetUserDefaultUILanguage` 给的是一个 LANGID：低 10 位是主语言，
+    /// 高 6 位是子语言。只把这五种字典对得上的主语言翻成标签，其余（含读不到的 0）一律
+    /// `None`，界面随后落回英文 —— 那正是没有对应字典时该有的行为。
+    ///
+    /// 之所以不走 PowerShell 问 `Get-WinSystemLocale`：那一下是秒级的子进程启动，而这一句
+    /// 排在启动路径上，用户按完图标就该看到面板。
+    fn ui_language(&self) -> Option<String> {
+        use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
+        let id = unsafe { GetUserDefaultUILanguage() };
+        let primary = id & 0x03FF;
+        let sub = id >> 10;
+        let tag = match primary {
+            // LANG_CHINESE。子语言 0x01=TW / 0x03=HK / 0x05=MO 是繁体，其余按简体。
+            0x0004 if matches!(sub, 0x01 | 0x03 | 0x05) => "zh-TW",
+            0x0004 => "zh-CN",
+            // LANG_JAPANESE / LANG_KOREAN / LANG_ENGLISH
+            0x0011 => "ja-JP",
+            0x0012 => "ko-KR",
+            0x0009 => "en-US",
+            _ => return None,
+        };
+        Some(tag.to_string())
+    }
+
+    /// 深/浅读的是当前用户的 `AppsUseLightTheme`（「设置 → 个性化 → 颜色」那一个开关写的
+    /// 就是它）。走 `reg.exe` 与开机启动那一条同一个形状：这一个键没有对应的 Win32 函数，
+    /// 而它只在窗口加载与状态广播时被问一次，不值得为它扩 `windows-sys` 的 feature 面。
+    ///
+    /// 键名是**反着说**的（它问的是「用不用浅色」），所以判据放在共享的
+    /// [`prefers_dark_from_reg`] 里由单元测试盯着：认不出输出形状时回 `None`，
+    /// 而不是猜一档。
+    fn ui_prefers_dark(&self) -> Option<bool> {
+        let out = run(
+            "reg.exe",
+            &[
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "/v",
+                "AppsUseLightTheme",
+            ],
+        )
+        .ok()?;
+        prefers_dark_from_reg(&out)
     }
 
     fn probe(&self, target: &ProbeTarget, timeout_ms: u64) -> Health {

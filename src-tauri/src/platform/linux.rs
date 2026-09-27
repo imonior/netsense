@@ -9,7 +9,8 @@
 //! 打印机走 CUPS 客户端命令（`lpstat` / `lpoptions`），与 macOS 共用同一套解析。
 
 use super::{
-    extract_mac, poll_ssid_watch, printers_from_lpstat, run, run_env, timeout_secs, C_LOCALE,
+    extract_mac, poll_ssid_watch, prefers_dark_from_gsettings, printers_from_lpstat, run, run_env,
+    timeout_secs, C_LOCALE,
     Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
     WatcherHandle,
 };
@@ -783,6 +784,90 @@ impl NetworkPlatform for LinuxPlatform {
             None
         } else {
             Some(list)
+        }
+    }
+
+    /// 本机装着的网卡（含现在没连上的），供编辑器的接口条件下拉。
+    ///
+    /// 数据源是 NetworkManager 的设备表而不是 `/sys/class/net`：那里直接有 TYPE，
+    /// 而条件下拉要给出的集合必须和 `NetworkSnapshot::sample`（同样读 `dev status`）
+    /// 说得上一句话 —— 一个口在 sysfs 里存在、却因为没被 NM 托管而永远不会进快照，
+    /// 把它列进下拉等于让用户存下一个永不命中的条件。
+    /// 排除项与快照同源：回环、VPN 隧道（条件比的是 `interfaces`，隧道在 `tunnels`）。
+    fn list_adapters(&self) -> Vec<super::NicInfo> {
+        let Ok(status) = nmcli(&["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "dev", "status"])
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<super::NicInfo> = status
+            .lines()
+            .map(split_t)
+            .filter(|f| f.len() >= 3)
+            .filter_map(|f| {
+                let dev = f[0].trim().to_string();
+                let ty = f[1].trim().to_string();
+                let state = f[2].trim().to_string();
+                let conn = f.get(3).map(|s| s.trim().to_string()).unwrap_or_default();
+                if dev.is_empty() || dev == "lo" {
+                    return None;
+                }
+                let kind = match ty.as_str() {
+                    "wifi" => super::NicKind::Wireless,
+                    "ethernet" => super::NicKind::Wired,
+                    "vpn" | "tun" | "tap" | "wireguard" => super::NicKind::Vpn,
+                    _ if super::is_tunnel_device(&dev) => super::NicKind::Vpn,
+                    _ => super::NicKind::Other,
+                };
+                if kind == super::NicKind::Vpn {
+                    return None;
+                }
+                Some(super::NicInfo {
+                    name: dev,
+                    label: if conn.is_empty() { None } else { Some(conn) },
+                    kind,
+                    up: state == "connected",
+                    ..Default::default()
+                })
+            })
+            .collect();
+        // 设备名字典序（eth0 / wlan0）：下拉要的是稳定顺序，分组交给界面
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// 桌面环境自己是怎么说「用哪种语言」的：`LANGUAGE` 优先（GTK 系的多级回退列表，
+    /// 形如 `zh_CN:en`，取第一项），然后 `LC_ALL` / `LANG`（`zh_CN.UTF-8` 这一类 POSIX
+    /// 标签）。都不成时才问一句 `locale`—— 那是给「从 systemd 服务里起来、环境被清过」
+    /// 的情形留的兜底。
+    fn ui_language(&self) -> Option<String> {
+        for name in ["LANGUAGE", "LC_ALL", "LANG"] {
+            let v = std::env::var(name).unwrap_or_default();
+            let v = v.split(':').next().unwrap_or("").trim().to_string();
+            if !v.is_empty() && v != "C" && v != "POSIX" {
+                return Some(v);
+            }
+        }
+        let out = run("locale", &["-es"]).unwrap_or_default();
+        match out.trim() {
+            "" | "C" | "POSIX" => None,
+            other => Some(other.to_string()),
+        }
+    }
+
+    /// 先问 `color-scheme`（GNOME 42 起正答「深还是浅」的那一条），它给出 `gtk` 或压根读不到
+    /// 时才去问 `gtk-theme` —— 后面那一条是它的前身，只能从主题名里猜。
+    ///
+    /// 两条都读不到就是 `None`（KDE / 没装 dconf-tools / 非桌面会话），调用方退深色。
+    /// 这里不猜：Linux 上「深色」这件事没有第二个权威来源，猜一套出来等于把用户的界面
+    /// 钉在一个谁都没说过的档位上。
+    fn ui_prefers_dark(&self) -> Option<bool> {
+        let get = |key: &str| {
+            run("gsettings", &["get", "org.gnome.desktop.interface", key]).ok()
+        };
+        let scheme = get("color-scheme");
+        match prefers_dark_from_gsettings(scheme.as_deref(), None) {
+            Some(dark) => Some(dark),
+            None => prefers_dark_from_gsettings(None, get("gtk-theme").as_deref()),
         }
     }
 
