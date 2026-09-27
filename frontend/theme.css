@@ -1,0 +1,142 @@
+/* 四座窗口共用的一份配色。
+
+   深色写在 `:root`，浅色写在 `html[data-theme="light"]`。`<html>` 上那个属性由每扇窗口自己的脚本
+   写上去，而四座窗口都是 `visible = false` 创建的 —— 被点开之前属性就落好了，用户看不到换色的
+   一闪。窗口拿这一档有两条路：随 `netsense://status` 的载荷换（面板、编辑器），或者自己问一次
+   `get_theme`（软件设置、日志窗口）。
+
+   每扇窗口继续用自己的 token 名（`editor.html` 那批 `--bg-panel` / `--btn-primary` 与 markup、
+   冒烟测试绑着），只是在内联 `:root` 里把它们**别名**到这里这套 `--t-*` 上。所以这里加的
+   是唯一的真相来源：改一个值，四扇窗口同时跟着变。
+
+   浅色不是深色的反相。徽标、状态条、路径块这些「底色 + 底上的字」成对出现的东西，在亮底上
+   必须换成另一档：深底用的是压暗的色相（`#1d3a22` 上放 `#6ee08a`），亮底反过来用淡底配深字
+   （`#dcefdc` 上放 `#14672f`）。文字与它所在的那块底至少要差 4.5:1，这一条两套都按同一句话
+   核对过 —— 只有占位符是例外（它是提示不是内容，3:1 一级就够）。 */
+
+:root {
+  color-scheme: dark;
+
+  /* — 面 — */
+  --t-bg: #1c1c1e;            /* 窗口底 */
+  --t-card: #26262a;          /* 卡片 / 面板 / 弹层 */
+  --t-sunken: #1a1a1d;        /* 输入与代码块：凹下去的那一档 */
+  --t-hover: #2e2e34;         /* 行悬停 */
+  --t-raised: #34343a;        /* 小按钮、分支标题 */
+  --t-raised-hi: #3e3e46;     /* 小按钮悬停 / 次级按钮 */
+  --t-line: #34343a;          /* 分隔线 */
+  --t-line-hi: #45454d;       /* 滚动条、卡片左边条：要比重叠的线更显 */
+  --t-inset: rgba(255, 255, 255, .02);   /* 卡片里再套的小卡 */
+  --t-mark-ok: rgba(76, 175, 80, .10);   /* 「正在生效的那一行」的行底 */
+
+  /* — 字 — */
+  --t-fg: #ededf0;
+  --t-fg-dim: #8e8e97;        /* 次要：标签、说明 */
+  --t-fg-faint: #85858e;      /* 占位符 */
+  --t-fg-accent: #9ecbff;     /* 路径块、列标题这种「用主色说一句话」的地方 */
+  --t-on-accent: #ffffff;
+  --t-on-raised: #d6d6dc;     /* 落在 `--t-raised` 那颗小按钮上的字：白字太重，次要字太淡 */
+
+  /* — 状态点与状态字（直接落在底上，所以自带亮度） — */
+  --t-ok: #34c759;
+  --t-warn: #ff9f0a;
+  --t-err: #ff6b6b;
+  --t-off: #9a9aa4;
+
+  /* — 实心按钮 — */
+  --t-accent: #2f81f7;
+  --t-danger: #cf3038;
+  --t-warning: #cc6a00;
+
+  /* — 徽标：底色 + 底上的字，成对取用 — */
+  --t-tint-neutral: #2f3640;  --t-tint-neutral-fg: #8e8e97;
+  --t-tint-ok: #1d3a22;       --t-tint-ok-fg: #6ee08a;
+  --t-tint-live: #14562b;     --t-tint-live-fg: #b7f5cb;
+  --t-tint-warn: #3f3116;     --t-tint-warn-fg: #ffcf7a;   --t-tint-warn-line: #6b4c14;
+  --t-tint-bad: #3f1f1f;      --t-tint-bad-fg: #ffa3a3;
+  --t-tint-off: #2b2b30;      --t-tint-off-fg: #8e8e97;
+  --t-tint-info: #2f3640;     --t-tint-info-fg: #9ecbff;
+  --t-tint-vpn: #3a2a4a;      --t-tint-vpn-fg: #d7b3ff;
+  --t-tint-on-accent: #0d3d1a; /* 选中行（实心主色）里面的那枚徽标要另走一档 */
+  --t-note-bg: #1b2432;       --t-note-fg: #8ea3c0;  --t-note-line: #263449;
+
+  /* — 浮起来的东西 — */
+  --t-hit: #3a2f00;           /* 日志里的命中高亮 */
+  --t-selection: rgba(47, 129, 247, .3);
+  --t-toast-bg: rgba(0, 0, 0, .82);
+  --t-mask: rgba(0, 0, 0, .5);
+  --t-shadow: 0 10px 30px rgba(0, 0, 0, .4);
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --t-bg: #f2f3f8;
+  --t-card: #ffffff;
+  --t-sunken: #e9ebf2;
+  --t-hover: #eceef5;
+  --t-raised: #e8eaf2;
+  --t-raised-hi: #dfe2ec;
+  --t-line: #d9dce6;
+  --t-line-hi: #bfc4d4;
+  --t-inset: rgba(20, 25, 50, .03);
+  --t-mark-ok: rgba(23, 122, 52, .12);
+
+  --t-fg: #14161c;
+  --t-fg-dim: #5b6172;
+  --t-fg-faint: #6f7587;
+  --t-fg-accent: #1b5cc4;
+  --t-on-accent: #ffffff;
+  --t-on-raised: #2a2f3c;
+
+  --t-ok: #177a34;
+  --t-warn: #a15c00;
+  --t-err: #c1252c;
+  --t-off: #5b6172;
+
+  --t-accent: #1a63c9;
+  --t-danger: #b3261e;
+  --t-warning: #8a4b00;
+
+  --t-tint-neutral: #e3e7f3;  --t-tint-neutral-fg: #4a5468;
+  --t-tint-ok: #dcefdc;       --t-tint-ok-fg: #14672f;
+  --t-tint-live: #c7e9cf;     --t-tint-live-fg: #0f5c25;
+  --t-tint-warn: #f7e7c4;     --t-tint-warn-fg: #7a4b06;   --t-tint-warn-line: #dcc089;
+  --t-tint-bad: #f6d9d9;      --t-tint-bad-fg: #9c2020;
+  --t-tint-off: #e6e8ef;      --t-tint-off-fg: #5b6172;
+  --t-tint-info: #dbe7fb;     --t-tint-info-fg: #1a4f9e;
+  --t-tint-vpn: #e8ddf7;      --t-tint-vpn-fg: #5b3a8e;
+  --t-tint-on-accent: rgba(255, 255, 255, .26);
+  --t-note-bg: #e9ecf4;       --t-note-fg: #4a5468;  --t-note-line: #d5dae6;
+
+  --t-hit: #ffdf7e;
+  --t-selection: rgba(26, 99, 201, .22);
+  --t-toast-bg: rgba(35, 38, 47, .94);
+  --t-mask: rgba(28, 32, 46, .34);
+  --t-shadow: 0 10px 30px rgba(28, 34, 58, .18);
+}
+
+/* 选中的字要看得清：默认的蓝色高亮在深底上会把字吃掉，浅底上又和主色撞车。
+   这里不用 `color-mix()`：本应用最低支持 macOS 10.15，那一代的 WebView 解析不了这个函数，
+   整条声明会被丢掉 —— 而半透明主色本来就是一句能直接写出来的值。 */
+::selection {
+  background: var(--t-selection);
+  color: var(--t-fg);
+}
+
+/* 占位符是提示不是值：比正文淡，但要淡到能读完。 */
+::placeholder {
+  color: var(--t-fg-faint);
+  opacity: 1;
+}
+
+/* 键盘焦点必须看得见：鼠标点输入框有边框变色，其余可聚焦元素靠这一圈描边。 */
+:focus-visible {
+  outline: 2px solid var(--t-accent);
+  outline-offset: 1px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--t-line-hi);
+  border-radius: 4px;
+}

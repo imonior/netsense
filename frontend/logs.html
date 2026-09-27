@@ -3,17 +3,20 @@
 <head>
   <meta charset="utf-8">
   <title>NetSense</title>
+  <link rel="stylesheet" href="theme.css">
   <style>
+    /* 这一份只在本窗口内起作用的别名：markup 与旧代码认的是左边的名字，
+       颜色的真相在 theme.css 的 `--t-*` 那一套里。深浅两套共用同一批别名。 */
     :root {
-      --bg: #1c1c1e;
-      --bg-card: #26262a;
-      --line: #34343a;
-      --fg: #ededf0;
-      --muted: #8e8e97;
-      --accent: #2f81f7;
-      --ok: #34c759;
-      --warn: #ff9f0a;
-      --err: #ff6b6b;
+      --bg: var(--t-bg);
+      --bg-card: var(--t-card);
+      --line: var(--t-line);
+      --fg: var(--t-fg);
+      --muted: var(--t-fg-dim);
+      --accent: var(--t-accent);
+      --ok: var(--t-ok);
+      --warn: var(--t-warn);
+      --err: var(--t-err);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
@@ -46,9 +49,9 @@
     .val { color: var(--muted); white-space: nowrap; }
     /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 */
     .path {
-      padding: 5px 8px; background: #1a1a1d; border: 1px solid var(--line);
+      padding: 5px 8px; background: var(--t-sunken); border: 1px solid var(--line);
       border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px; color: #9ecbff; word-break: break-all; user-select: text; flex: none;
+      font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text; flex: none;
     }
     pre {
       flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 8px 10px;
@@ -61,16 +64,15 @@
     .l-W { color: var(--warn); }
     .l-I { color: var(--fg); }
     .l-D { color: var(--muted); }
-    .hit { background: #3a2f00; border-radius: 2px; }
+    .hit { background: var(--t-hit); border-radius: 2px; }
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
-      background: rgba(0,0,0,.82); border: 1px solid var(--line); color: #fff;
+      background: var(--t-toast-bg); border: 1px solid var(--line); color: var(--t-on-accent);
       padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
       transition: opacity .18s; pointer-events: none; white-space: nowrap;
     }
     .toast.show { opacity: 1; }
     ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-thumb { background: #45454d; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -121,6 +123,10 @@
     const syncLang = () => invoke("get_language")
       .then((c) => { document.documentElement.lang = c; })
       .catch(() => {});
+    // 配色那一档由后端定：问操作系统的是它一处，四座窗口看到的才是同一份答案，
+    // 而 CSS 的 `prefers-color-scheme` 让每座窗口各自解释一遍。`theme.css` 只认这个属性。
+    const applyTheme = (k) => { if (k) document.documentElement.dataset.theme = k; };
+    const syncTheme = () => invoke("get_theme").then(applyTheme).catch(() => {});
 
     function toast(msg) {
       const n = el("toast");
@@ -239,6 +245,9 @@
     }, 2500);
 
     // 语言在软件设置里改；这个窗口开着的时候改了，就得当下跟着换口径。
+    // 配色同理，但它还要多防一手：选了「跟随系统」时操作系统可能自己换档（日落后），
+    // 而广播只在引擎有动静时才来 —— 被点开的这一刻对一次色，用户看到的才是当下的系统。
+    window.addEventListener("focus", syncTheme);
     let langShown = null;
     async function syncLanguage(code) {
       if (!code || code === langShown) return;
@@ -250,11 +259,12 @@
     if (window.__TAURI__ && window.__TAURI__.event) {
       window.__TAURI__.event.listen("netsense://status", (e) => {
         const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
-        if (p) syncLanguage(p.language);
+        if (p) { syncLanguage(p.language); applyTheme(p.theme); }
       });
     }
 
     (async () => {
+      syncTheme();
       try { strings = await invoke("get_strings"); } catch (e) {}
       applyI18n();
       await loadFiles(false);

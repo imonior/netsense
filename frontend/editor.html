@@ -3,13 +3,17 @@
 <head>
   <meta charset="utf-8">
   <title>NetSense</title>
+  <link rel="stylesheet" href="theme.css">
   <style>
+    /* 四座窗口共用一份配色。这里的 token 名与另外三扇不同（markup 与冒烟测试都按名字
+       引用它们，改名不如对齐值），值全部别名到 theme.css 的那套 `--t-*` 上 ——
+       深浅两套走同一批别名，换档只是 `<html data-theme>` 上那一个属性。 */
     :root {
-      --bg-main: #121212; --bg-panel: #1e1e1e; --bg-input: #2d2d2d;
-      --border-color: #383838; --text-main: #e0e0e0; --text-label: #aaaaaa;
-      --text-accent: #64B5F6; --btn-primary: #1976D2; --btn-danger: #D32F2F;
-      --btn-warning: #E65100; --radius-md: 8px; --radius-sm: 4px;
-      --ok: #4CAF50; --warn: #FFB300; --err: #ef5350; --off: #7a7a7a;
+      --bg-main: var(--t-bg); --bg-panel: var(--t-card); --bg-input: var(--t-sunken);
+      --border-color: var(--t-line); --text-main: var(--t-fg); --text-label: var(--t-fg-dim);
+      --text-accent: var(--t-fg-accent); --btn-primary: var(--t-accent); --btn-danger: var(--t-danger);
+      --btn-warning: var(--t-warning); --radius-md: 8px; --radius-sm: 4px;
+      --ok: var(--t-ok); --warn: var(--t-warn); --err: var(--t-err); --off: var(--t-off);
     }
     body {
       background-color: var(--bg-main); color: var(--text-main);
@@ -53,12 +57,12 @@
       border-left: 3px solid transparent; font-size: 12px;
       display: flex; align-items: center; gap: 6px;
     }
-    .prow:hover { background: #2a2a2a; }
-    .prow.active { background: #1565C0; color: #fff; }
-    .prow.active .badge-slot .b-active { background: #0d3d1a; }
+    .prow:hover { background: var(--t-hover); }
+    .prow.active { background: var(--btn-primary); color: var(--t-on-accent); }
+    .prow.active .badge-slot .b-active { background: var(--t-tint-on-accent); }
     /* 生效中的那一条：绿色描边。它和「选中」是两件事，可以同时出现。 */
-    .prow.live { border-left-color: var(--ok); background: rgba(76, 175, 80, .10); }
-    .prow.live.active { border-left-color: var(--ok); background: #14562b; }
+    .prow.live { border-left-color: var(--ok); background: var(--t-mark-ok); }
+    .prow.live.active { border-left-color: var(--ok); background: var(--t-tint-live); }
     .prow.dirty .li-name::after { content: " ●"; color: var(--warn); }
     .li-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .li-name.in { min-width: 0; }
@@ -66,18 +70,18 @@
     .badge-slot { display: flex; align-items: center; }
     .group-title {
       font-size: 11px; color: var(--text-accent); margin: 10px 0 5px 0;
-      padding-bottom: 3px; border-bottom: 1px dashed #333; font-weight: bold;
+      padding-bottom: 3px; border-bottom: 1px dashed var(--border-color); font-weight: bold;
       display: flex; justify-content: space-between; align-items: center; gap: 6px;
     }
     .group-title:first-child { margin-top: 0; }
     /* 分支标题（THEN / ELSE）：本列先 THEN 后 ELSE，与执行顺序一致 */
     .branch-title {
       margin: 12px 0 6px; padding: 3px 7px; border-radius: var(--radius-sm);
-      background: #26262a; color: #cfe3ff; font-size: 11px; font-weight: 700;
+      background: var(--t-raised); color: var(--t-fg-accent); font-size: 11px; font-weight: 700;
       letter-spacing: .3px;
     }
     .branch-title:first-child { margin-top: 0; }
-    .branch-title.else { color: #d6d6dc; }
+    .branch-title.else { color: var(--t-on-raised); }
     .form-group { margin-bottom: 5px; display: grid; grid-template-columns: 84px 1fr; gap: 6px; align-items: center; }
     label { color: var(--text-label); font-size: 11px; text-align: right; line-height: 1.2; }
     input, select, textarea {
@@ -88,13 +92,13 @@
     input[type=checkbox] { width: auto; }
     input:focus, select:focus, textarea:focus { border-color: var(--btn-primary); outline: none; }
     textarea { resize: vertical; min-height: 90px; font-family: ui-monospace, Menlo, monospace; }
-    .hint { color: #7a7a7a; font-size: 10px; line-height: 1.35; margin: 2px 0 6px; }
+    .hint { color: var(--text-label); font-size: 10px; line-height: 1.35; margin: 2px 0 6px; }
     .card {
       border: 1px solid var(--border-color); border-radius: var(--radius-sm);
-      padding: 5px 6px; margin-bottom: 5px; background: rgba(255,255,255,.02);
+      padding: 5px 6px; margin-bottom: 5px; background: var(--t-inset);
     }
     .card-head { display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-bottom: 4px; }
-    .card-title { font-size: 10px; color: #FFD54F; font-weight: bold; overflow: hidden;
+    .card-title { font-size: 10px; color: var(--t-tint-warn-fg); font-weight: bold; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
     .kv { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; line-height: 1.7; }
     .kv .k { color: var(--text-label); flex: none; }
@@ -103,11 +107,11 @@
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
     .grid2 > .full { grid-column: 1 / -1; }
     .mini-btn {
-      background: #333; color: #cfcfcf; border: 1px solid var(--border-color);
+      background: var(--t-raised); color: var(--t-on-raised); border: 1px solid var(--border-color);
       border-radius: var(--radius-sm); font-size: 9px; padding: 1px 5px; cursor: pointer; flex: none;
     }
-    .mini-btn:hover { background: #444; color: #fff; }
-    .empty { color: #777; font-size: 10px; padding: 4px 0; }
+    .mini-btn:hover { background: var(--t-raised-hi); }
+    .empty { color: var(--text-label); font-size: 10px; padding: 4px 0; }
     .switch { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
     .switch.inline { margin: 0; }
     .switch label, .switch span { text-align: left; color: var(--text-main); }
@@ -118,30 +122,30 @@
     /* 三态徽标：条件 / 规则 / Profile 共用一套 */
     .badge {
       font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 999px;
-      background: #2f3640; color: var(--off); letter-spacing: .3px; flex: none;
+      background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); letter-spacing: .3px; flex: none;
     }
-    .b-match { background: #1d3a22; color: #6ee08a; }
-    .b-nomatch { background: #3a2020; color: #ff9d9d; }
-    .b-inactive { background: #34343a; color: #9a9aa4; }
-    .b-active { background: #14562b; color: #b7f5cb; }
-    .b-conflict { background: #4a3410; color: #ffd27f; }
-    .b-error { background: #4a1515; color: #ffb0b0; }
-    .b-dim { background: #26262a; color: #8e8e97; }
+    .b-match { background: var(--t-tint-ok); color: var(--t-tint-ok-fg); }
+    .b-nomatch { background: var(--t-tint-bad); color: var(--t-tint-bad-fg); }
+    .b-inactive { background: var(--t-raised); color: var(--t-off); }
+    .b-active { background: var(--t-tint-live); color: var(--t-tint-live-fg); }
+    .b-conflict { background: var(--t-tint-warn); color: var(--t-tint-warn-fg); }
+    .b-error { background: var(--t-tint-bad); color: var(--t-tint-bad-fg); }
+    .b-dim { background: var(--t-tint-off); color: var(--t-tint-off-fg); }
     /* 动作级实时状态：一条 3B1 动作跑完（或超时）就换一个色，
        用户据此知道是哪一条卡住了，而不是整批一个「失败」 */
     .achip { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 999px;
-      background: #2f3640; color: var(--off); letter-spacing: .3px; flex: none; }
+      background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); letter-spacing: .3px; flex: none; }
     .achip:empty { display: none; }
-    .achip.ok { background: #1d3a22; color: #6ee08a; }
-    .achip.bad { background: #4a1515; color: #ffb0b0; }
-    .achip.run { background: #4a3410; color: #ffd27f; }
+    .achip.ok { background: var(--t-tint-ok); color: var(--t-tint-ok-fg); }
+    .achip.bad { background: var(--t-tint-bad); color: var(--t-tint-bad-fg); }
+    .achip.run { background: var(--t-tint-warn); color: var(--t-tint-warn-fg); }
     /* 失败原因摊在动作行下面：只进 toast 或 title 的话，用户一眨眼就没了，
        而这正是他要拿去排障的那句话 */
-    .aerr { color: #ffb0b0; font-size: 10px; margin-top: 3px; word-break: break-word; }
-    .rule-box { border-left: 3px solid #3a3a3a; }
+    .aerr { color: var(--t-err); font-size: 10px; margin-top: 3px; word-break: break-word; }
+    .rule-box { border-left: 3px solid var(--t-line-hi); }
     .rule-box.r-match { border-left-color: var(--ok); }
     .rule-box.r-nomatch { border-left-color: var(--err); }
-    .rule-box.r-inactive { border-left-color: #4a4a4a; }
+    .rule-box.r-inactive { border-left-color: var(--t-line); }
     .btn-group {
       padding: 8px 10px; border-top: 1px solid var(--border-color);
       display: flex; justify-content: flex-end; gap: 8px; flex: none;
@@ -149,29 +153,29 @@
       border: 1px solid var(--border-color);
     }
     button {
-      background: var(--btn-primary); color: #fff; border: none; padding: 5px 12px;
+      background: var(--btn-primary); color: var(--t-on-accent); border: none; padding: 5px 12px;
       border-radius: var(--radius-sm); cursor: pointer; font-size: 11px;
     }
     button:hover { opacity: .9; }
     button.danger { background: var(--btn-danger); }
     button.warning { background: var(--btn-warning); }
-    button.secondary { background: #4a4a4a; color: #ccc; }
-    button.ghost { background: #333; color: #cfcfcf; border: 1px solid var(--border-color); }
+    button.secondary { background: var(--t-raised-hi); color: var(--t-on-raised); }
+    button.ghost { background: var(--t-raised); color: var(--t-on-raised); border: 1px solid var(--border-color); }
     .banner {
-      background: #4a3410; color: #ffd27f; border: 1px solid #6b4c14;
+      background: var(--t-tint-warn); color: var(--t-tint-warn-fg); border: 1px solid var(--t-tint-warn-line);
       border-radius: var(--radius-sm); padding: 6px 10px; font-size: 11px; flex: none;
     }
-    .banner.info { background: #1b2432; color: #8ea3c0; border-color: #263449; }
+    .banner.info { background: var(--t-note-bg); color: var(--t-note-fg); border-color: var(--t-note-line); }
     .banner[hidden] { display: none; }
     #toast {
       position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
-      background: rgba(0,0,0,.85); border: 1px solid var(--border-color); color: #fff;
+      background: var(--t-toast-bg); border: 1px solid var(--border-color); color: var(--t-on-accent);
       padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
       transition: opacity .2s; pointer-events: none; max-width: 92vw; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap;
     }
     #toast.show { opacity: 1; }
-    .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    .modal-mask { position: fixed; inset: 0; background: var(--t-mask);
       display: flex; align-items: center; justify-content: center; z-index: 50; }
     .modal-mask[hidden] { display: none; }
     .modal { width: 400px; max-width: 92%; background: var(--bg-panel);
@@ -181,7 +185,6 @@
     .modal .mv { font-size: 11px; color: var(--text-label); line-height: 1.5; }
     .modal ul { margin: 8px 0; padding-left: 18px; font-size: 12px; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
-    ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -270,6 +273,10 @@
   const syncLang = () => invoke("get_language")
     .then((c) => { document.documentElement.lang = c; })
     .catch(() => {});
+  // 配色那一档由后端定：问操作系统的是它一处，四座窗口看到的才是同一份答案。
+  // 编辑器不单独去问 —— 启动读的那一份状态里就带着它，`theme.css` 只认
+  // `<html data-theme>` 这一个属性。
+  const applyTheme = (k) => { if (k) document.documentElement.dataset.theme = k; };
   let _seq = 0;
   const uid = (p) => p + Date.now().toString(36).slice(-5) + (_seq++).toString(36);
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -294,7 +301,8 @@
   let globalDraft = { fallback: null, allowed_scripts: [] };
   let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings, last_run, workers}
   let wifiList = [];    // 系统已保存的 SSID —— SSID 条件值的候选
-  let nicList = [];     // 系统硬件网卡（get_interfaces）—— 接口条件值的候选
+  let nicList = [];     // 在用的网卡（get_interfaces）—— 「当前网络」那一格的事实来源
+  let adapterList = []; // 本机装着的网卡（get_adapters，含没插线的口）—— 接口条件值的候选
   let printerList = []; // 系统打印机（[{name, is_default}]）—— 默认打印机动作的候选
   let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
@@ -401,11 +409,6 @@
   // wifi_ssid 不在这张表里：它的空选项/输入走专用下拉（condValue），示例名当占位会像一条假 SSID。
   const COND_PH = { gateway_mac: "aa:bb:cc:dd:ee:ff", bssid: "00:11:22:33:44:55" };
 
-  /// 系统硬件网络出口：条件比的是「在用的普通网卡」，VPN 隧道不是出口，不能选。
-  const ifaceNames = () => nicList
-    .filter(n => n && n.name && n.kind !== "vpn")
-    .map(n => nicTitle(n));
-
   /* —————————————————————— 第一层：当前状态条 —————————————————————— */
   function renderStrip() {
     const aid = activeId();
@@ -486,9 +489,7 @@
         `</span></div>`;
     }).filter(Boolean).join("");
     
-    // 附加信息：所有网卡名列表 + VPN 隧道
-    if ((s.interfaces || []).length)
-      p3 += `<div class="kv"><span class="k">${esc(t("editor.hardware_column"))}</span><span class="v">${esc(s.interfaces.join(", "))}</span></div>`;
+    // 附加信息：VPN 隧道单独成行（硬件口已经在上面的「接口」行里了）
     if ((s.tunnels || []).length)
       p3 += `<div class="kv"><span class="k">${esc(t("editor.nic_vpn"))}</span><span class="v">${esc(s.tunnels.join(", "))}</span></div>`;
     $("st-net").innerHTML = p3 || `<span class="empty">${esc(t("editor.loading_status"))}</span>`;
@@ -644,32 +645,20 @@
     }
     if (type === "network_interface") {
       const cur = String(c.value || "").trim();
-      // 构建 nicTitle -> name 的映射，用于显示和存储
-      const ifaceMap = new Map();
-      const titles = [];
-      for (const n of nicList) {
-        if (!n || !n.name || n.kind === "vpn") continue;
-        const title = nicTitle(n);
-        ifaceMap.set(title, n.name);
-        titles.push(title);
-      }
-      // 当前值可能是设备名，需要找到对应的 title
-      let curTitle = "";
-      for (const [title, name] of ifaceMap) {
-        if (name === cur) { curTitle = title; break; }
-      }
+      // 候选来自「本机装着的网卡」而不是「现在连着的网卡」：拔着网线时也得能把那个口配好。
+      // VPN 隧道不在候选里 —— 条件比对的是在用的普通网卡，隧道走的是另一套（见 identity.rs），
+      // 给一个永远不会命中的名字比少给一个更糟。这层筛法在三份平台实现里，不在这里重复。
+      const items = adapterList
+        .filter(n => n && n.name)
+        .map(n => ({ value: n.name, title: nicTitle(n) }));
       // 配置里写着这台机器现在没有的网卡是合法的（换台笔记本、拔了扩展坞）：
       // 那一项原样列出来，否则下拉会把已存的值改成另一张卡，一次保存就把人改了。
-      if (cur && !curTitle) {
-        titles.unshift(cur); // 未知设备直接放最前面
-        ifaceMap.set(cur, cur);
-      }
+      if (cur && cur !== "*" && !items.some(x => x.value === cur)) items.unshift({ value: cur, title: cur });
+      // `*` 是接口条件的通配：任何一张在用的网卡都算命中（判据只有一份，见 evaluator.rs）。
       return `<select data-bind="${b}.value">` +
-        `<option value=""${cur ? "" : " selected"}>—</option>` +
-        titles.map(title => {
-          const name = ifaceMap.get(title) || title;
-          return `<option value="${esc(name)}" ${name === cur ? "selected" : ""}>${esc(title)}</option>`;
-        }).join("") +
+        `<option value=""${cur ? "" : " selected"}>${esc(t("editor.iface_placeholder", "Select adapter…"))}</option>` +
+        `<option value="*"${cur === "*" ? " selected" : ""}>${esc(t("editor.iface_any", "Any adapter (*)"))}</option>` +
+        items.map(x => `<option value="${esc(x.value)}"${x.value === cur ? " selected" : ""}>${esc(x.title)}</option>`).join("") +
         `</select>`;
     }
     return txt(`${b}.value`, c.value, COND_PH[type] || "");
@@ -1085,6 +1074,24 @@
     refreshBanner();
     refreshRun();
     maybeShowConflictDialog();
+    refreshNics();
+  }
+
+  /// 「当前网络」那一格的事实来源是 [`nicList`]，而它过去只在开窗时取一次：下发静态 IP
+  /// 之后再开着的编辑器看一眼，地址还是改之前的（Windows 现场报的「信息延迟」就是这个）。
+  /// 后端每轮都会广播，所以跟着广播取新即可 —— 不自己起定时器，避免多一套节律。
+  let nicsFetching = false;
+  async function refreshNics() {
+    if (nicsFetching) return;
+    nicsFetching = true;
+    try {
+      nicList = asArray(await invoke("get_interfaces"));
+      renderStrip();
+    } catch (e) {
+      // 窗口已关 / 后端正忙：下一轮广播自然会再试一次，这里不值得打扰用户。
+    } finally {
+      nicsFetching = false;
+    }
   }
 
   /* —————————————————————— 选中与新建 —————————————————————— */
@@ -1145,11 +1152,15 @@
       globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
       wifiList = (await invoke("get_networks").catch(() => [])) || [];
       nicList = asArray(await invoke("get_interfaces").catch(() => []));
+      adapterList = asArray(await invoke("get_adapters").catch(() => []));
       printerList = asArray(await invoke("get_printers").catch(() => []));
       const rawSt = await invoke("get_status");
       const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
       view = st.engine || null;
       langShown = st.language || langShown;
+      // 配色跟着同一份快照走：首绘之前它就落地，用户看不到换色的一闪
+      // （四扇窗口都是 `visible: false` 创建的，被点开时属性早已写好）。
+      applyTheme(st.theme);
     } catch (e) {
       $("col-cond").innerHTML = `<div class="empty">invoke failed (run via cargo tauri dev): ${esc(String(e))}</div>`;
       return;
@@ -1669,7 +1680,9 @@
     L("netsense://status", (e) => {
       const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
       if (p && p.engine) { view = p.engine; refreshLive(); }
-      if (p) syncLanguage(p.language);
+      // 语言与配色都是在软件设置窗口里改的，这个窗口只是跟着广播换口径 ——
+      // 一次改档四扇窗口同时变，才不会出现「编辑器还是深色、面板已经浅色」。
+      if (p) { syncLanguage(p.language); applyTheme(p.theme); }
     });
     L("netsense://evaluation", (e) => {
       const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;

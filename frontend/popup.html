@@ -3,30 +3,41 @@
 <head>
   <meta charset="utf-8">
   <title>NetSense</title>
+  <link rel="stylesheet" href="theme.css">
   <style>
+    /* 本窗口内的别名：markup 认左边的名字，颜色的真相在 theme.css 的 `--t-*`，
+       深浅两套共用同一批别名（`color-scheme` 也在那一份里按档声明）。 */
     :root {
-      --bg: #1c1c1e;
-      --bg-card: #26262a;
-      --line: #34343a;
-      --fg: #ededf0;
-      --muted: #8e8e97;
-      --accent: #2f81f7;
-      --ok: #34c759;
-      --warn: #ff9f0a;
+      --bg: var(--t-bg);
+      --bg-card: var(--t-card);
+      --line: var(--t-line);
+      --fg: var(--t-fg);
+      --muted: var(--t-fg-dim);
+      --accent: var(--t-accent);
+      --ok: var(--t-ok);
+      --warn: var(--t-warn);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
     body {
       background: var(--bg); color: var(--fg);
       font: 12px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-      user-select: none; overflow: hidden;
+      user-select: none;
+      /* 整块面板是唯一的滚动容器：以前每段各自开 overflow-y，网卡多了时外面不动、
+         里面滚，鼠标滚轮落在哪一段就只滚那一段（用户报的「内部模块可滚动」）。 */
+      overflow-y: auto;
       display: flex; flex-direction: column;
     }
+    /* 滚动容器里的 flex 子项默认允许压缩：不关掉的话内容一多，各段被挤扁，
+       永远滚不到底。 footer 的 margin-top:auto 与这条不冲突（没有剩余空间时自动边距为 0）。 */
+    body > * { flex: none; }
     header {
+      position: sticky; top: 0; z-index: 5; background: var(--bg);
       display: flex; align-items: center; justify-content: space-between;
       padding: 10px 12px 8px; border-bottom: 1px solid var(--line);
     }
     header b { font-size: 13px; letter-spacing: .2px; }
+    header .ver { font-size: 11px; color: var(--muted); margin-left: 5px; }
     .head-right { display: flex; align-items: center; gap: 6px; }
     button.tiny {
       flex: none; padding: 2px 7px; font-size: 10px; border-radius: 5px;
@@ -46,79 +57,82 @@
     .dot.on { background: var(--ok); }
     /* Profile 状态徽标：ACTIVE / CONFLICT / ERROR 三种必须一眼分得开
        （CONFLICT 是条件层，ERROR 是执行层，混在一起就没法排障） */
-    .sw .st { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #2f3640; color: var(--muted); }
-    .sw .st.active { background: #1d3a22; color: #6ee08a; }
-    .sw .st.conflict { background: #3a3018; color: #ffc768; }
-    .sw .st.error { background: #3a1d1d; color: #ff8080; }
-    .sw .st.off { background: #26262a; color: #6e6e76; }
+    .sw .st { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); }
+    .sw .st.active { background: var(--t-tint-ok); color: var(--t-tint-ok-fg); }
+    .sw .st.conflict { background: var(--t-tint-warn); color: var(--t-tint-warn-fg); }
+    .sw .st.error { background: var(--t-tint-bad); color: var(--t-tint-bad-fg); }
+    .sw .st.off { background: var(--t-tint-off); color: var(--t-tint-off-fg); }
     .sw.disabled { color: var(--muted); }
     .v.warn { color: var(--warn); }
-    .v.bad { color: #ff6b6b; }
-    .cards { margin: 8px 12px 0; max-height: 300px; overflow-y: auto; }
+    .v.bad { color: var(--t-err); }
+    .cards { margin: 8px 12px 0; }
     .nic-card {
       background: var(--bg-card); border: 1px solid var(--line);
       border-radius: 8px; padding: 7px 9px; margin-bottom: 6px;
     }
     .nic-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 3px; }
     .nic-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .nic-tag { font-size: 9px; padding: 1px 5px; border-radius: 999px; background: #2f3640; color: #9ecbff; white-space: nowrap; }
-    .nic-tag.vpn { background: #3a2a4a; color: #d7b3ff; }
+    .nic-tag { font-size: 9px; padding: 1px 5px; border-radius: 999px; background: var(--t-tint-info); color: var(--t-tint-info-fg); white-space: nowrap; }
+    .nic-tag.vpn { background: var(--t-tint-vpn); color: var(--t-tint-vpn-fg); }
     .nic-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
     .nic-row .k { color: var(--muted); }
     .nic-row .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 66%; }
     .section { padding: 10px 12px 0; color: var(--muted); font-size: 10px;
                text-transform: uppercase; letter-spacing: .8px; }
-    .switches { margin: 6px 12px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
-                max-height: 176px; overflow-y: auto; }
+    .switches { margin: 6px 12px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     .sw {
       display: flex; justify-content: space-between; align-items: center;
       padding: 7px 10px; cursor: pointer; font-size: 12px;
     }
     .sw + .sw { border-top: 1px solid var(--line); }
-    .sw:hover { background: #2e2e34; }
+    .sw:hover { background: var(--t-hover); }
     .sw.current { color: var(--ok); }
     .sw .go { color: var(--muted); font-size: 11px; }
     .sw:hover .go { color: var(--accent); }
     .empty { padding: 10px; color: var(--muted); text-align: center; }
     footer {
       margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--line);
-      display: flex; gap: 8px;
+      display: flex; flex-wrap: wrap; gap: 8px;
     }
     button {
       flex: 1; padding: 7px 0; font-size: 12px; border-radius: 6px; cursor: pointer;
       border: 1px solid var(--line); background: var(--bg-card); color: var(--fg);
     }
-    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    /* 六个入口塞在一行里，每个只剩 50px 宽，「Check for Updates」会被挤到换行或截断；
+       这里按三列排，宽度不够就自己换行。 */
+    footer button { flex: 1 1 28%; min-width: 88px; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     button:active { transform: translateY(1px); }
+    /* 托盘面板只有按钮，但键盘 Tab 也得看得出焦点在哪一条上。 */
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .toast {
       position: fixed; left: 50%; bottom: 54px; transform: translateX(-50%);
-      background: rgba(0,0,0,.82); border: 1px solid var(--line); color: #fff;
+      background: var(--t-toast-bg); border: 1px solid var(--line); color: var(--t-on-accent);
       padding: 5px 12px; border-radius: 999px; font-size: 11px; opacity: 0;
       transition: opacity .18s; pointer-events: none; white-space: nowrap;
     }
     .toast.show { opacity: 1; }
     ::-webkit-scrollbar { width: 5px; }
-    ::-webkit-scrollbar-thumb { background: #45454d; border-radius: 4px; }
-    .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    .modal-mask { position: fixed; inset: 0; background: var(--t-mask);
       display: flex; align-items: center; justify-content: center; z-index: 50; }
     .modal-mask[hidden] { display: none; }
     .modal { width: 304px; max-width: 92%; background: var(--bg-card);
       border: 1px solid var(--line); border-radius: 10px; padding: 14px;
-      box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+      box-shadow: var(--t-shadow); }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 12px; color: var(--muted); margin: 3px 0; }
     .modal .mv b { color: var(--fg); }
-    .modal pre { background: #1a1a1d; border: 1px solid var(--line); border-radius: 6px;
+    .modal pre { background: var(--t-sunken); border: 1px solid var(--line); border-radius: 6px;
       padding: 6px 8px; font-size: 11px; overflow-x: auto; margin: 6px 0;
       white-space: pre-wrap; word-break: break-all; }
     .modal .row-btns { display: flex; gap: 8px; margin-top: 10px; }
     .modal .row-btns button { flex: 1; padding: 7px 0; font-size: 12px; border-radius: 6px;
       cursor: pointer; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
-    .modal .row-btns button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .modal .row-btns button:first-child { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     .modal .notes { max-height: 130px; overflow-y: auto; font-size: 11px; color: var(--muted);
       white-space: pre-wrap; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
-    .modal .err { color: #ff6b6b; font-size: 11px; word-break: break-word; margin: 6px 0; }
-    .progress { height: 6px; background: #1a1a1d; border: 1px solid var(--line);
+    .modal .err { color: var(--t-err); font-size: 11px; word-break: break-word; margin: 6px 0; }
+    .progress { height: 6px; background: var(--t-sunken); border: 1px solid var(--line);
       border-radius: 999px; overflow: hidden; margin: 8px 0 4px; }
     .progress .bar { height: 100%; width: 0%; background: var(--accent); border-radius: 999px;
       transition: width .2s ease; }
@@ -128,7 +142,7 @@
 </head>
 <body>
   <header>
-    <b>NetSense</b>
+    <span><b>NetSense</b><span class="ver" id="ver"></span></span>
     <span class="head-right">
       <button class="tiny" id="btn-quit" data-i18n="tray.quit">Quit NetSense</button>
     </span>
@@ -160,10 +174,11 @@
   <div class="switches" id="switches"></div>
 
   <footer>
+    <button class="primary" id="btn-editor" data-i18n="popup.automation">Automation</button>
     <button id="btn-settings" data-i18n="popup.settings">Settings</button>
     <button id="btn-logs" data-i18n="popup.logs">Logs</button>
     <button id="btn-dhcp" data-i18n="popup.dhcp">DHCP</button>
-    <button class="primary" id="btn-probe" data-i18n="popup.probe">Probe</button>
+    <button id="btn-probe" data-i18n="popup.probe">Probe</button>
     <button id="btn-update" data-i18n="popup.check_update">Check for Updates</button>
   </footer>
   <div class="toast" id="toast"></div>
@@ -188,6 +203,10 @@
     const syncLang = () => invoke("get_language")
       .then((c) => { document.documentElement.lang = c; })
       .catch(() => {});
+    // 配色那一档由后端定：问操作系统的是它一处，四座窗口看到的才是同一份答案。
+    // 面板不需要单独去问 —— 每次 refresh 读的状态里就带着它，而「被点开」正是
+    // 唯一需要重新对色的时刻。`theme.css` 只认 `<html data-theme>` 这一个属性。
+    const applyTheme = (k) => { if (k) document.documentElement.dataset.theme = k; };
     let nics = [];
 
     function toast(msg) {
@@ -583,6 +602,15 @@
       renderUpdate(d);
     }
 
+    /// 标题上的版本号：与软件设置窗口读同一个来源（`get_app_settings`）。
+    /// 排障时「我手上是哪一版」这句话要在开面板的那一刻就能说出口；取不到就整段不显示。
+    function showVersion() {
+      invoke("get_app_settings").then((raw) => {
+        const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (d && d.version) document.getElementById("ver").textContent = "v" + d.version;
+      }).catch(() => {});
+    }
+
     async function refresh() {
       try {
         const raw = await invoke("get_status");
@@ -593,6 +621,7 @@
           langShown = data.language;
           strings = await invoke("get_strings");
         }
+        applyTheme(data.theme);
         // 网卡清单先取再渲染：面板第一段要显示的就是「在用的那张」的 MAC / 掩码 / IPv6，
         // 而主网卡的判据只在 Rust 里有一份（列表首位即主网卡）。
         const rawNics = await invoke("get_interfaces");
@@ -615,8 +644,9 @@
       }
     }
 
-    // 面板上的「设置」指向**软件设置**（语言、开机启动、日志）；自动化配置的编辑器
-    // 从那个窗口里进入。两份配置各有自己的入口，面板不再兼任配置文件的管理员。
+    // 面板上的「自动化配置」直达编辑器（配置 Profile / 条件 / 动作的那个窗口），
+    // 「设置」指向**软件设置**（语言、开机启动、日志）。两份配置各有自己的入口。
+    document.getElementById("btn-editor").onclick = () => invoke("open_editor").catch(() => {});
     document.getElementById("btn-settings").onclick = () => invoke("open_settings").catch(() => {});
     // 「日志」开的是**读日志的那个窗口**，不是文件管理器：面板上按它的人要的是看一眼
     // 刚才发生了什么，而不是被丢进一堆 .log 文件前面。目录入口在软件设置里。
@@ -652,6 +682,7 @@
     (async () => {
       try { strings = await invoke("get_strings"); } catch (e) {}
       applyI18n();
+      showVersion();
       refresh();
       // 启动后静默检查一次：发现新版本才弹窗，且本次会话只提示一次
       setTimeout(() => {

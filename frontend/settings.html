@@ -3,16 +3,20 @@
 <head>
   <meta charset="utf-8">
   <title>NetSense</title>
+  <link rel="stylesheet" href="theme.css">
   <style>
+    /* 本窗口内的别名：markup 认左边的名字，颜色的真相在 theme.css 的 `--t-*`，
+       深浅两套共用同一批别名（`color-scheme` 也在那一份里按档声明，
+       原生控件的深浅正是跟着它走的）。 */
     :root {
-      --bg: #1c1c1e;
-      --bg-card: #26262a;
-      --line: #34343a;
-      --fg: #ededf0;
-      --muted: #8e8e97;
-      --accent: #2f81f7;
-      --ok: #34c759;
-      --warn: #ff9f0a;
+      --bg: var(--t-bg);
+      --bg-card: var(--t-card);
+      --line: var(--t-line);
+      --fg: var(--t-fg);
+      --muted: var(--t-fg-dim);
+      --accent: var(--t-accent);
+      --ok: var(--t-ok);
+      --warn: var(--t-warn);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
@@ -38,10 +42,12 @@
     .row { display: flex; align-items: center; gap: 10px; }
     .row + .row { margin-top: 8px; }
     .row .k { flex: 1; min-width: 0; }
-    select, input[type=number] {
+    select, input[type=text], input[type=number] {
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
       border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px;
     }
+    input[type=text] { flex: 1; min-width: 0; }
+    input[type=text]:disabled { color: var(--muted); }
     textarea {
       display: block; width: 100%; margin-top: 8px; resize: vertical;
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
@@ -55,28 +61,29 @@
       font-family: inherit;
     }
     button.tiny { padding: 3px 9px; font-size: 11px; color: var(--muted); }
-    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     button:active { transform: translateY(1px); }
     label.chk { display: flex; align-items: center; gap: 8px; cursor: pointer; }
     /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 —— 允许换行、允许选中复制 */
     .path {
-      margin-top: 6px; padding: 6px 8px; background: #1a1a1d; border: 1px solid var(--line);
+      margin-top: 6px; padding: 6px 8px; background: var(--t-sunken); border: 1px solid var(--line);
       border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px; color: #9ecbff; word-break: break-all; user-select: text;
+      font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text;
     }
     .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
-    .err { margin-top: 6px; color: #ff6b6b; font-size: 11px; word-break: break-word; }
+    /* 升级那两行是「当前版本 / 最新版本」这样按行堆叠的，不是拼不成句的一段散文 */
+    #hint-update { white-space: pre-line; }
+    .err { margin-top: 6px; color: var(--t-err); font-size: 11px; word-break: break-word; }
     .err[hidden], .hint[hidden] { display: none; }
     .val { color: var(--muted); }
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
-      background: rgba(0,0,0,.82); border: 1px solid var(--line); color: #fff;
+      background: var(--t-toast-bg); border: 1px solid var(--line); color: var(--t-on-accent);
       padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
       transition: opacity .18s; pointer-events: none; white-space: nowrap;
     }
     .toast.show { opacity: 1; }
     ::-webkit-scrollbar { width: 8px; }
-    ::-webkit-scrollbar-thumb { background: #45454d; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -92,6 +99,7 @@
         <span class="k" id="k-language" data-i18n="sett.interface_language">Interface language</span>
         <!-- i18n-exempt 语言选项用自称名：每种语言写自己的名字，翻成当前界面语言就没法认了 -->
         <select id="sel-lang">
+          <option value="system" data-i18n="sett.lang_system">Follow system</option>
           <option value="en">English</option>
           <option value="zh">简体中文</option>
           <option value="zh-TW">繁體中文</option>
@@ -103,12 +111,49 @@
     </div>
 
     <div class="card">
+      <h3 id="sec-appearance" data-i18n="sett.section_appearance">Appearance</h3>
+      <div class="row">
+        <span class="k" id="k-theme" data-i18n="sett.theme">Color scheme</span>
+        <select id="sel-theme">
+          <option value="system" data-i18n="sett.theme_system">Follow system</option>
+          <option value="light" data-i18n="sett.theme_light">Light</option>
+          <option value="dark" data-i18n="sett.theme_dark">Dark</option>
+        </select>
+      </div>
+      <div class="hint" id="hint-theme" data-i18n="sett.theme_hint">Applies to every window at once, right now.</div>
+      <div class="err" id="err-theme" hidden></div>
+    </div>
+
+    <div class="card">
       <h3 id="sec-startup" data-i18n="sett.section_startup">Startup</h3>
       <div class="row">
         <label class="chk"><input type="checkbox" id="chk-autostart"><span id="k-autostart" data-i18n="sett.autostart">Launch at login</span></label>
       </div>
       <div class="hint" id="hint-autostart" data-i18n="sett.autostart_hint">Takes effect the next time you sign in.</div>
       <div class="err" id="err-autostart" hidden></div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-proxy" data-i18n="sett.section_proxy">Update proxy</h3>
+      <div class="hint" id="hint-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
+      <div class="row">
+        <label class="chk"><input type="radio" name="proxy" value="system" id="rd-proxy-system" checked><span id="k-proxy-system" data-i18n="sett.proxy_system">Follow system</span></label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="radio" name="proxy" value="manual" id="rd-proxy-manual"><span id="k-proxy-manual" data-i18n="sett.proxy_manual">Manual address</span></label>
+      </div>
+      <div class="row">
+        <input type="text" id="in-proxy-url" disabled spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
+      </div>
+      <div class="row">
+        <label class="chk"><input type="radio" name="proxy" value="direct" id="rd-proxy-direct"><span id="k-proxy-direct" data-i18n="sett.proxy_direct">Direct</span></label>
+      </div>
+      <div class="hint" id="hint-proxy-now" hidden></div>
+      <div class="row" style="margin-top:8px">
+        <span class="k"></span>
+        <button class="primary" id="btn-proxy" data-i18n="sett.save">Save</button>
+      </div>
+      <div class="err" id="err-proxy" hidden></div>
     </div>
 
     <div class="card">
@@ -123,8 +168,10 @@
 
     <div class="card">
       <h3 id="sec-scripts" data-i18n="sett.section_scripts">Allowed scripts</h3>
-      <div class="hint" id="hint-scripts" data-i18n="sett.scripts_hint">run_script only executes the paths listed here, plus everything under the scripts folder next to config.json. One path per line.</div>
-      <textarea id="in-scripts" rows="4" spellcheck="false"></textarea>
+      <div class="hint" id="hint-scripts" data-i18n="sett.scripts_hint">Two places are trusted: every script under the folder below, and every path listed here. Anything else is refused.</div>
+      <div class="path" id="p-scripts-dir">—</div>
+      <textarea id="in-scripts" rows="4" spellcheck="false" data-i18n-placeholder="sett.scripts_paths" placeholder="One absolute path per line"></textarea>
+      <div class="hint" id="hint-scripts-when" data-i18n="sett.scripts_when">Checked by the backend each time a run_script action runs — when the engine fires it and when you apply it by hand. Without this rule, any config file you import could run anything on this machine.</div>
       <div class="row" style="margin-top:8px">
         <span class="k"></span>
         <button class="primary" id="btn-scripts" data-i18n="sett.save">Save</button>
@@ -146,15 +193,51 @@
     </div>
 
     <div class="card">
+      <h3 id="sec-backup" data-i18n="sett.section_backup">Backup</h3>
+      <div class="hint" id="hint-backup" data-i18n="sett.backup_hint">One file holds the automation config, the app settings and the scripts folder. Restoring writes all three back, and keeps what was there as a backup of its own.</div>
+      <div class="path" id="p-backup-dir">—</div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-backup-export" data-i18n="sett.backup_export">Export backup</button>
+        <button id="btn-backup-dir" data-i18n="sett.open_folder">Open folder</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="k" id="k-backup-pick" data-i18n="sett.backup_pick">Existing backups</span>
+        <select id="sel-backup"></select>
+        <button class="primary" id="btn-backup-restore" data-i18n="sett.backup_restore">Restore</button>
+      </div>
+      <div class="err" id="err-backup" hidden></div>
+    </div>
+
+    <div class="card">
       <h3 id="sec-settings" data-i18n="sett.section_settings">Software settings file</h3>
-      <div class="hint" id="hint-settings" data-i18n="sett.settings_hint">Only interface language and log retention live here - changing them never applies a network setting.</div>
+      <div class="hint" id="hint-settings" data-i18n="sett.settings_hint">Interface language, log retention and the route update traffic takes live here - changing them never applies a network setting.</div>
       <div class="path" id="p-settings">—</div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-settings-dir" data-i18n="sett.open_folder">Open folder</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 id="sec-update" data-i18n="sett.section_update">Updates</h3>
+      <div class="row">
+        <span class="k" id="k-update-note" data-i18n="sett.update_note">The panel checks quietly once after start-up; this button asks again, right now.</span>
+        <button id="btn-update-check" data-i18n="popup.check_update">Check for Updates</button>
+      </div>
+      <div class="hint" id="hint-update" hidden></div>
+      <div class="err" id="err-update" hidden></div>
+      <div class="row" id="row-update-actions" hidden>
+        <span class="k"></span>
+        <button class="primary" id="btn-update-now" data-i18n="popup.update_now">Update Now</button>
+        <button id="btn-update-release" data-i18n="popup.release_page">Release Page</button>
+      </div>
+      <div class="hint" id="hint-update-run" hidden></div>
     </div>
 
     <div class="card">
       <h3 id="sec-about" data-i18n="sett.section_about">Runtime</h3>
       <div class="row"><span class="k" id="k-platform" data-i18n="sett.platform">Platform</span><span class="val" id="v-platform">—</span></div>
       <div class="row"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
+      <div class="row" id="row-priv-remove" hidden><span class="k"></span><button class="tiny" id="btn-priv-remove" data-i18n="sett.priv_remove">Remove password-free changes</button></div>
       <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
     </div>
   </main>
@@ -178,6 +261,10 @@
     const syncLang = () => invoke("get_language")
       .then((c) => { document.documentElement.lang = c; })
       .catch(() => {});
+    // 配色那一档由后端定：问操作系统的是它一处，四座窗口看到的才是同一份答案。
+    // `theme.css` 只认 `<html data-theme>` 这一个属性。
+    const applyTheme = (k) => { if (k) document.documentElement.dataset.theme = k; };
+    const syncTheme = () => invoke("get_theme").then(applyTheme).catch(() => {});
 
     function toast(msg) {
       const n = el("toast");
@@ -201,7 +288,13 @@
     }
 
     function render(d) {
-      el("sel-lang").value = d.language || "en";
+      // 「跟随系统」在配置里就是没有 language 这个键，所以这里得按 auto 回显，
+      // 而不是拿当前生效的那一种语言去选 —— 两者在系统语言恰好是英文时看着一样，
+      // 在别的机器上就会让用户以为自己的选择没存住。
+      el("sel-lang").value = d.language_auto ? "system" : (d.language || "en");
+      // 回显的是**存着的那一档**（system / light / dark），不是此刻渲染出来的那一套：
+      // 选了「跟随系统」时把下拉框写成「深色」，用户会以为自己的选择没存住。
+      el("sel-theme").value = d.theme || "system";
       el("chk-autostart").checked = !!d.autostart;
       show("err-autostart", d.autostart_error
         ? tf("sett.autostart_error", "The system state could not be read: {error}", { error: d.autostart_error })
@@ -209,6 +302,10 @@
       el("p-config").textContent = d.config_path || "—";
       el("p-logdir").textContent = d.log_dir || "—";
       el("p-settings").textContent = d.settings_path || "—";
+      // 白名单卡片要说清「哪两个位置受信」，第二个位置就是这里 —— 界面自己拼
+      // `<config_dir>/scripts` 会踩分隔符（Windows 是反斜杠），后端算好给我们。
+      el("p-scripts-dir").textContent = d.scripts_dir || "—";
+      el("p-backup-dir").textContent = d.backup_dir || "—";
       const inRet = el("in-retention");
       inRet.min = d.min_retention_days || 1;
       inRet.max = d.max_retention_days || 365;
@@ -217,7 +314,18 @@
       el("v-priv").textContent = d.priv === "direct"
         ? t("sett.priv_direct", "Elevated access configured: changes apply without a system prompt")
         : t("sett.priv_prompt", "Each change asks the system for authorization");
+      // 「撤销免密」这一颗按钮只在 macOS 且通道确实装着时出现：Windows 的免密来自常驻提权
+      // 助手、Linux 来自 sudo 策略，两边都没有一条 netsense 的 sudoers 规则可删。
+      el("row-priv-remove").hidden = !(d.platform === "macos" && d.priv === "direct");
       el("v-version").textContent = d.version || "—";
+      // 三态与手填地址住在软件配置文件里，跟着这一趟一起回来。「跟随系统此刻会走哪条路」
+      // 不在此列 —— 那得现问操作系统，见 loadProxy。
+      if (!proxyDirty) {
+        for (const r of document.querySelectorAll("input[name=proxy]"))
+          r.checked = r.value === (d.proxy_mode || "system");
+        el("in-proxy-url").value = d.proxy_url || "";
+        syncProxyUrl();
+      }
     }
 
     async function load() {
@@ -232,10 +340,27 @@
     el("sel-lang").onchange = async (ev) => {
       try {
         await invoke("set_language", { code: ev.target.value });
+        // applyI18n 会把恢复按钮的文案换回「恢复」，而按钮内部还是武装着的：
+        // 下一次点击会直接覆盖配置。换语言不该顺手确认一件别的事。
+        disarmBackup();
         strings = await invoke("get_strings");
         applyI18n();
         await load();
       } catch (e) { toast(String(e)); }
+    };
+
+    // 配色：这一档改的就是「界面长什么样」，所以本窗口当场跟着变。`set_theme` 回的也是
+    // 算出来的那一套（选「跟随系统」时只有后端知道操作系统此刻要什么），其余三扇窗口由
+    // 那次保存触发的广播负责。
+    el("sel-theme").onchange = async (ev) => {
+      show("err-theme", "");
+      try {
+        applyTheme(await invoke("set_theme", { code: ev.target.value }));
+        toast(t("sett.saved", "Saved"));
+      } catch (e) {
+        show("err-theme", String(e));
+        await load();   // 没写进磁盘，下拉框就不许停在没写进去的那一档
+      }
     };
 
     el("chk-autostart").onchange = async (ev) => {
@@ -252,6 +377,162 @@
         ev.target.disabled = false;
       }
     };
+
+    // 升级代理。三态和手填地址是软件配置里的一个值（render 从 get_app_settings 回显）；
+    // 「跟随系统此刻会走哪条路」只能现问操作系统 —— 那由 get_proxy_state 负责，而且只在
+    // 打开窗口和保存之后各问一次，不跟着焦点刷新：Linux 上那是好几条 gsettings 子进程，
+    // macOS 上是一条 scutil，而这张卡片上的数字并不会因为切回窗口就变。
+    //
+    // proxyDirty 是必需的：填地址最常见的动作是「切出去看一眼代理客户端监听哪个端口，回来
+    // 接着填」，而窗口每次获得焦点都会重问后端。没有这层保护，用户回来时选中的态和刚敲的
+    // 地址会被磁盘上那份覆盖掉。保存成功即清标记，此后一律以磁盘为准。
+    let proxyDirty = false;
+    const proxyMode = () => {
+      for (const r of document.querySelectorAll("input[name=proxy]"))
+        if (r.checked) return r.value;
+      return "system";
+    };
+    const syncProxyUrl = () => { el("in-proxy-url").disabled = proxyMode() !== "manual"; };
+
+    function renderProxyNow(p) {
+      if (p.mode === "manual") {
+        show("hint-proxy-now", tf("sett.proxy_now", "Right now: {proxy}", { proxy: p.url }));
+      } else if (p.mode === "system") {
+        show("hint-proxy-now", p.system_proxy
+          ? tf("sett.proxy_now", "Right now: {proxy}", { proxy: p.system_proxy })
+          : t("sett.proxy_now_none", "No system proxy was found, so this request goes direct."));
+      } else {
+        show("hint-proxy-now", tf("sett.proxy_now", "Right now: {proxy}", { proxy: t("sett.proxy_direct", "Direct") }));
+      }
+    }
+
+    async function loadProxy() {
+      if (!hasTauri()) return;   // 浏览器直接打开时静默：没有后端可问
+      try {
+        const raw = await invoke("get_proxy_state");
+        renderProxyNow(typeof raw === "string" ? JSON.parse(raw) : raw);
+      } catch (e) { /* 问不到就不写这一行：它说的是「现在会怎么走」，猜不得 */ }
+    }
+
+    for (const r of document.querySelectorAll("input[name=proxy]")) {
+      r.onchange = () => { proxyDirty = true; syncProxyUrl(); show("err-proxy", ""); };
+    }
+    el("in-proxy-url").oninput = () => { proxyDirty = true; show("err-proxy", ""); };
+
+    el("btn-proxy").onclick = async () => {
+      try {
+        // 后端返回的那句话就是日志里那条：界面不各写一份「已保存」。
+        toast(await invoke("set_update_proxy", {
+          mode: proxyMode(),
+          url: el("in-proxy-url").value.trim(),
+        }));
+        proxyDirty = false;
+        show("err-proxy", "");
+        await Promise.all([load(), loadProxy()]);
+      } catch (e) { show("err-proxy", String(e)); }
+    };
+
+    // 升级：用的就是面板那三条命令（check_update / run_update / open_url），文案也直接取
+    // popup.* 那几条 —— 同一句话在字典里写两遍，五种语言就会各漂一次，而「能不能就地装上」
+    // 这句判定只能有一处来源。这个窗口不做启动静默检查：那是面板的活（一次会话只提示一次），
+    // 所以这里的结果只在按下按钮之后才出现。
+    let updInfo = null;      // 最近一次 check_update 的返回；run_update 的 target 只从它取
+    let updBusy = false;
+    const val = (label, v) => label + ": " + v;   // 一行「标签: 值」，值不是文案，不进字典
+    function updVerifyText(code) {
+      const reason = code === "no_asset"
+        ? t("popup.no_installable", "No installable package for this platform")
+        : code === "sums_unreachable"
+          ? t("popup.verify_unreachable", "SHA256SUMS could not be downloaded")
+          : t("popup.verify_no_sums", "the release publishes no SHA256SUMS, or that file does not list this installer");
+      return tf("popup.cannot_verify", "This update cannot be verified: {reason}", { reason });
+    }
+    function renderUpdate(d) {
+      updInfo = null;
+      const act = el("row-update-actions");
+      act.hidden = true;
+      show("hint-update-run", "");
+      if (!d || d.__error) {
+        show("hint-update", "");
+        show("err-update", val(t("popup.update_failed", "Failed to check for updates"), d && d.__error ? d.__error : ""));
+        return;
+      }
+      show("err-update", "");
+      if (!d.update_available) {
+        show("hint-update", t("popup.up_to_date", "You're up to date"));
+        return;
+      }
+      const lines = [val(t("popup.current", "Current"), d.current), val(t("popup.latest", "Latest"), d.latest)];
+      if (d.homebrew) lines.push(t("popup.brew_note", "Installed via Homebrew — Update Now runs: brew upgrade --cask netsense"));
+      show("hint-update", lines.join("\n"));
+      // 后端在检查阶段就答过「装不装得上」：验不了的时候连按钮都不给 —— 点了才报错，
+      // 等于先让用户把这条下载花掉。发布页那一颗始终留着，它是这条路走得通时的兜底。
+      const unverifiable = d.installable === false;
+      show("err-update", unverifiable ? updVerifyText(d.install_note) : "");
+      el("btn-update-now").hidden = unverifiable || (!d.homebrew && !d.download_url);
+      el("btn-update-release").hidden = !d.html_url;
+      act.hidden = el("btn-update-now").hidden && el("btn-update-release").hidden;
+      updInfo = d;
+    }
+
+    el("btn-update-check").onclick = async () => {
+      if (updBusy) return;
+      updBusy = true;
+      show("hint-update", t("popup.updating", "Checking…"));
+      show("err-update", "");
+      const r = await invoke("check_update").catch(e => ({ __error: String(e) }));
+      renderUpdate(typeof r === "string" ? JSON.parse(r) : r);
+      updBusy = false;
+    };
+    el("btn-update-now").onclick = async () => {
+      const d = updInfo;
+      if (!d || updBusy) return;
+      updBusy = true;
+      el("row-update-actions").hidden = true;
+      show("hint-update-run", t("popup.downloading", "Downloading…"));
+      const target = {
+        download_url: d.download_url || null,
+        asset_name: d.asset_name || null,
+        checksum_url: d.checksum_url || null,
+        size: d.size || null,
+        version: d.latest,
+      };
+      try {
+        // 控制能返回就说明没被替换进程杀掉（Homebrew 渠道就是退出码 0），这时提示重启才有意义。
+        await invoke("run_update", { target: JSON.stringify(target) });
+        show("hint-update-run", [t("popup.update_ok", "Update complete"), t("popup.update_restart", "Restarting…")].join("\n"));
+      } catch (e) {
+        show("hint-update-run", "");
+        show("err-update", String(e));
+        el("btn-update-now").hidden = false;
+        el("btn-update-release").hidden = !d.html_url;
+        el("row-update-actions").hidden = false;
+      } finally {
+        updBusy = false;
+      }
+    };
+    el("btn-update-release").onclick = () => {
+      if (updInfo && updInfo.html_url)
+        invoke("open_url", { url: updInfo.html_url }).catch(() => {});
+    };
+    // 进度是全局广播的：面板那边开始下载时这里也会收到。只在本窗口真的发起了升级时才写
+    // 这一行，否则设置窗口会在用户什么都没点的时候冒出一句「正在下载…」。
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      // 配色是全局的：在面板或编辑器那边改档时，这里也得当下跟着变，而不是等下一次焦点。
+      window.__TAURI__.event.listen("netsense://status", (e) => {
+        const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
+        if (p) applyTheme(p.theme);
+      });
+      window.__TAURI__.event.listen("netsense://update_progress", (e) => {
+        if (!updBusy) return;
+        const p = e.payload || {};
+        const label = p.phase === "refresh" ? t("popup.refreshing", "Refreshing Homebrew…")
+          : p.phase === "install" ? t("popup.installing", "Installing…")
+          : t("popup.downloading", "Downloading…");
+        const timed = p.phase === "" || p.phase === "install" || p.phase === "refresh";
+        show("hint-update-run", timed ? label : label + ": " + Math.max(0, Math.min(100, p.percent || 0)) + "%");
+      });
+    }
 
     el("in-retention").onchange = async (ev) => {
       try {
@@ -290,14 +571,105 @@
     };
 
     el("btn-config-dir").onclick = () => invoke("open_config_folder").catch(e => toast(String(e)));
+    // 两份配置通常同目录，但自动化配置可以来自可执行文件同级；那时上面那个按钮开的是
+    // 仓库目录，这一颗必须开 settings.json 真正在的地方 —— 各开各的父目录，不共用一条命令。
+    el("btn-settings-dir").onclick = () => invoke("open_app_settings_folder").catch(e => toast(String(e)));
+
+    // 备份：一份文件装下三样东西（自动化配置、软件配置、脚本目录）。恢复是全量覆盖，
+    // 所以确认走「同一颗按钮点两次」而不是系统对话框 —— 用户要的是少弹窗，但一次覆盖
+    // 值得留一次反悔的机会。armed 跟着选择走：换了要恢复的备份，第一次点击就作废；
+    // 十秒后自动解除，否则按钮会一直挂着「再点一次」的语义，下一次点击就不是本意了。
+    let backupArmed = "";
+    let backupTimer = 0;
+    function disarmBackup() {
+      backupArmed = "";
+      clearTimeout(backupTimer);
+      el("btn-backup-restore").textContent = t("sett.backup_restore", "Restore");
+    }
+    async function loadBackups() {
+      if (!hasTauri()) return;   // 浏览器直接打开时静默：没有后端可问
+      const sel = el("sel-backup");
+      const keep = sel.value;
+      let list = [];
+      try {
+        list = JSON.parse(await invoke("get_backups")) || [];
+        show("err-backup", "");
+      } catch (e) {
+        show("err-backup", String(e));
+        return;
+      }
+      sel.innerHTML = "";
+      if (!list.length) {
+        const o = document.createElement("option");
+        o.textContent = t("sett.backup_none", "No backups yet");
+        o.value = "";
+        o.disabled = true;
+        sel.appendChild(o);
+      }
+      // 选项文字就是文件名本身：时间戳已经在里面，认序不必再翻一遍，而且备份目录是可以
+      // 打开来对照的 —— 界面上看到同一个名字比看到一句润色过的描述更有用。
+      for (const b of list) {
+        const o = document.createElement("option");
+        o.textContent = b.name;
+        o.value = b.name;
+        sel.appendChild(o);
+      }
+      if (keep && list.some(b => b.name === keep)) sel.value = keep;
+      if (backupArmed && backupArmed !== sel.value) disarmBackup();
+      el("btn-backup-restore").disabled = !list.length;
+    }
+
+    el("btn-backup-export").onclick = async () => {
+      try {
+        toast(await invoke("export_backup"));   // 这句话后端拼的，和日志里那条一样
+        await Promise.all([load(), loadBackups()]);
+      } catch (e) { show("err-backup", String(e)); }
+    };
+    el("btn-backup-dir").onclick = () => invoke("open_backups_folder").catch(e => toast(String(e)));
+    el("sel-backup").onchange = disarmBackup;
+    el("btn-backup-restore").onclick = async () => {
+      const name = el("sel-backup").value;
+      if (!name) return;
+      if (backupArmed !== name) {
+        backupArmed = name;
+        el("btn-backup-restore").textContent = t("sett.backup_confirm", "Click again to restore");
+        clearTimeout(backupTimer);
+        backupTimer = setTimeout(disarmBackup, 10000);
+        return;
+      }
+      disarmBackup();
+      try {
+        toast(await invoke("import_backup", { name }));
+        // 恢复连着换掉了语言与日志保留天数：文案要重取，脚本白名单也得以磁盘为准 ——
+        // 用户刚才在框里编辑的那份已经不是磁盘上的内容了，留着「脏」标记会把它写回去。
+        strings = await invoke("get_strings");
+        applyI18n();
+        scriptsDirty = false;
+        proxyDirty = false;   // 磁盘上刚换了一份软件配置，未保存的选择已经不属于这里了
+        await Promise.all([load(), loadScripts(), loadBackups(), loadProxy()]);
+      } catch (e) { show("err-backup", String(e)); }
+    };
+    // 撤销免密通道就是把那条 sudoers 规则和包装脚本删掉。这一步自己就要一次系统授权，
+    // 所以不再叠一层「再点一次确认」；撤销后下一次应用配置照常弹授权框，并在那一次里
+    // 重新装好 —— 撤销是「暂时收走」，不是「再也装不上」。
+    el("btn-priv-remove").onclick = async () => {
+      try {
+        await invoke("uninstall_priv_channel");
+        toast(t("notify.priv_removed", "Password-free changes removed: applying a configuration asks for authorization again"));
+        await load();
+      } catch (e) { toast(String(e)); }
+    };
     el("btn-logs").onclick = () => invoke("open_logs").catch(e => toast(String(e)));
     el("btn-view-logs").onclick = () => invoke("open_log_viewer").catch(e => toast(String(e)));
     el("btn-editor").onclick = () => invoke("open_editor").catch(e => toast(String(e)));
     el("btn-close").onclick = () => invoke("close_settings").catch(() => {});
 
     // 每次获得焦点都重问一遍：开机启动的真相在操作系统里，用户可能刚从
-    // 系统设置 / 注册表里动过它，读缓存会让这个勾选框说谎。
-    const refresh = () => { load(); loadScripts(); };
+    // 系统设置 / 注册表里动过它，读缓存会让这个勾选框说谎。备份清单同理 ——
+    // 备份目录是可以自己在文件管理器里翻动的。
+    // syncTheme 在这一趟里：`get_app_settings` 回的是**存着的那一档**（可能是「跟随系统」），
+    // 而窗口自己得知道现在该是哪一套颜色 —— 操作系统可能在两次广播之间自己换过档。
+    const refresh = () => { load(); loadScripts(); loadBackups(); syncTheme(); };
     window.addEventListener("focus", refresh);
 
     applyI18n();
@@ -305,6 +677,8 @@
       try { strings = await invoke("get_strings"); } catch (e) {}
       applyI18n();
       refresh();
+      // 这一行要等词表到位才写得对：「现在走 http://127.0.0.1:7890」前面那句是文案。
+      await loadProxy();
     })();
   </script>
 </body>

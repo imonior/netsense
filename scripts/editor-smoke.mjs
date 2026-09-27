@@ -357,6 +357,12 @@ let viewFixture = engineView(
 );
 
 const invokeLog = [];
+/// 「当前网络」那一格的网卡明细来源。可变：最后那一组会改它，验证广播之后界面跟着变新。
+let nicFixture = [
+  { name: "en0", kind: "wireless", ipv4: "192.168.1.100/24", netmask: "255.255.255.0", dns: "192.168.1.1" },
+  { name: "en5", kind: "wired" },
+  { name: "utun3", kind: "vpn" },
+];
 let saveSeq = 0;
 const saves = [];
 /** `saves` 会被各段断言清空以便「看这一次保存发了什么」，交付给 Rust 的那份要一直攒着。 */
@@ -373,13 +379,17 @@ function fakeInvoke(cmd, args) {
     case "get_networks":
       return Promise.resolve(["Office_5G", "Café"]);
     case "get_interfaces":
-      // 条件里「接口」的候选。后端只报「在用且不是内部设备」的网卡，并按 无线→有线→VPN 排好序，
-      // 所以这里给出的就是编辑器应当照单全收的那一份。
-      return Promise.resolve(JSON.stringify([
-        { name: "en0", kind: "wireless" },
-        { name: "en5", kind: "wired" },
-        { name: "utun3", kind: "vpn" },
-      ]));
+      // 「当前网络」那一格的事实来源：后端只报「在用且不是内部设备」的网卡，
+      // 并按 无线→有线→VPN 排好序，所以这里给出的就是编辑器应当照单全收的那一份。
+      return Promise.resolve(JSON.stringify(nicFixture));
+    case "get_adapters":
+      // 接口条件值的候选：本机装着的口，**含现在没插线的**（en7 就是那个 up:false），
+      // 且平台层已经把 VPN 隧道滤掉了 —— 下拉里没有 utun3 是这份契约的一部分。
+      return Promise.resolve([
+        { name: "en0", label: "Wi-Fi", kind: "wireless", up: true },
+        { name: "en5", label: "USB 10/100/1000 LAN", kind: "wired", up: true },
+        { name: "en7", label: "Thunderbolt Ethernet", kind: "wired", up: false },
+      ]);
     case "get_printers":
       // 「设为默认打印机」的候选。这里返回 JSON 字符串，是为了让 asArray 那条兼容分支
       // 一直有人走：后端改形状时这边会立刻红。
@@ -395,6 +405,9 @@ function fakeInvoke(cmd, args) {
           engine: viewFixture,
           profiles: configFixture.profiles.map((p) => ({ id: p.id, name: p.name, enabled: p.enabled })),
           language: "en",
+          // 与 `sett.theme` 那三档不同：这里是**算出来的那一套**。故意给 light ——
+          // 深色是 CSS 的默认档，给 dark 就分不清「代码写了属性」还是「没人写过」。
+          theme: "light",
           priv: "direct",
           config_path: "/tmp/config.json",
         }),
@@ -460,6 +473,7 @@ const code =
   " applyPlan, planList, planPersistent, profileView, get cfg() { return cfg }, get draft() { return draft }," +
   " get sel() { return sel }, get view() { return view }, set view(v) { view = v }," +
   " get wifiList() { return wifiList }, get nicList() { return nicList }," +
+  " get adapterList() { return adapterList }," +
   " get printerList() { return printerList }," +
   " get langShown() { return langShown }, get dirty() { return dirty }," +
   " get globalDraft() { return globalDraft } };";
@@ -481,14 +495,17 @@ group("装载");
 await settle();
 check("启动脚本无异常地跑完（顶层 IIFE 已读到配置）", h.cfg.profiles.length === 3);
 eq(
-  "启动时按顺序读了后端：文案 / 配置 / 已存网络 / 硬件网卡 / 系统打印机 / 状态",
-  invokeLog.map((c) => c.cmd).slice(0, 6),
-  ["get_strings", "get_config", "get_networks", "get_interfaces", "get_printers", "get_status"],
+  "启动时按顺序读了后端：文案 / 配置 / 已存网络 / 在用网卡 / 本机网卡 / 系统打印机 / 状态",
+  invokeLog.map((c) => c.cmd).slice(0, 7),
+  ["get_strings", "get_config", "get_networks", "get_interfaces", "get_adapters", "get_printers", "get_status"],
 );
-eq("已存 SSID、网卡与打印机快照各取一份（条件值与动作目标的候选）",
-  [h.wifiList, h.nicList.map((n) => n.name), h.printerList.map((p) => p.name)],
-  [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["Office LaserJet", "Home Inkjet"]]);
+eq("已存 SSID、在用网卡、本机网卡与打印机快照各取一份（条件值与动作目标的候选）",
+  [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name)],
+  [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"]]);
 check("第 1 列渲染出 Profile 列表", findAll((e) => e.dataset?.act === "sel-profile").length === 3);
+// 配色：`theme.css` 只认 `<html data-theme>`，所以这一条断言的是「后端给的那一档真的落地了」，
+// 而不是样式表里写了什么 —— 属性没写上时窗口会安静地停在深色档，谁也不会报错。
+eq("状态快照里的配色档写进了 <html data-theme>", documentElement.dataset.theme, "light");
 check("兜底排在列表末尾，作为一条特殊的 Profile 行", !!byAct("sel-fallback"));
 eq("按钮文案取自后端字典（不是 key 本身）", findById("btn-apply").textContent, strings["editor.force_apply"]);
 
@@ -569,15 +586,20 @@ eq("空选项是占位文案，不是一条长得像真 SSID 的假候选",
   ssidInput?.children[0].textContent, strings["editor.ssid_placeholder"]);
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
-eq("下拉里只有非 VPN 的硬件出口，外加一个空选项",
-  ifaceSelect?.children.map((o) => o.value), ["", "en0", "en5"]);
+eq("候选来自本机网卡：没插线的口（en7）也在，VPN 隧道（utun3）不在",
+  ifaceSelect?.children.map((o) => o.value), ["", "*", "en0", "en5", "en7"]);
+eq("第一项是占位文案，「任意网卡」是一条真能存的候选",
+  ifaceSelect?.children[0].textContent, strings["editor.iface_placeholder"]);
+choose(ifaceSelect, "*");
+eq("选「任意网卡」写进配置的是通配值 *（旧版的「—」空选项存不下去）",
+  h.draft.rules[0].conditions[2].value, "*");
 // 配置里写着这台机器现在没有的网卡是合法的（换了笔记本、拔了扩展坞）。
 h.draft.rules[0].conditions[2].value = "en9";
 h.renderAll();
 const gone = byBind("rules.0.conditions.2.value");
 eq("已存但本机已经没有的网卡：原样列出并选中，不会被悄悄改成别的卡",
   [gone?.children.map((o) => o.value), gone?.children.filter((o) => o.selected).map((o) => o.value)],
-  [["", "en9", "en0", "en5"], ["en9"]]);
+  [["", "*", "en9", "en0", "en5", "en7"], ["en9"]]);
 // 换类型 = 换值的语义。旧值不跟着清，就会被新类型的下拉当成「系统里没有的已存值」
 // 顶进候选列表 —— SSID 与接口互相串台就是这么来的。
 choose(byBind("rules.0.conditions.2.type"), "wifi_ssid");
@@ -975,6 +997,22 @@ await broadcast("netsense://status", { language: "en", engine: h.view });
 eq("换回 English 后按钮又改口", findById("btn-apply").textContent, strings["editor.force_apply"]);
 eq("<html lang> 跟着后端换回 en", document.documentElement.lang, "en");
 eq("English 界面里不残留写死的中文字面", cjkInDom(), []);
+
+group("广播之后，「当前网络」那一格跟着变新");
+// 这张格子的地址/掩码/DNS 来自 `get_interfaces`，而引擎那份身份快照里**没有**这些字段
+// （SSID / 网关 MAC / BSSID / 网卡集合才是它的）。所以窗口开着时下发过一次静态 IP，
+// 若不重新取一次网卡明细，用户看到的就是改设置之前的那个地址。
+check("开窗时显示的是取到那份地址", findById("st-net").textContent.includes("192.168.1.100/24"));
+nicFixture = nicFixture.map((n) =>
+  n.name === "en0" ? { ...n, ipv4: "10.20.30.40/24", dns: "10.20.30.1" } : n
+);
+const nicsAsked = invokeLog.filter((c) => c.cmd === "get_interfaces").length;
+await broadcast("netsense://status", { language: "en", engine: h.view });
+await new Promise((r) => setImmediate(r)); // refreshNics 是 fire-and-forget：让它那一次 await 落地
+check("广播让它重新取了一次网卡明细", invokeLog.filter((c) => c.cmd === "get_interfaces").length > nicsAsked);
+check("新地址现在就摆在格 3 里", findById("st-net").textContent.includes("10.20.30.40/24"));
+check("旧地址不再留在界面上", !findById("st-net").textContent.includes("192.168.1.100/24"));
+check("DNS 也跟着换了", findById("st-net").textContent.includes("10.20.30.1"));
 
 // —————————————————————— 交给 Rust 那半边的材料 ——————————————————————
 
