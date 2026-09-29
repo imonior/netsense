@@ -616,13 +616,13 @@ mod tests {
         let raw = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
           "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
           "then":{"one_shot":[
-            {"id":"a1","enabled":true,"priority":1,"action":{"type":"launch_app","app":"/Applications/X.app"}},
-            {"id":"a2","enabled":true,"priority":2,"action":{"type":"run_script","path":"scripts/x.sh"}},
-            {"id":"a4","enabled":true,"priority":3,"action":{"type":"set_default_printer","printer":"HP OfficeJet 476"}}],
+            {"id":"a1","enabled":true,"action":{"type":"launch_app","app":"/Applications/X.app"}},
+            {"id":"a2","enabled":true,"action":{"type":"run_script","path":"scripts/x.sh"}},
+            {"id":"a4","enabled":true,"action":{"type":"set_default_printer","printer":"HP OfficeJet 476"}}],
             "persistent":[
-            {"id":"p1","enabled":true,"priority":1,"action":{"type":"periodic_script","path":"scripts/keep.sh","interval_secs":10}},
-            {"id":"p2","enabled":true,"priority":2,"action":{"type":"keep_wireguard_connected","tunnel":"wg0","interval_secs":15}},
-            {"id":"p3","enabled":true,"priority":2,"action":{"type":"keep_vpn_connected","provider":"globalprotect","profile":"corp","interval_secs":20}}]}}]}"#;
+            {"id":"p1","enabled":true,"action":{"type":"periodic_script","path":"scripts/keep.sh","interval_secs":10}},
+            {"id":"p2","enabled":true,"action":{"type":"keep_wireguard_connected","tunnel":"wg0","interval_secs":15}},
+            {"id":"p3","enabled":true,"action":{"type":"keep_vpn_connected","provider":"globalprotect","profile":"corp","interval_secs":20}}]}}]}"#;
         let cfg = Config::from_json(raw).expect("编辑器产出的动作标签必须能反序列化");
         cfg.validate().expect("同一份配置必须通过校验");
         let p = cfg.profile_by_id("a").unwrap();
@@ -655,7 +655,7 @@ mod tests {
             format!(
                 r#"{{"schema":1,"profiles":[{{"id":"a","name":"A",
                   "rules":[{{"id":"r1","conditions":[{{"id":"c1","type":"wifi_ssid","value":"X"}}]}}],
-                  "{}":{{"persistent":[{{"id":"p1","priority":1,"action":{{"type":"keep_wireguard_connected","tunnel":"wg0"}}}}]}}}}]}}"#,
+                  "{}":{{"persistent":[{{"id":"p1","action":{{"type":"keep_wireguard_connected","tunnel":"wg0"}}}}]}}}}]}}"#,
                 branch
             )
         };

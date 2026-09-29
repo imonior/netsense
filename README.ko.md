@@ -31,8 +31,8 @@ macOS, Windows, Linux용 크로스 플랫폼 네트워크 **Profile** 관리자.
   함께 내려갑니다. 분기가 `verify`를 설정했다면 이어서 시스템 상태를 다시 읽어 검증하고, 여기에
   ICMP/HTTP 헬스 체크를 선택적으로 더합니다 — 네트워크가 계속 실패하면 DHCP로 복구합니다.
 - **자동화(3B)는 3A를 통과한 뒤에만 실행됩니다.** 일회성 동작(`launch_app`, `run_script`,
-  `set_default_printer`)은 `priority` 단위로 묶어 실행합니다 — 낮은 것이 먼저, 같은 우선순위는 동시에,
-  한 묶음이 끝난 뒤 다음 묶음으로 진행하고, 한 묶음 안의 실패가 뒤따르는 묶음을 막지 않습니다.
+  `set_default_printer`)은 나열된 순서대로 하나씩 실행합니다 — 앞의 동작이 끝나거나(자체 대기 상한에
+  도달하면) 다음으로 넘어가고, 한 동작의 실패가 뒤의 동작을 막지 않습니다.
   기본 프린터를 지정하는 동작은 *해당 사용자*의 기본값만 바꾸므로, 네트워크를 전환한다고 권한 승인 창이
   뜨지 않습니다. 일치 실패(Conflict)와 실행 실패(Error)는 서로 다른 상태이며 별도로 보고됩니다.
 - **감지는 Profile 단위입니다**: 네트워크 이벤트 반응, 주기적 폴링, 또는 둘 다. 각각 자체적인 변경 후
@@ -174,7 +174,7 @@ NetSense는 트레이에 상주합니다: 아이콘을 클릭하면(왼쪽·오�
                                 "fallback": { "enabled": true } } }
       },
       "one_shot": [
-        { "id": "a1", "enabled": true, "priority": 1,
+        { "id": "a1", "enabled": true,
           "action": { "type": "run_script", "path": "/opt/ops/office-init.sh", "elevated": false } }
       ]
     },

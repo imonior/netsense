@@ -82,7 +82,11 @@ pub struct NicInfo {
     /// 该网关 IP 对应的 MAC
     pub gateway_mac: Option<String>,
     pub dns: Option<String>,
-    /// VPN 归属软件名（WireGuard / Tailscale / AnyConnect …）；非 VPN 为 None
+    /// VPN 归属软件名（WireGuard / Tailscale / AnyConnect …）；非 VPN 为 None。
+    ///
+    /// 各平台只在拿得准的时候才填：macOS 没有「utun → 进程」的公开映射，猜出来的归属
+    /// 会指到**别家软件**头上（那条隧道不是它建的）。认不出来留 `None`，界面退回通用的
+    /// 「VPN」标签；认错才是事故。
     pub app: Option<String>,
 }
 
@@ -173,6 +177,7 @@ pub(crate) fn is_tunnel_device(dev: &str) -> bool {
 
 /// [`guess_vpn_app`] 的关键字表。**顺序就是优先级**：兜底的 `"vpn"` 必须留在最后，
 /// 否则 `Tailscale Tunnel` 会被认成一台面目模糊的「VPN」。
+#[allow(dead_code)] // 只在 Windows / Linux 两条腿的调用路径上被用到；原因见 [`guess_vpn_app`]
 pub(crate) const VPN_APP_TABLE: &[(&str, &str)] = &[
     ("tailscale", "Tailscale"),
     ("wireguard", "WireGuard"),
@@ -202,10 +207,16 @@ pub(crate) const VPN_APP_TABLE: &[(&str, &str)] = &[
     ("vpn", "VPN"),
 ];
 
-/// 从一段自由文本里猜 VPN 软件名（Windows 适配器描述 / macOS 服务名 / nmcli 连接名通用）。
+/// 从一段自由文本里猜 VPN 软件名（Windows 适配器描述 / nmcli 连接名）。
 ///
 /// 命中即返回**产品名**（统一大小写，便于展示），未命中返回 `None`，由调用方退回
 /// 更泛的兜底名（如设备名）。
+///
+/// 用的前提是「这段文本描述的就是这块网卡」：两条腿传进来的都是设备自带的描述/连接名。
+/// macOS 那一腿以前也拿它兜底（扫一遍 `-listallnetworkservices`，命中即返回），现在去掉了
+/// —— 那边的服务清单里，装过但没连的客户端**一直**在列，于是无人认领的隧道会被说成是
+/// 别人建的，认不出比认错糟得多（见 macos 腿的归属判定）。所以它在 macOS 编译单元里未使用。
+#[allow(dead_code)] // macOS 那一腿不再按名字猜归属（见下方说明），故那边没人调它
 pub(crate) fn guess_vpn_app(text: &str) -> Option<&'static str> {
     let s = text.to_ascii_lowercase();
     for (needle, name) in VPN_APP_TABLE {
@@ -764,7 +775,8 @@ fn lpstat_long_printers(long_out: &str) -> Vec<PrinterInfo> {
         location: String,
     }
 
-    /// 说明与位置拼成人话标签；两句都和队列名重复时干脆不给（`None` → 界面用队列名）。
+    /// 说明与位置拼成人话标签；除了「说明只是重抄队列名、又没有位置」之外都要给标签
+    /// （`None` → 界面用队列名）。规则见 [`printer_label`]。
     fn push_row(row: Row, out: &mut Vec<PrinterInfo>) {
         out.push(PrinterInfo {
             info: printer_label(&row.name, &row.description, &row.location),
@@ -815,30 +827,25 @@ fn lpstat_long_printers(long_out: &str) -> Vec<PrinterInfo> {
 
 /// 把系统给打印机写的两句备注（说明、位置）拼成界面上那一行。三平台共用。
 ///
-/// 规则只有一条：**标签要认得出是哪台机器**。
-/// - 说明与队列名重复时（CUPS 新建队列常把队列名原样填进说明）丢掉说明；但同一台的
-///   位置（`XSMS`）仍然有用，于是留下 `XSMS`。
-/// - 说明**根本没有**、只有位置时不能只亮位置 —— 那会让用户把一台机器认成另一台
-///   （Windows 上被误认成「别的系统的打印机」就是这么来的），于是队列名顶上：
+/// 规则只有一条：**标签要认得出是哪台机器**，所以主语永远在，位置只是它的注脚。
+/// - 说明与队列名重复时（CUPS 新建队列常把队列名原样填进说明）**也照样说两遍**：
+///   重复一个词是无害的，把主语弄没才是问题 —— 丢掉说明后界面只剩 `XSMS`，用户面对的
+///   是一排房间号而不是一排机器。正确形状是 `CanonG3860 · XSMS`。
+/// - 说明**根本没有**、只有位置时用队列名当主语，不能只亮位置 —— 那会让用户把一台机器
+///   认成另一台（Windows 上被误认成「别的系统的打印机」就是这么来的）：
 ///   `\\filesrv\Lobby · 前台`。
-/// - 一点新信息都没有（说明重复且无位置，或两句都空）时返回 `None`，界面回落队列名。
+/// - 位置与说明/队列名重复时不重复念。
+/// - 一点新信息都没有（只有和队列名相同的说明，或两句都空）时返回 `None`，界面回落队列名。
 pub(crate) fn printer_label(name: &str, description: &str, location: &str) -> Option<String> {
     let d = description.trim();
     let l = location.trim();
-    let mut parts: Vec<&str> = Vec::new();
-    if !d.is_empty() {
-        if d != name {
-            parts.push(d);
-        }
-    } else if !l.is_empty() && l != name {
-        // 没有说明、只有位置：补上队列名当主语，位置只是它的注脚
-        parts.push(name);
-    }
-    if !l.is_empty() && !parts.contains(&l) {
+    let subject = if d.is_empty() { name } else { d };
+    let mut parts: Vec<&str> = vec![subject];
+    if !l.is_empty() && l != subject {
         parts.push(l);
     }
     let only_name = parts.len() == 1 && parts[0] == name;
-    (!parts.is_empty() && !only_name).then(|| parts.join(" · "))
+    (!only_name).then(|| parts.join(" · "))
 }
 
 /// 见 [`printers_from_lpstat`]：`lpstat -d` 那一行里的目的地名。
@@ -1251,9 +1258,10 @@ printer CanonG3860 is disabled.
             vec![
                 ("_10_20_20_30", Some("10.20.20.30 · JYH"), false),
                 ("_10_30_30_30", Some("10.30.30.30 · WJ"), false),
-                // 说明就是把队列名重抄了一遍，于是只留位置； disabled 也照样在清单上
-                // （用户要的正是「能选到它」，状态由下发时的成败说话）
-                ("CanonG3860", Some("XSMS"), true),
+                // 现场报的那一行：说明就是把队列名重抄了一遍（CUPS 新建队列的默认），
+                // 但主语不能因此消失 —— 只亮位置会让一排下拉项都成了房间号。
+                // disabled 也照样在清单上（用户要的正是「能选到它」，状态由下发时的成败说话）
+                ("CanonG3860", Some("CanonG3860 · XSMS"), true),
             ]
         );
     }
@@ -1310,15 +1318,20 @@ printer CanonG3860 is disabled.
     /// 队列名 + 说明 + 位置 → 界面上那一行。三平台共用，所以规则只在这一处钉死：
     /// 标签要认得出是哪台机器 —— 重复的不算，缺说明时队列名补位，光秃秃的位置不当主语。
     #[test]
-    fn a_printer_label_carries_only_what_the_queue_name_does_not_say() {
+    fn a_printer_label_always_keeps_a_subject() {
         assert_eq!(
             printer_label("HP_Office", "HP LaserJet in the office", "3F").as_deref(),
             Some("HP LaserJet in the office · 3F")
         );
-        // 说明只是把队列名重抄一遍（CUPS 新建队列的默认行为）时，它不带来任何信息
+        // 说明只是把队列名重抄一遍（CUPS 新建队列的默认行为）：没有新信息，所以不给标签，
+        // 界面用队列名 —— 这与下一行的区别只在于有没有位置。
         assert_eq!(printer_label("CanonG3860", "CanonG3860", "").as_deref(), None);
-        // 但同一台的位置仍然要说
-        assert_eq!(printer_label("CanonG3860", "CanonG3860", "XSMS").as_deref(), Some("XSMS"));
+        // 现场报的就是这一条：说明与队列名相同时把说明丢掉，界面上只剩「XSMS」，一排下拉
+        // 项全成了房间号。主语必须在，位置跟在后面。
+        assert_eq!(
+            printer_label("CanonG3860", "CanonG3860", "XSMS").as_deref(),
+            Some("CanonG3860 · XSMS")
+        );
         // 两句都一样时不重复一遍
         assert_eq!(printer_label("HP", "前台", "前台").as_deref(), Some("前台"));
         // 没有说明、只有位置：不能让位置单独冒充打印机名，队列名补位当主语

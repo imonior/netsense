@@ -28,7 +28,7 @@
 - **下發是一道屏障（3A）**：IPv4 / 子網路遮罩 / 閘道 / DNS / IPv6 與靜態路由一起下發；分支設定了
   `verify` 時，再回讀系統狀態做驗證，可選再疊加一次 ICMP/HTTP 健康度探測 —— 網路持續不通就回落 DHCP。
 - **自動化（3B）只在 3A 通過之後才執行。** 一次性動作（`launch_app`、`run_script`、`set_default_printer`）
-  按 `priority` 分批執行 —— 數值小者先跑、同批併行、一批結束才進下一批，且某一批內失敗不會阻擋後續批次。
+  按清單自上而下逐條執行 —— 前一條跑完（或到達它自己的等待上限）才輪到下一條，某條失敗不會阻擋它後面的動作。
   設定預設印表機改的只是*目前使用者*的預設值，所以切換網路不會跳出授權對話框。匹配失敗
   （Conflict）與執行失敗（Error）是兩種狀態，分開呈現。
 - **偵測方式是 Profile 級的**：對網路事件作出反應、按間隔輪詢、或兩者並存，各自帶自己的變化延遲
@@ -154,7 +154,7 @@ NetSense 常駐托盤：點圖示（左右鍵皆同）開啟面板，所有入�
                                 "fallback": { "enabled": true } } }
       },
       "one_shot": [
-        { "id": "a1", "enabled": true, "priority": 1,
+        { "id": "a1", "enabled": true,
           "action": { "type": "run_script", "path": "/opt/ops/office-init.sh", "elevated": false } }
       ]
     },

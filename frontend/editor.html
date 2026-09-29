@@ -98,6 +98,13 @@
       padding: 5px 6px; margin-bottom: 5px; background: var(--t-inset);
     }
     .card-head { display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-bottom: 4px; }
+    /* 拖动手柄就是卡头那一条横带，而且**只有挂了 draggable 的那些**（3B 的动作卡）：
+       路由那类卡片共用同一个卡头，顺序对它们没有意义，光标不该骗人。
+       dragging = 正在被拖走的那张；drag-over = 松手后会落到它所在的位置。 */
+    .card-head[draggable="true"] { cursor: grab; }
+    .card-head[draggable="true"]:active { cursor: grabbing; }
+    .card-head.dragging { opacity: .4; }
+    .card-head.drag-over { box-shadow: 0 -2px 0 0 var(--btn-primary); }
     .card-title { font-size: 10px; color: var(--t-tint-warn-fg); font-weight: bold; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
     .kv { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; line-height: 1.7; }
@@ -111,6 +118,7 @@
       border-radius: var(--radius-sm); font-size: 9px; padding: 1px 5px; cursor: pointer; flex: none;
     }
     .mini-btn:hover { background: var(--t-raised-hi); }
+    .mini-btn:disabled { opacity: .35; cursor: default; background: var(--t-raised); }
     .empty { color: var(--text-label); font-size: 10px; padding: 4px 0; }
     .switch { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
     .switch.inline { margin: 0; }
@@ -183,7 +191,7 @@
     .modal.wide { width: 520px; max-height: 86vh; overflow-y: auto; }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 11px; color: var(--text-label); line-height: 1.5; }
-    .modal ul { margin: 8px 0; padding-left: 18px; font-size: 12px; }
+    .modal ul, .modal ol { margin: 8px 0; padding-left: 18px; font-size: 12px; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
   </style>
 </head>
@@ -269,10 +277,10 @@
     return s;
   };
   const clone = (o) => JSON.parse(JSON.stringify(o ?? null));
-  // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。
-  const syncLang = () => invoke("get_language")
-    .then((c) => { document.documentElement.lang = c; })
-    .catch(() => {});
+  // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。这里不单独问
+  // `get_language` —— 它的返回值就是启动那份状态里的 `language`、以及每一次语言广播里
+  // 的那个 `code`，两处都已经在手上（其余三扇窗口没有这条状态可读，才各自去问一次）。
+  const setLang = (code) => { if (code) document.documentElement.lang = code; };
   // 配色那一档由后端定：问操作系统的是它一处，四座窗口看到的才是同一份答案。
   // 编辑器不单独去问 —— 启动读的那一份状态里就带着它，`theme.css` 只认
   // `<html data-theme>` 这一个属性。
@@ -301,7 +309,9 @@
   let globalDraft = { fallback: null, allowed_scripts: [] };
   let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings, last_run, workers}
   let wifiList = [];    // 系统已保存的 SSID —— SSID 条件值的候选
-  let nicList = [];     // 在用的网卡（get_interfaces）—— 「当前网络」那一格的事实来源
+  let nicList = [];     // 在用的网卡（get_interfaces）—— 接口名/标签/网卡 MAC
+  let nicsKey = "";     // 上面那份清单是跟着哪个身份快照取的，见 [`refreshNics`]
+  let statusSnap = null; // 最近一次广播里的 `status`：IPv4/掩码/网关/DNS/信号的唯一来源
   let adapterList = []; // 本机装着的网卡（get_adapters，含没插线的口）—— 接口条件值的候选
   let printerList = []; // 系统打印机（[{name, is_default}]）—— 默认打印机动作的候选
   let sel = null;       // { kind: 'profile' | 'fallback', id }
@@ -441,8 +451,12 @@
 
     // 格 3：当前网络信息。条件值从这里取，而不是让用户手抄 MAC。
     // 与托盘面板同一套字段、同一顺序：iface → SSID → signal → mac → IPv4 → netmask → gateway → IPv6 → DNS
+    // 地址那几项的来源是**最近一条广播里的 `status`**：引擎每轮都带着它，所以它天然就是新的，
+    // 不必为它再拉一次子进程。身份那几项（SSID / BSSID / 网卡集合）在 `view.snapshot` 里。
+    // `nicList` 补的是这两份都没有的东西 —— 这张口叫什么、它自己的 MAC —— 而它们只在
+    // 换卡、换关联时才变，所以也只有那时才重取（见 [`refreshNics`]）。
     const primary = nicList[0] || null;
-    const s = (view && view.snapshot) || {};
+    const s = Object.assign({}, statusSnap, (view && view.snapshot) || {});
     const wireless = !primary || primary.kind === "wireless";
     const ssid = s.ssid || (primary && primary.ssid) || "";
     const ssidDisplay = ssid || t("status.ssid_unknown");
@@ -489,9 +503,9 @@
         `</span></div>`;
     }).filter(Boolean).join("");
     
-    // 附加信息：VPN 隧道单独成行（硬件口已经在上面的「接口」行里了）
-    if ((s.tunnels || []).length)
-      p3 += `<div class="kv"><span class="k">${esc(t("editor.nic_vpn"))}</span><span class="v">${esc(s.tunnels.join(", "))}</span></div>`;
+    // 到这里就是当前网络的全部：VPN 隧道不再附加成最后一行 —— 它是「虚拟网卡」而不是
+    // 「当前连的网络」，条件区里也没有对应的可选项，列在这里只会让人以为能按它下条件。
+    // （托盘面板仍然列隧道，那边是给人看实况的。）
     $("st-net").innerHTML = p3 || `<span class="empty">${esc(t("editor.loading_status"))}</span>`;
 
     // 格 4：生效方案的 THEN 此刻在跑什么（3B1 的结果 + 3B2 的维持状态）
@@ -626,22 +640,24 @@
     box.innerHTML = html;
   }
 
-  /// SSID 可以手输（隐藏网络、还没连上过的环境都要能提前配好）。
-  /// WKWebView 的 <datalist> 没有弹出 UI，所以用真正的 <select>，底部加「手动输入」项：
-  /// 选中它当场换成输入框（见 change 委托与 toManualInput），哨兵值本身不进配置。
+  /// SSID 是**直接可输入**的：隐藏网络、以及「这台环境还没连过第二次」的场合都要能提前配好，
+  /// 所以绑定的一直是输入框，而不是一个只能从别人给好的清单里挑的控制。
+  /// 系统里现成的 SSID 挂在旁边那个下拉上当候选 —— WKWebView 的 `<datalist>` 没有弹出 UI
+  /// （实测：选项在、点不开），所以候选只能自己拼一个 `<select>`。
+  /// 那个下拉**不绑定字段**：它唯一的工作是把选中的名字抄进输入框，于是任何时刻都不可能
+  /// 把「候选控件自己的状态」当成配置值写出去。
   function condValue(b, c) {
     const type = c.type || "wifi_ssid";
     if (type === "wifi_ssid") {
-      const cur = String(c.value ?? "").trim();
+      const cur = String(c.value ?? "");
       const ssids = wifiList.filter(Boolean);
-      // 如果当前值不在列表里，保留它作为第一个选项
-      const opts = (cur && !ssids.includes(cur)) ? [cur, ...ssids] : ssids;
-      // 手动输入项由 change 委托统一处理（toManualInput）：哨兵值绝不写进配置。
-      return `<select data-bind="${b}.value" style="max-width:220px">` +
-        `<option value=""${cur ? "" : " selected"}>${esc(t("editor.ssid_placeholder", "Select SSID…"))}</option>` +
-        opts.map(s => `<option value="${esc(s)}" ${s === cur ? "selected" : ""}>${esc(s)}</option>`).join("") +
-        `<option value="__manual__">${esc(t("editor.ssid_manual", "Manual entry…"))}</option>` +
-        `</select>`;
+      return `<span style="display:inline-flex;gap:4px;align-items:center">` +
+        `<input type="text" value="${esc(cur)}" placeholder="${esc(t("status.ssid"))}" ` +
+        `data-bind="${b}.value" data-ssid-input="${b}.value" style="max-width:150px">` +
+        `<select data-ssid-pick="${b}.value" style="max-width:120px">` +
+        `<option value="">${esc(t("editor.ssid_placeholder"))}</option>` +
+        ssids.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join("") +
+        `</select></span>`;
     }
     if (type === "network_interface") {
       const cur = String(c.value || "").trim();
@@ -664,19 +680,15 @@
     return txt(`${b}.value`, c.value, COND_PH[type] || "");
   }
 
-  /// SSID 下拉选「手动输入」后：把 select 换成输入框，让用户打的名字（而不是
-  /// `__manual__` 这个哨兵）成为写进配置的值。属性一律走 DOM API 设置，
-  /// 拼接字符串会在含空格的名字上截断、并漏出垃圾属性。
-  function toManualInput(selEl) {
-    const root = editRoot();
-    const inp = document.createElement("input");
-    inp.type = "text";
-    inp.className = "in";
-    inp.dataset.bind = selEl.dataset.bind;
-    inp.style.maxWidth = "220px";
-    inp.value = String(getPath(root, selEl.dataset.bind) ?? "");
-    selEl.replaceWith(inp);
-    inp.focus();
+  /// 候选下拉选中一个 SSID：把名字交给同一条件的输入框，由输入框写配置。
+  /// 认人靠 `data-ssid-input`（值就是那条条件的绑定路径），不靠拼 CSS 选择器 ——
+  /// 路径里满是点，拼出来的选择器要么得转义要么直接选错。
+  function pickIntoInput(path, value) {
+    const inp = Array.from(document.querySelectorAll("[data-ssid-input]"))
+      .find(el => el.dataset.ssidInput === path);
+    if (!inp) return;
+    inp.value = value;
+    onField(inp);
   }
 
   /* —————————————————————— 第 3 列：3A 网络（先 THEN 后 ELSE） —————————————————————— */
@@ -806,14 +818,14 @@
       `<div class="hint">${esc(t("editor.actions_hint"))}</div>` +
       `<div class="hint" id="run-line-${pre.slice(0, -1)}" hidden></div>`;
     const list = b.one_shot || [];
-    html += list.length ? list.map((a, i) => oneShotCard(`${pre}one_shot.${i}`, pre, a, i)).join("")
+    html += list.length ? list.map((a, i) => oneShotCard(`${pre}one_shot.${i}`, pre, a, i, list.length)).join("")
       : `<div class="empty">${esc(t("editor.action_none"))}</div>`;
 
     html += `<div class="group-title"><span>${esc(t("editor.persistent_title"))}</span>` +
       `<button class="mini-btn" data-act="add-persist" data-pre="${pre}">${esc(t("editor.add_persistent"))}</button></div>` +
       `<div class="hint">${esc(t(pre === "else." ? "editor.persistent_else" : "editor.persistent_hint"))}</div>`;
     const pl = b.persistent || [];
-    html += pl.length ? pl.map((a, i) => persistCard(`${pre}persistent.${i}`, pre, a, i)).join("")
+    html += pl.length ? pl.map((a, i) => persistCard(`${pre}persistent.${i}`, pre, a, i, pl.length)).join("")
       : `<div class="empty">${esc(t("editor.action_none"))}</div>`;
     return html;
   }
@@ -840,11 +852,31 @@
     return act.path || act.app || act.printer || act.tunnel || act.profile || "—";
   };
 
-  function oneShotCard(p, pre, a, i) {
+  // 卡片头部的上下移动：这一列从上到下就是执行顺序，改顺序就是改这张卡的位置。
+  // 首尾那两个箭头是禁用状态 —— 让用户看得出「已经到头了」，而不是点了没反应。
+  const moveBtns = (kind, pre, i, n) =>
+    `<button class="mini-btn" data-act="move-${kind}" data-i="${i}" data-d="-1" data-pre="${pre}"${i === 0 ? " disabled" : ""}>&#8593;</button>` +
+    `<button class="mini-btn" data-act="move-${kind}" data-i="${i}" data-d="1" data-pre="${pre}"${i + 1 === n ? " disabled" : ""}>&#8595;</button>`;
+
+  // 把第 i 张卡与它的邻居换一个位置。越界就什么都不做：禁用样式是给**看**的人的边界
+  // 说明，这一句是给**点得快过渲染得快**的人的兜底 —— data-i 是上一轮渲染时的下标快照。
+  const swapInto = (list, i, d) => {
+    const j = i + d;
+    if (i < 0 || j < 0 || i >= list.length || j >= list.length) return;
+    const t = list[i];
+    list[i] = list[j];
+    list[j] = t;
+  };
+
+  // 卡头既是标题也是拖动手柄（cursor: grab 那条样式）。data-i 是**渲染时**的下标快照，
+  // 松手之后整列重绘，所以它只在「这一次拖动的生命周期」内有效。
+  const headOpen = (kind, pre, i) =>
+    `<div class="card-head" draggable="true" data-act="drag-card" data-kind="${kind}" data-pre="${pre}" data-i="${i}">`;
+
+  function oneShotCard(p, pre, a, i, n) {
     const act = a.action || {};
     const ty = act.type || "launch_app";
-    let body = `<div>${sel_(`${p}.action.type`, ty, ONE_TYPES())}</div>` +
-      row2("editor.priority", int(`${p}.priority`, a.priority ?? 100, "100"));
+    let body = `<div>${sel_(`${p}.action.type`, ty, ONE_TYPES())}</div>`;
     if (ty === "run_script") {
       body += `<div class="full">${txt(`${p}.action.path`, act.path, "scripts/on-connect.sh")}</div>` +
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>` +
@@ -864,11 +896,12 @@
       body += `<div class="full">${txt(`${p}.action.app`, act.app, "/Applications/Slack.app")}</div>` +
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>`;
     }
-    return `<div class="card"><div class="card-head">
+    return `<div class="card">${headOpen("one", pre, i)}
         <span class="card-title">${esc(actionWord(a))}</span>
         <span style="display:flex;gap:4px;align-items:center;">
           <span class="achip" id="achip-${p}"></span>
           <input type="checkbox" data-bind="${p}.enabled" data-cast="bool" ${a.enabled !== false ? "checked" : ""}>
+          ${moveBtns("one", pre, i, n)}
           <button class="mini-btn" data-act="del-one" data-i="${i}" data-pre="${pre}">&times;</button></span></div>
         <div class="grid2">${body}</div>
         <div class="aerr" id="aerr-${p}" hidden></div></div>`;
@@ -884,10 +917,9 @@
     keep_vpn_connected: "editor.persist_vpn",
   }[(a.action || {}).type] || "editor.persist_script");
 
-  function persistCard(p, pre, a, i) {
+  function persistCard(p, pre, a, i, n) {
     const act = a.action || {};
-    let body = `<div>${sel_(`${p}.action.type`, act.type || "periodic_script", PERSIST_TYPES())}</div>` +
-      row2("editor.priority", int(`${p}.priority`, a.priority ?? 100, "100"));
+    let body = `<div>${sel_(`${p}.action.type`, act.type || "periodic_script", PERSIST_TYPES())}</div>`;
     if (act.type === "keep_wireguard_connected") {
       body += `<div class="full">${txt(`${p}.action.tunnel`, act.tunnel, "wg0")}</div>`;
     } else if (act.type === "keep_vpn_connected") {
@@ -898,11 +930,12 @@
         `<div class="full">${lst(`${p}.action.args`, act.args, "")}</div>`;
     }
     body += row2("editor.health_interval", int(`${p}.action.interval_secs`, act.interval_secs ?? 30, "30"));
-    return `<div class="card"><div class="card-head">
+    return `<div class="card">${headOpen("persist", pre, i)}
         <span class="card-title">${esc(t(persistWord(a)))}</span>
         <span style="display:flex;gap:4px;align-items:center;">
           <span class="achip" id="wchip-${p}"></span>
           <input type="checkbox" data-bind="${p}.enabled" data-cast="bool" ${a.enabled !== false ? "checked" : ""}>
+          ${moveBtns("persist", pre, i, n)}
           <button class="mini-btn" data-act="del-persist" data-i="${i}" data-pre="${pre}">&times;</button></span></div>
         <div class="grid2">${body}</div>
         <div class="aerr" id="werr-${p}" hidden></div></div>`;
@@ -922,7 +955,6 @@
       put(n, n.dataset.i18nPlaceholder, (v) => n.setAttribute("placeholder", v));
     for (const n of document.querySelectorAll("[data-i18n-title]"))
       put(n, n.dataset.i18nTitle, (v) => n.setAttribute("title", v));
-    syncLang();
   }
 
   function renderAll() {
@@ -1006,7 +1038,7 @@
           chip.className = "achip " + (o.ok ? "ok" : "bad");
           if (err && !o.ok && o.error) { err.textContent = o.error; err.hidden = false; }
         } else if (lr.running) {
-          // 报告里还没有这条：它要么还在跑，要么排在后面的批次里
+          // 报告里还没有这条：它要么正在跑，要么还排在后面等着
           chip.textContent = t("editor.action_running");
           chip.className = "achip run";
         }
@@ -1077,15 +1109,25 @@
     refreshNics();
   }
 
-  /// 「当前网络」那一格的事实来源是 [`nicList`]，而它过去只在开窗时取一次：下发静态 IP
-  /// 之后再开着的编辑器看一眼，地址还是改之前的（Windows 现场报的「信息延迟」就是这个）。
-  /// 后端每轮都会广播，所以跟着广播取新即可 —— 不自己起定时器，避免多一套节律。
+  /// 「当前网络」那一格里属于**网卡**的那几项（接口标签、这张口自己的 MAC）来自 [`nicList`]，
+  /// 而它过去只在开窗时取一次：换卡、扩展坞拔插之后再开着的编辑器看一眼，接口名还是改之前的
+  /// （Windows 现场报的「信息延迟」就是这个）。后端每轮都会广播，所以跟着广播取新即可 ——
+  /// 不自己起定时器，避免多一套节律。
+  ///
+  /// 但不是每一条广播都取。`get_interfaces` 要拉起系统子进程，而引擎繁忙时一轮下发会连发两条
+  /// 广播（`netsense://evaluation` 与 `netsense://status`），每条都问一次就成了每秒级的固定开销，
+  /// 换来的还是同一份网卡清单。判据用**身份指纹**：这两项只随「连着的是哪张口、关联到了哪个
+  /// AP」而变，而那正好就是指纹的内容 —— 指纹没动，重取也取不到新东西。
+  /// 这份网卡清单是跟着哪个身份快照取的（[`refreshNics`] 的判据）。
+  const nicsFp = () => JSON.stringify((view && view.snapshot) || null);
   let nicsFetching = false;
   async function refreshNics() {
-    if (nicsFetching) return;
+    const fp = nicsFp();
+    if (nicsFetching || fp === nicsKey) return;
     nicsFetching = true;
     try {
       nicList = asArray(await invoke("get_interfaces"));
+      nicsKey = fp;
       renderStrip();
     } catch (e) {
       // 窗口已关 / 后端正忙：下一轮广播自然会再试一次，这里不值得打扰用户。
@@ -1146,18 +1188,36 @@
       const rawCfg = await invoke("get_config");
       cfg = typeof rawCfg === "string" ? JSON.parse(rawCfg) : rawCfg;
       cfg.profiles ||= [];
-      // 旧版下拉会把「手动输入」的哨兵值当普通选项写进配置：读进来时清掉（保存时才落盘）。
+      // 配置里可能留着 `__manual__`：那是某个版本的下拉把「手动输入」这个控件状态当成
+      // 值写进去的结果，从来不是任何人的网络名 —— 读进来时清掉。
       for (const r of cfg.profiles.flatMap(p => p.rules || []))
         for (const c of r.conditions || []) if (c.value === "__manual__") delete c.value;
       globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
-      wifiList = (await invoke("get_networks").catch(() => [])) || [];
-      nicList = asArray(await invoke("get_interfaces").catch(() => []));
-      adapterList = asArray(await invoke("get_adapters").catch(() => []));
-      printerList = asArray(await invoke("get_printers").catch(() => []));
-      const rawSt = await invoke("get_status");
+      // 这四份清单每一项都要拉起系统子进程，`get_status` 还要真的采样一次网络（macOS 的
+      // 降级链里那一趟可以走到几秒）。它们之间没有先后依赖 —— 配置喂表单，这几份喂状态条
+      // 和下拉 —— 所以一次全发出去。串行 await 的代价是**它们的和**：那正是
+      // 「编辑器点开以后空白好几秒」。只有 `get_status` 的失败会落到下面的 catch：
+      // 它带着语言、配色和「当前网络」那几项地址，取不到就等于窗口没起来，不该装作没事。
+      let nicsFailed = false;
+      const [nets, nics, adapters, printers, rawSt] = await Promise.all([
+        invoke("get_networks").catch(() => []),
+        invoke("get_interfaces").catch(() => { nicsFailed = true; return []; }),
+        invoke("get_adapters").catch(() => []),
+        invoke("get_printers").catch(() => []),
+        invoke("get_status"),
+      ]);
+      wifiList = asArray(nets);
+      nicList = asArray(nics);
+      adapterList = asArray(adapters);
+      printerList = asArray(printers);
       const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
+      statusSnap = st.status || null;
       view = st.engine || null;
+      // 记下这份网卡清单是跟着哪个身份快照取来的（见 [`refreshNics`]）。取失败就当没有：
+      // 留空键，下一次广播会再试一遍，而不是把这个窗口的接口信息永远冻在空上。
+      nicsKey = nicsFailed ? "" : nicsFp();
       langShown = st.language || langShown;
+      setLang(langShown);
       // 配色跟着同一份快照走：首绘之前它就落地，用户看不到换色的一闪
       // （四扇窗口都是 `visible: false` 创建的，被点开时属性早已写好）。
       applyTheme(st.theme);
@@ -1197,7 +1257,11 @@
     // 合成开关（不落在真实字段上）由 change 分支处理
     if (/__(new|health)$/.test(path)) return;
     const val = castValue(el);
-    setPath(root, path, val === "" && el.tagName === "SELECT" ? undefined : val);
+    // 空值不落盘：条件的值缺失与 `value: ""` 在盘上不该是两种东西，而后者会被
+    // SSID 分支当成「和一台名字为空的网络比」（快照里的 ssid 可能是 Some("")）。
+    // 下拉的空选项本来就是「没选」；换成可输入以后，清空输入框必须是同一个意思。
+    const blank = val === "" && (el.tagName === "SELECT" || /\.conditions\.\d+\.value$/.test(path));
+    setPath(root, path, blank ? undefined : val);
     // 条件换了类型，旧值必须一起清掉：值的语义跟着类型走，留着它会被新类型的
     // 下拉当成「系统里没有的已存值」顶进候选列表 —— 接口名与 SSID 互相串台就是这么来的。
     if (/\.conditions\.\d+\.type$/.test(path)) setPath(root, path.replace(/\.type$/, ".value"), undefined);
@@ -1214,6 +1278,13 @@
   document.addEventListener("change", (e) => {
     const el = e.target;
     if (!el.dataset) return;
+    // SSID 候选下拉：把选中的名字交给输入框，自己退回占位 —— 它不是第二个值，
+    // 停在选中项上会让人以为配置里存的是「下拉的状态」。
+    if (el.dataset.ssidPick) {
+      if (el.value) pickIntoInput(el.dataset.ssidPick, el.value);
+      el.selectedIndex = 0;
+      return;
+    }
     if (el.dataset.act === "dns-tri") { setDnsMode(el.dataset.pre || "", el.value); return; }
     if (el.dataset.rowEn) { patchFlag(el.dataset.rowEn, "enabled", el.checked); return; }
     if (el.dataset.rowQuick) { patchFlag(el.dataset.rowQuick, "quick", el.checked); return; }
@@ -1225,8 +1296,6 @@
       const owner = path.slice(0, path.lastIndexOf("network"));
       if (/__new$/.test(path)) { toggleNetwork(el.checked, owner); return; }
       if (/__health$/.test(path)) { toggleHealth(el.checked, owner); return; }
-      // 手动输入哨兵：换成输入框，值本身不进配置。
-      if (el.value === "__manual__") { toManualInput(el); return; }
       onField(el);
       // 名字与勾选框在第 1 列那一行上：改了要让那一行的状态跟着变（生效描边、脏点）。
       // 只重建第 1 列与状态条 —— 重建第 2~4 列会把用户正在输入的东西冲掉。
@@ -1325,7 +1394,7 @@
         const action = ty === "run_script" ? { type: ty, path: "", args: [] }
           : ty === "set_default_printer" ? { type: ty, printer: "" }
             : { type: "launch_app", app: "", args: [] };
-        (b.one_shot ||= []).push({ id: uid("a"), enabled: true, priority: 100, action });
+        (b.one_shot ||= []).push({ id: uid("a"), enabled: true, action });
         renderActColumn(); refreshRun(); return;
       }
       case "del-one":
@@ -1333,15 +1402,86 @@
         renderActColumn(); refreshRun(); return;
       case "add-persist": {
         const b = scope(pre);
-        (b.persistent ||= []).push({ id: uid("p"), enabled: true, priority: 100,
+        (b.persistent ||= []).push({ id: uid("p"), enabled: true,
           action: { type: "periodic_script", path: "", args: [], interval_secs: 30 } });
         renderActColumn(); refreshRun(); return;
       }
       case "del-persist":
         scope(pre).persistent.splice(Number(el.dataset.i), 1);
         renderActColumn(); refreshRun(); return;
+      case "move-one":
+      case "move-persist": {
+        const list = scope(pre)[act === "move-one" ? "one_shot" : "persistent"] || [];
+        swapInto(list, Number(el.dataset.i), Number(el.dataset.d));
+        renderActColumn(); refreshRun(); return;
+      }
       default: return;
     }
+  });
+
+  /* —————————————— 拖动排序：与 ↑/↓ 是同一件事的两种手感 ——————————————
+     只允许「同一支、同一类」的两张卡互换：把 THEN 的一次性动作拖进常驻那一段、或者拖到
+     ELSE 那一支去，改变的不只是顺序，而是这条动作归谁执行 —— 那不该是顺手一拖做到的事。
+     顺序仍然只有一个来源（数组本身），这里没有任何新的配置字段。 */
+  let dragFrom = null;
+  let dragEl = null;
+  let overEl = null;
+  const dragCard = (e) => {
+    const el = e.target.closest("[data-act]");
+    return el && el.dataset.act === "drag-card" ? el : null;
+  };
+  const cardAt = (el) => ({ kind: el.dataset.kind, pre: el.dataset.pre || "", i: Number(el.dataset.i) });
+  const sameColumn = (a, b) => !!a && !!b && a.kind === b.kind && a.pre === b.pre;
+  const dropCls = "drag-over";
+  const markOver = (el) => {
+    if (overEl && overEl !== el) overEl.className = overEl.className.replace(dropCls, "");
+    overEl = el;
+    if (el && !el.className.split(/\s+/).includes(dropCls)) el.className += ` ${dropCls}`;
+  };
+
+  document.addEventListener("dragstart", (e) => {
+    const el = dragCard(e);
+    if (!el) return;
+    dragFrom = cardAt(el);
+    dragEl = el;
+    // 对浏览器声明「这是一次移动」：不说的时候各平台给的光标不一样（有的画个加号，
+    // 有的直接拒绝落点），用户的鼠标就成了猜测。
+    e.dataTransfer.effectAllowed = "move";
+    el.className += " dragging";
+  });
+  document.addEventListener("dragover", (e) => {
+    if (!dragFrom) return;
+    const el = dragCard(e);
+    if (!el) return;
+    const to = cardAt(el);
+    if (!sameColumn(dragFrom, to) || to.i === dragFrom.i) { markOver(null); return; }
+    // 接住这一次 dragover，浏览器才认为这条落点合法、后面才会发出 drop；
+    // 不接住就是「拖到那儿松手，什么也没发生」。
+    e.dataTransfer.dropEffect = "move";
+    e.preventDefault();
+    markOver(el);
+  });
+  document.addEventListener("drop", (e) => {
+    const el = dragCard(e);
+    if (!el || !dragFrom) return;
+    const to = cardAt(el);
+    e.preventDefault();
+    markOver(null);
+    const from = dragFrom;
+    dragFrom = null;
+    if (!sameColumn(from, to)) return;
+    const list = scope(to.pre)[to.kind === "one" ? "one_shot" : "persistent"] || [];
+    const [moved] = list.splice(from.i, 1);
+    // 落点说的是「它现在排第几」：拖到第 3 张卡上，松手后它自己就是第 3 张，
+    // 原来那张往它腾出的位置挪一格。
+    if (moved) list.splice(to.i, 0, moved);
+    renderActColumn(); refreshRun();
+  });
+  document.addEventListener("dragend", () => {
+    // 没落到有效目标（拖到列子外面、按 Esc 取消）时 DOM 不会被重绘，样式得自己擦掉。
+    if (dragEl) dragEl.className = dragEl.className.replace("dragging", "");
+    if (overEl) overEl.className = overEl.className.replace(dropCls, "");
+    dragEl = null; overEl = null; dragFrom = null;
   });
 
   $("btn-new").onclick = () => newProfile(`${t("editor.untitled")} ${cfg.profiles.length + 1}`);
@@ -1396,7 +1536,7 @@
     for (const a of list || []) {
       if (!a.id) a.id = uid(kind === "one" ? "a" : "p");
       const act = a.action || {};
-      const item = { id: a.id, enabled: a.enabled !== false, priority: num(a.priority, 100), action: null };
+      const item = { id: a.id, enabled: a.enabled !== false, action: null };
       if (kind === "one") {
         item.action = act.type === "run_script"
           ? { type: "run_script", path: (act.path || "").trim() }
@@ -1513,28 +1653,19 @@
       ` ${tag}</li>`;
   }
 
-  /// 按 priority 分批：同数字的是同一批（并发），数字小的先跑完才轮到下一批。
+  /// 一次性动作的执行清单：从上到下就是跑的顺序，一条跑完（成功、失败或超时）才轮到下一条。
+  /// 行首的编号是浏览器给 `<ol>` 的 —— 它说的是「第几条」，配置里并没有这个字段。
   function planList(list, lr) {
-    const run = list.filter(a => a.enabled !== false)
-      .slice().sort((x, y) => (x.priority ?? 100) - (y.priority ?? 100));
+    const run = list.filter(a => a.enabled !== false);
     if (!run.length) return `<div class="mv">${esc(t("editor.action_none"))}</div>`;
-    const groups = [];
-    for (const a of run) {
-      const p = a.priority ?? 100;
-      const last = groups[groups.length - 1];
-      if (last && last.p === p) last.list.push(a);
-      else groups.push({ p, list: [a] });
-    }
-    return groups.map(g =>
-      `<div class="mv"><b>${esc(t("editor.priority"))} ${g.p}</b></div>` +
-      `<ul>${g.list.map(a => actionLine(a, lr)).join("")}</ul>`).join("");
+    return `<ol>` + run.map(a => actionLine(a, lr)).join("") + `</ol>`;
   }
 
   /// 常驻动作在「立即应用」前的样子：走 THEN 会真的起 worker 并一直维持，
   /// 走 ELSE 一条都不会起。这份清单必须与后端的判定同构，否则给用户看的是假承诺。
+  /// 顺序 = worker 起来的顺序（错峰启动），起来之后它们各跑各的、互不等待。
   function planPersistent(plan) {
-    const list = (plan.branch.persistent || []).filter(a => a.enabled !== false)
-      .slice().sort((x, y) => (x.priority ?? 100) - (y.priority ?? 100));
+    const list = (plan.branch.persistent || []).filter(a => a.enabled !== false);
     if (!list.length) return `<div class="mv">${esc(t("editor.action_none"))}</div>`;
     if (plan.which !== "then") return `<div class="mv">${esc(t("editor.persistent_else"))}</div>`;
     return `<ul>` + list.map(a => {
@@ -1672,6 +1803,7 @@
     if (!code || code === langShown) return;
     langShown = code;
     try { strings = await invoke("get_strings"); } catch (e) { return; }
+    setLang(code);
     renderAll();
   }
 
@@ -1679,7 +1811,13 @@
     const L = window.__TAURI__.event.listen;
     L("netsense://status", (e) => {
       const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
-      if (p && p.engine) { view = p.engine; refreshLive(); }
+      if (p && p.engine) {
+        // 「当前网络」那几项地址就搭在这一条广播里：引擎每轮都带一份新采样过来，
+        // 界面跟着它变新，不需要为「IP 下发了」再问一次后端。
+        if (p.status) statusSnap = p.status;
+        view = p.engine;
+        refreshLive();
+      }
       // 语言与配色都是在软件设置窗口里改的，这个窗口只是跟着广播换口径 ——
       // 一次改档四扇窗口同时变，才不会出现「编辑器还是深色、面板已经浅色」。
       if (p) { syncLanguage(p.language); applyTheme(p.theme); }

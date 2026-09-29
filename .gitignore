@@ -18,6 +18,9 @@ switcher.log
 node_modules/
 frontend/node_modules/
 
+# editor-smoke 的 --write-fixtures 落盘处（本地跑闸门用；CI 写 target/）
+out/
+
 # Python
 __pycache__/
 *.pyc

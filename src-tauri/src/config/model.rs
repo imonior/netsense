@@ -2,9 +2,9 @@
 //!
 //! 这份模型的三条不变量，容易被无意破坏，集中写在这里：
 //!
-//! 1. **Profile 之间没有 priority**。多个 Profile 同时命中时不「自动挑一个」，而是
-//!    `Conflict` 且不自动应用任何一个（见 `engine`）。定序只存在于动作的
-//!    `priority` 上，不存在于 Profile 之间。
+//! 1. **Profile 之间没有先后**。多个 Profile 同时命中时不「自动挑一个」，而是
+//!    `Conflict` 且不自动应用任何一个（见 `engine`）。定序只发生在**一个分支内的动作列表**
+//!    上：列表从上到下就是执行顺序，Profile 之间、Rule 之间都没有。
 //! 2. **条件是「Rules × Conditions」两层**：Rule 之间是 OR，
 //!    Rule 内**已启用**的 Condition 之间是 AND。两者都可单独禁用（`enabled`），
 //!    禁用的 Condition 不参与 AND、也永远不算命中。
@@ -29,7 +29,7 @@ pub struct Config {
     /// schema 版本；**必须**等于 [`SCHEMA`]，缺失也视为不合法（见 `Config::load`）。
     #[serde(default)]
     pub schema: u32,
-    /// 有序：面板的「快速切换」与编辑器按此顺序展示，不再有「谁优先级高」的隐含排序。
+    /// 有序：面板的「快速切换」与编辑器按此顺序展示，没有「谁更该先上」的隐含排序。
     #[serde(default)]
     pub profiles: Vec<Profile>,
     /// 零命中时的网络处置（不是 Profile，故不参与匹配与冲突判定）。
@@ -78,9 +78,6 @@ pub enum ProbeMode {
 
 fn default_true() -> bool {
     true
-}
-fn default_priority() -> u32 {
-    100
 }
 fn default_interval() -> u64 {
     30
@@ -240,10 +237,10 @@ pub struct Branch {
     /// 3A：硬性执行阶段，先于 3B，且失败即阻断 3B。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
-    /// 3B1：一次性动作，按 priority 分批。
+    /// 3B1：一次性动作，按下面的排列顺序逐条执行。
     #[serde(default, rename = "one_shot", skip_serializing_if = "Vec::is_empty")]
     pub one_shot: Vec<OneShotAction>,
-    /// 3B2：常驻动作（维持某个期望状态），按 priority 决定启动顺序。
+    /// 3B2：常驻动作（维持某个期望状态），按下面的排列顺序起 worker。
     #[serde(default, rename = "persistent", skip_serializing_if = "Vec::is_empty")]
     pub persistent: Vec<PersistentAction>,
 }
@@ -346,14 +343,15 @@ pub struct FallbackProbe {
 }
 
 /// 3B1：一次性动作。每次进入 Active 跑一次；保持 Active 期间的重新评估**不会**重跑。
+///
+/// `Branch::one_shot` 这个数组的顺序**就是**执行顺序（判据见 [`crate::automation::one_shot`]）：
+/// 排在上面的先跑，跑完或超过它自己的等待上限才轮到下一条。要改顺序就是在编辑器里移动那张
+/// 卡片 —— 没有第二个「谁先跑」的开关，界面上看到的顺序和执行顺序必须是同一个东西。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OneShotAction {
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 数字越小越先执行；相同数字在同一批里并发执行。
-    #[serde(default = "default_priority")]
-    pub priority: u32,
     pub action: OneShotActionType,
 }
 
@@ -381,14 +379,14 @@ pub enum OneShotActionType {
 
 /// 3B2：常驻动作 —— 不是「每隔 N 秒重复执行命令」，而是**持续维护一个期望状态**：
 /// 每 N 秒检查一次，已满足就什么都不做，不满足才恢复。
+///
+/// `Branch::persistent` 的顺序**就是** worker 的启动顺序（判据见 [`crate::automation::persistent`]）；
+/// worker 起来之后各自独立运行，谁都不阻塞谁。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PersistentAction {
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 只决定 worker 的**启动顺序**；worker 起来后独立运行，不会阻塞后续 priority。
-    #[serde(default = "default_priority")]
-    pub priority: u32,
     pub action: PersistentActionType,
 }
 

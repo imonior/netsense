@@ -25,8 +25,8 @@
 //!
 //! ## 四条硬规则
 //!
-//! 1. **多命中 = Conflict，不自动选择**（方案第 5/6/10 条）。Profile 之间既没有
-//!    priority 也没有「更具体者胜」：两个都合理的 Profile 静默二选一，用户完全看不出
+//! 1. **多命中 = Conflict，不自动选择**（方案第 5/6/10 条）。Profile 之间没有先后，
+//!    也没有「更具体者胜」：两个都合理的 Profile 静默二选一，用户完全看不出
 //!    自己配重了。
 //! 2. **保持 Active 时不重跑 3A / 3B1**（方案第 32/36 条）：只有该 Profile 的**内容**
 //!    变了才重下网络配置，且重下不带动作。
@@ -146,7 +146,7 @@ impl Which {
     }
 }
 
-/// 纯判定：命中数决定一切，**不看 priority、不看「谁更具体」**。
+/// 纯判定：命中数决定一切，**不挑「谁排得靠前」、不挑「谁更具体」**。
 pub fn decide(matched_ids: &[String]) -> Decision {
     match matched_ids.len() {
         0 => Decision::NoActiveProfile,
@@ -900,8 +900,22 @@ pub fn start(state: Arc<AppState>) {
 
     // SSID 监视的价值是**及时性**：它一发现变化就唤醒引擎，而不是等下一个采样周期；
     // 完整的指纹差分（网关 MAC / BSSID / 网卡集合）在引擎侧做，见 `detection`。
+    //
+    // 光唤醒只值一半：`Msg::Wake` 跳过的是 1s 主循环节拍，**不**越过 2s 采样节律，
+    // 于是新 SSID 最坏还要等下一轮才进快照，而 `detection` 的「再等 change_delay_secs」
+    // 是从那一刻才开始计时的 —— 界面等 ACTIVE 的 5 秒里混进了我们自己排的这两三秒队。
+    // 所以这条来源在唤醒之前先举旗：这一轮无条件重采、重算。
+    //
+    // 旗只给**它**：`Msg::Wake` 还有别的发送方（配置落盘、语言切换），它们举旗就等于
+    // 每次保存都要在引擎线程里付一次平台采样（macOS 的降级链最坏走到几秒）。
     let wake_tx = tx.clone();
+    let wake_state = state.clone();
     let handle = state.plat.watch_ssid(Box::new(move |_ssid| {
+        wake_state
+            .engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request_resample();
         let _ = wake_tx.send(Msg::Wake);
     }));
     *state.watcher.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
@@ -1594,7 +1608,6 @@ mod tests {
         let outcome = |id: &str| one_shot::ActionOutcome {
             id: id.to_string(),
             label: id.to_string(),
-            priority: 1,
             ok: true,
             error: None,
         };

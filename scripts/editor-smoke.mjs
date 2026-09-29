@@ -45,8 +45,8 @@ function eq(label, got, want) {
 
 // —————————————————————— 最小 DOM ——————————————————————
 //
-// 只实现 editor.html 真正碰到的那部分（它全程用 innerHTML 字符串建表单；createElement /
-// replaceWith 只有一处 —— SSID「手动输入」把下拉换成输入框 —— 所以也只补那一处）。
+// 只实现 editor.html 真正碰到的那部分（它全程用 innerHTML 字符串建表单，
+// 建完就只读 dataset / value / children —— 没有一处真的改 DOM 结构）。
 // `innerHTML` 的 getter 故意返回空串：断言一律走
 // 真实函数的返回值或数据，不去解析序列化结果 —— 那种断言只会绑死标签顺序。
 
@@ -143,18 +143,6 @@ class El {
     }
     return null;
   }
-  /// 界面脚本只用到这两个方法（SSID「手动输入」把下拉换成输入框）：
-  /// 原位替换与拿焦点。别的 DOM API 一概没实现，也不需要。
-  replaceWith(node) {
-    const p = this.parent;
-    if (!p) return;
-    const i = p.children.indexOf(this);
-    if (i < 0) return;
-    p.children[i] = node;
-    node.parent = p;
-    this.parent = null;
-  }
-  focus() {}
 }
 
 function parse(html) {
@@ -298,7 +286,16 @@ const document = {
     return findAll((e) => names.some((n) => e.attributes[n] !== undefined));
   },
   dispatch(type, target) {
-    for (const fn of handlers[type] || []) fn({ type, target, preventDefault() {} });
+    // 拖动这一类事件得带上 dataTransfer，界面代码要用它把「这是一次 move」告诉浏览器；
+    // defaultPrevented 则是断言用的：dragover 没接住（preventDefault）的落点，真实浏览器
+    // 根本不会发出 drop —— 这一位在 stub 里必须留痕，否则测不出「界面拒绝得对不对」。
+    const ev = {
+      type, target, defaultPrevented: false,
+      dataTransfer: { effectAllowed: "", dropEffect: "", setData() {}, getData: () => "" },
+      preventDefault() { ev.defaultPrevented = true; },
+    };
+    this.lastEvent = ev;
+    for (const fn of handlers[type] || []) fn(ev);
   },
 };
 
@@ -367,8 +364,20 @@ let saveSeq = 0;
 const saves = [];
 /** `saves` 会被各段断言清空以便「看这一次保存发了什么」，交付给 Rust 的那份要一直攒着。 */
 const emitted = [];
+/** 「发出」与「落回」共用一根时钟：开机那几项外部数据若是串行取的，`get_networks`
+    会在 `get_interfaces` 发出之前就落回来 —— 这一位就是并发与否唯一看得见的判据。 */
+let ipcClock = 0;
+/** @type {{cmd:string,issued:number,resolved:number}[]} */
+const ipcTime = [];
 function fakeInvoke(cmd, args) {
   invokeLog.push({ cmd, args });
+  const issued = (ipcClock += 1);
+  return answer(cmd, args).then(
+    (v) => { ipcTime.push({ cmd, issued, resolved: (ipcClock += 1) }); return v; },
+    (e) => { ipcTime.push({ cmd, issued, resolved: (ipcClock += 1) }); throw e; },
+  );
+}
+function answer(cmd, args) {
   switch (cmd) {
     case "get_strings":
       return Promise.resolve({ ...(langCode === "zh" ? zhStrings : strings) });
@@ -502,6 +511,14 @@ eq(
 eq("已存 SSID、在用网卡、本机网卡与打印机快照各取一份（条件值与动作目标的候选）",
   [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name)],
   [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"]]);
+// 上面那条只说得出「读了哪几项」，说不出「是不是排队读的」，而排队读的代价就是现场那句
+// 「自动化管理打开要好几秒空白」：五项各要拉一次子进程，串起来就是它们之和。
+const bootIpc = ["get_networks", "get_interfaces", "get_adapters", "get_printers", "get_status"];
+const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 5);
+eq("开机那五份外部数据各发一次（没有哪一项被读了两遍）", bootBatch.length, 5);
+check("它们是并发发出的：最后发出的那一项，早于最早落回的那一项",
+  Math.min(...bootBatch.map((t) => t.resolved)) > Math.max(...bootBatch.map((t) => t.issued)),
+  `发出 ${bootBatch.map((t) => t.issued)}，落回 ${bootBatch.map((t) => t.resolved)}`);
 check("第 1 列渲染出 Profile 列表", findAll((e) => e.dataset?.act === "sel-profile").length === 3);
 // 配色：`theme.css` 只认 `<html data-theme>`，所以这一条断言的是「后端给的那一档真的落地了」，
 // 而不是样式表里写了什么 —— 属性没写上时窗口会安静地停在深色档，谁也不会报错。
@@ -522,7 +539,10 @@ eq("格 4：后端什么都没跑过 → 列出 Active 的 THEN 动作，但不�
   [findById("st-act").textContent.includes("Slack.app"),
    inside(findById("st-act")).filter((e) => e.className?.includes("achip") && e.textContent).length],
   [true, 0]);
-check("VPN 隧道单独成行，不和硬件出口混在一起", findById("st-net").textContent.includes("utun3"));
+// 隧道不挤进「当前网络」这一格：条件区里没有对应可选项，列在这里只会让人以为能按它下条件
+// （托盘面板照旧列它，那边看的是实况）。
+check("VPN 隧道不再出现在编辑器的当前网络摘要里",
+  !findById("st-net").textContent.includes("utun3"));
 
 group("选中与表单回填");
 // 走真实的事件委托：点第 1 列那一行，而不是直接调 pick()
@@ -573,17 +593,21 @@ group("第 2 列：条件行 = 勾选框 + 类型 + 值 + 徽标 + 删除，同�
 const crows = findAll((e) => e.className?.includes("crow"));
 eq("office 的两条规则里一共 4 个条件，一行一个", crows.length, 4);
 const crow0 = inside(crows[0]);
-eq("同一行里：启用勾选 + 类型下拉 + 值下拉 + 徽标 + 删除按钮",
+eq("同一行里：启用勾选 + SSID 输入框 + 类型下拉 + 候选下拉 + 徽标 + 删除按钮",
   [crow0.filter((e) => e.tagName === "INPUT").length,
    crow0.filter((e) => e.tagName === "SELECT").length,
    crow0.filter((e) => e.className?.includes("badge")).length,
    crow0.filter((e) => e.dataset?.act === "del-cond").length],
-  [1, 2, 1, 1]);
-const ssidInput = byBind("rules.0.conditions.0.value");
-eq("SSID 值是下拉选择框", ssidInput?.tagName, "SELECT");
-eq("候选来自系统已保存的 SSID，外加手动输入项", ssidInput?.children.map((o) => o.value), ["", "Office_5G", "Café", "__manual__"]);
-eq("空选项是占位文案，不是一条长得像真 SSID 的假候选",
-  ssidInput?.children[0].textContent, strings["editor.ssid_placeholder"]);
+  [2, 2, 1, 1]);
+const ssidInp = byBind("rules.0.conditions.0.value");
+const ssidPick = findAll((e) => e.dataset?.ssidPick === "rules.0.conditions.0.value")[0];
+eq("SSID 是能直接打字的输入框，不再是一个只能挑的下拉", ssidInp?.tagName, "INPUT");
+eq("输入框显示的就是配置里的值", [ssidInp?.value, ssidInp?.placeholder],
+  [h.draft.rules[0].conditions[0].value, strings["status.ssid"]]);
+eq("候选下拉只列系统已保存的 SSID，不掺任何哨兵项",
+  ssidPick?.children.map((o) => o.value), ["", "Office_5G", "Café"]);
+eq("候选下拉第一项是占位文案", ssidPick?.children[0].textContent, strings["editor.ssid_placeholder"]);
+eq("候选下拉自己不绑定字段：它写不进配置", ssidPick?.dataset?.bind, undefined);
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
 eq("候选来自本机网卡：没插线的口（en7）也在，VPN 隧道（utun3）不在",
@@ -600,22 +624,28 @@ const gone = byBind("rules.0.conditions.2.value");
 eq("已存但本机已经没有的网卡：原样列出并选中，不会被悄悄改成别的卡",
   [gone?.children.map((o) => o.value), gone?.children.filter((o) => o.selected).map((o) => o.value)],
   [["", "*", "en9", "en0", "en5", "en7"], ["en9"]]);
-// 换类型 = 换值的语义。旧值不跟着清，就会被新类型的下拉当成「系统里没有的已存值」
-// 顶进候选列表 —— SSID 与接口互相串台就是这么来的。
+// 换类型 = 换值的语义。旧值不跟着清，就会被新类型的输入框当成「已存的值」显示出来
+// —— SSID 与接口互相串台就是这么来的。
 choose(byBind("rules.0.conditions.2.type"), "wifi_ssid");
+const ssids = findAll((e) => e.dataset?.ssidPick === "rules.0.conditions.2.value")[0];
 eq("接口条件切成 SSID 类型后：en9 不混进候选，值也被清空",
-  [byBind("rules.0.conditions.2.value")?.children.map((o) => o.value),
+  [ssids?.children.map((o) => o.value), byBind("rules.0.conditions.2.value")?.value,
    h.draft.rules[0].conditions[2].value],
-  [["", "Office_5G", "Café", "__manual__"], undefined]);
-// 「手动输入」是切输入框的入口，`__manual__` 这个哨兵绝不能落成配置值。
-choose(byBind("rules.0.conditions.2.value"), "__manual__");
-const manualInp = byBind("rules.0.conditions.2.value");
-eq("选手动输入后换成文本框，哨兵值不进配置",
-  [manualInp?.tagName, h.draft.rules[0].conditions[2].value], ["INPUT", undefined]);
-type(manualInp, "Hidden Lab WiFi");
+  [["", "Office_5G", "Café"], "", undefined]);
+// 候选下拉只是选取器：选中把名字交给输入框，自己退回占位；直接打字则完全不经过它。
+choose(ssids, "Café");
+eq("从候选里选一个：输入框与配置收到的都是那个 SSID",
+  [byBind("rules.0.conditions.2.value")?.value, h.draft.rules[0].conditions[2].value],
+  ["Café", "Café"]);
+eq("选完候选下拉退回占位，不把「自己的选中状态」留在界面上冒充配置",
+  ssids?.selectedIndex, 0);
+type(byBind("rules.0.conditions.2.value"), "");
+eq("清空输入框是不写 value，而不是留下一个能和「空名字网络」Match 上的空串",
+  h.draft.rules[0].conditions[2].value, undefined);
+type(byBind("rules.0.conditions.2.value"), "Hidden Lab WiFi");
 resetSaves();
 await h.$("btn-save").onclick();
-eq("手输的 SSID 原样送达（含空格的名字不会被截断）",
+eq("直接输入含空格的 SSID 原样送达（不用先点任何「手动」项）",
   saveOf("save_profile")?.payload?.rules?.[0]?.conditions?.[2]?.value, "Hidden Lab WiFi");
 h.pick("profile", "office");
 
@@ -690,7 +720,10 @@ check(
 );
 eq("未声明 args 时不写出空数组", (p?.then?.one_shot || []).every((a) => !("args" in a.action)), true);
 eq("disabled 的动作照样保存，只是标成禁用", p?.then?.one_shot?.[2]?.enabled, false);
-eq("priority 原样保留（分批依据）", (p?.then?.one_shot || []).map((a) => a.priority), [1, 1, 2, 2]);
+// 「谁先跑」没有单独的字段可写：数组顺序本身就是执行顺序，所以一条动作能带也只有三个键。
+eq("每条动作只有 id / enabled / action 三个键",
+  (p?.then?.one_shot || []).map((a) => Object.keys(a).sort()),
+  Array(4).fill(["action", "enabled", "id"]));
 resetSaves();
 toggle(byBind("then.one_shot.1.action.elevated"), true);
 await h.$("btn-save").onclick();
@@ -726,9 +759,10 @@ eq("新加的是一张干净的空卡片：没有 args，也没有 app/path 占�
 choose(byBind("then.one_shot.4.action.printer"), "Home Inkjet");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
-eq("选择的打印机原样送达",
-  [p?.then?.one_shot?.[4]?.action, p?.then?.one_shot?.[4]?.priority, "args" in (p?.then?.one_shot?.[4]?.action || {})],
-  [{ type: "set_default_printer", printer: "Home Inkjet" }, 100, false]);
+eq("选择的打印机原样送达，且新加的那条也只有三个键",
+  [p?.then?.one_shot?.[4]?.action, "args" in (p?.then?.one_shot?.[4]?.action || {}),
+   Object.keys(p?.then?.one_shot?.[4]).sort()],
+  [{ type: "set_default_printer", printer: "Home Inkjet" }, false, ["action", "enabled", "id"]]);
 check("执行清单讲得出这条动作：类型词 + 目标名字",
   h.planList(p.then.one_shot.slice(4), null).includes(strings["editor.action_printer"]) &&
   h.planList(p.then.one_shot.slice(4), null).includes("Home Inkjet"));
@@ -740,8 +774,14 @@ p = saveOf("save_profile")?.payload;
 eq("常驻动作不会因为编辑别的字段而从 payload 里消失", p?.then?.persistent?.length, 1);
 eq(
   "3B2 载荷逐字段送达（type / tunnel / interval_secs 都靠它们才能起 worker）",
-  (p?.then?.persistent || []).map((a) => [a.id, a.enabled, a.priority, a.action.type, a.action.tunnel, a.action.interval_secs]),
-  [["p1", true, 1, "keep_wireguard_connected", "wg0", 15]],
+  (p?.then?.persistent || []).map((a) => [a.id, a.enabled, a.action.type, a.action.tunnel, a.action.interval_secs]),
+  [["p1", true, "keep_wireguard_connected", "wg0", 15]],
+);
+// worker 起来的先后也由数组顺序表达：载荷里没有第二个「谁先起」的键。
+check(
+  "常驻动作只有 id / enabled / action 三个键",
+  (p?.then?.persistent || []).every((a) => JSON.stringify(Object.keys(a).sort()) === '["action","enabled","id"]'),
+  JSON.stringify((p?.then?.persistent || []).map((a) => Object.keys(a))),
 );
 
 const activeOffice = (workers) =>
@@ -752,7 +792,7 @@ const activeOffice = (workers) =>
     workers,
   );
 const status = (over) => ({
-  id: "p1", label: "wireguard:wg0", priority: 1, state: "repaired",
+  id: "p1", label: "wireguard:wg0", state: "repaired",
   interval: 15, repairs: 2, at: 100, ...over,
 });
 
@@ -771,17 +811,17 @@ check("faulted 的徽标是红的", findById("wchip-then.persistent.0").classNam
 eq("失败原文摊在卡片上，不留给用户猜", werr?.textContent, "tunnel wg0 not found");
 check("失败原文不是 hidden（藏着等于没说）", werr?.hidden === false);
 
-h.view = activeOffice([{ id: "p1", label: "wireguard:wg0", priority: 1, state: "satisfied", interval: 15, repairs: 0, at: 100 }]);
+h.view = activeOffice([{ id: "p1", label: "wireguard:wg0", state: "satisfied", interval: 15, repairs: 0, at: 100 }]);
 h.refreshLive();
 eq("satisfied 与 repaired 用词不同：一个什么都没做，一个修过一次",
   findById("wchip-then.persistent.0")?.textContent, strings["editor.worker_satisfied"]);
 
-h.view = activeOffice([{ id: "p1", label: "wireguard:wg0", priority: 1, state: "pending", interval: 15, repairs: 0, at: 100 }]);
+h.view = activeOffice([{ id: "p1", label: "wireguard:wg0", state: "pending", interval: 15, repairs: 0, at: 100 }]);
 h.refreshLive();
 eq("pending 由后端发（worker 起了，第一次核对还没回）",
   findById("wchip-then.persistent.0")?.textContent, strings["editor.worker_pending"]);
 check("未知的状态取值不会串成一条假的成功徽标", (() => {
-  h.view = activeOffice([{ id: "p1", label: "x", priority: 1, state: "some_future_state", interval: 15, at: 1 }]);
+  h.view = activeOffice([{ id: "p1", label: "x", state: "some_future_state", interval: 15, at: 1 }]);
   h.refreshLive();
   return findById("wchip-then.persistent.0").textContent === strings["editor.worker_pending"];
 })());
@@ -802,7 +842,7 @@ eq("Active 的是别的方案：这一支的徽标不能借它的状态来显示
 h.view = activeOffice([status({})]);
 // 常驻动作只随 Active 的 THEN 起。哪怕用户在 ELSE 那一块里填了一条，也不许给它挂徽标。
 h.draft.else ||= {};
-h.draft.else.persistent = [{ id: "pX", enabled: true, priority: 1, action: { type: "periodic_script", path: "keepalive.sh", interval_secs: 30 } }];
+h.draft.else.persistent = [{ id: "pX", enabled: true, action: { type: "periodic_script", path: "keepalive.sh", interval_secs: 30 } }];
 h.renderAll();
 h.refreshLive();
 check("ELSE 那一块也有自己的卡片（表单是完整的）", !!findById("wchip-else.persistent.0"));
@@ -813,16 +853,16 @@ h.pick("profile", "office");   // 丢掉上面那条临时草稿
 
 const withPersistent = (list) => ({ which: "then", branch: { persistent: list } });
 const held = h.planPersistent(withPersistent([
-  { id: "p1", enabled: true, priority: 1, action: { type: "keep_wireguard_connected", tunnel: "wg0", interval_secs: 15 } },
-  { id: "p2", enabled: true, priority: 1, action: { type: "periodic_script", path: "/opt/ops/keepalive.sh", interval_secs: 60 } },
+  { id: "p1", enabled: true, action: { type: "keep_wireguard_connected", tunnel: "wg0", interval_secs: 15 } },
+  { id: "p2", enabled: true, action: { type: "periodic_script", path: "/opt/ops/keepalive.sh", interval_secs: 60 } },
 ]));
 check("执行清单里的常驻段说得出每条查什么、多久一次",
   held.includes("wg0") && held.includes("15") && held.includes("keepalive.sh") && held.includes("60"));
 check("禁用的常驻动作不进清单（点了也不会起 worker）", !h.planPersistent(withPersistent([
-  { id: "p9", enabled: false, priority: 1, action: { type: "keep_wireguard_connected", tunnel: "wg9", interval_secs: 15 } },
+  { id: "p9", enabled: false, action: { type: "keep_wireguard_connected", tunnel: "wg9", interval_secs: 15 } },
 ])).includes("wg9"));
 check("走 ELSE 时清单改口：这一支一条都不会起",
-  h.planPersistent({ which: "else", branch: { persistent: [{ id: "p1", enabled: true, priority: 1, action: { type: "periodic_script", path: "/opt/ops/k.sh", interval_secs: 30 } }] } })
+  h.planPersistent({ which: "else", branch: { persistent: [{ id: "p1", enabled: true, action: { type: "periodic_script", path: "/opt/ops/k.sh", interval_secs: 30 } }] } })
     .includes(strings["editor.persistent_else"]));
 
 group("第 1 列的勾选：不动选中态，直接把磁盘上那一份改掉");
@@ -863,22 +903,27 @@ const saved = h.cfg.profiles.find((x) => x.id === "office");
 let plan = h.applyPlan(saved);
 eq("命中 → 清单讲的是 THEN", plan.which, "then");
 let listHtml = h.planList(plan.branch.one_shot, null);
-const batch = (n) => `${strings["editor.priority"]} ${n}`;
-const count = (hay, needle) => hay.split(needle).length - 1;
+// 清单的行序就是执行顺序：后端按数组序逐条跑，前一条结束（成功、失败或超过它自己的
+// 等待上限）才轮到下一条。这里故意让 id 序、字母序都和数组序不一致，
+// 好让「被重排了」这种回归一定留下痕迹。
+const liText = (html) => (html.match(/<li>[\s\S]*?<\/li>/g) || []).map((s) => s.replace(/<[^>]*>/g, ""));
 const ordered = h.planList(
   [
-    { id: "b", priority: 2, action: { type: "launch_app", app: "Second" } },
-    { id: "a", priority: 1, action: { type: "launch_app", app: "First" } },
-    { id: "c", priority: 1, action: { type: "launch_app", app: "AlsoFirst" } },
+    { id: "b", action: { type: "launch_app", app: "Second" } },
+    { id: "a", action: { type: "launch_app", app: "First" } },
+    { id: "c", action: { type: "launch_app", app: "AlsoFirst" } },
   ],
   null,
 );
-check("数值小的批次排在前面", ordered.indexOf(batch(1)) < ordered.indexOf(batch(2)));
-check("同一个 priority 归成一批（并发的那一批）", count(ordered, batch(1)) === 1 && count(ordered, batch(2)) === 1);
+check("清单是有序列表：行首编号说的是「第几条」", ordered.startsWith("<ol>") && ordered.endsWith("</ol>"));
+eq("一条一行", liText(ordered).length, 3);
+check("行序 = 数组序（谁写在上面谁先跑）",
+  ["Second", "First", "AlsoFirst"].every((n, i) => (liText(ordered)[i] || "").includes(n)),
+  JSON.stringify(liText(ordered)));
 check("禁用动作不进清单（点了也不会跑）", !listHtml.includes("Test.app"));
-const elevatedLine = h.planList([{ id: "x", priority: 1, action: { type: "run_script", path: "p.sh", elevated: true } }], null);
+const elevatedLine = h.planList([{ id: "x", action: { type: "run_script", path: "p.sh", elevated: true } }], null);
 check("提权动作在清单上明说要授权", elevatedLine.includes(strings["editor.action_elevated"]));
-check("没提权的动作不会被顺手标上提权", !h.planList([{ id: "y", priority: 1, action: { type: "launch_app", app: "Foo" } }], null).includes(strings["editor.action_elevated"]));
+check("没提权的动作不会被顺手标上提权", !h.planList([{ id: "y", action: { type: "launch_app", app: "Foo" } }], null).includes(strings["editor.action_elevated"]));
 listHtml = h.planList(plan.branch.one_shot, { outcomes: [], running: true, total: 3 });
 check("还在跑的动作标成 running，而不是成功", listHtml.includes(strings["editor.action_running"]));
 h.view = engineView(
@@ -896,6 +941,86 @@ h.view = engineView(
 );
 plan = h.applyPlan(h.cfg.profiles.find((x) => x.id === "router_only"));
 check("禁用的 Profile 不进清单", !!plan.refuse);
+
+group("卡片头部的上下移动：这一列从上到下就是执行顺序");
+click(officeRow);
+const mv = (kind, pre, i, d) =>
+  findAll((e) => e.dataset?.act === `move-${kind}` && e.dataset?.pre === pre &&
+    e.dataset?.i === String(i) && e.dataset?.d === String(d))[0] || null;
+const oneIds = () => (h.draft.then.one_shot || []).map((a) => a.id);
+eq("回填出来的动作顺序照配置", oneIds(), ["a1", "a2", "a3", "a4"]);
+check("第一张的「上移」是禁用状态：到头了得让人看出来，而不是点了没反应",
+  mv("one", "then.", 0, -1)?.attributes?.disabled === "");
+check("最后一张的「下移」同样禁用", mv("one", "then.", 3, 1)?.attributes?.disabled === "");
+check("中间的卡两头都能点",
+  mv("one", "then.", 1, -1)?.attributes?.disabled === undefined &&
+  mv("one", "then.", 1, 1)?.attributes?.disabled === undefined);
+resetSaves();
+click(mv("one", "then.", 0, 1));
+eq("点第一张的「下移」= 它与下一条交换位置", oneIds(), ["a2", "a1", "a3", "a4"]);
+click(mv("one", "then.", 1, -1));
+eq("再点一次就换回来（交换是对合的）", oneIds(), ["a1", "a2", "a3", "a4"]);
+click(mv("one", "then.", 0, 1));
+await h.$("btn-save").onclick();
+p = saveOf("save_profile")?.payload;
+eq("保存出去的就是屏幕上这个顺序：后端按数组序逐条跑，没有别处的开关",
+  p?.then?.one_shot?.map((a) => a.id), ["a2", "a1", "a3", "a4"]);
+
+const plIds = () => (h.draft.then.persistent || []).map((a) => a.id);
+click(byAct("add-persist"));
+eq("常驻段现在是两条，原有的那条仍在最前（它先起 worker）", plIds()[0], "p1");
+check("单条时两头都到头；现在两条，第一张的「下移」该能点了",
+  mv("persist", "then.", 0, 1)?.attributes?.disabled === undefined);
+click(mv("persist", "then.", 1, -1));
+eq("新加的那条被移到前面，先起的就是它", plIds()[1], "p1");
+h.pick("profile", "office");   // 丢掉这条还没填路径的临时动作，别把它送进 fixture
+
+group("拖动卡头排序：落点说的是「它现在排第几」");
+click(officeRow);
+const head = (kind, pre, i) =>
+  findAll((e) => e.dataset?.act === "drag-card" && e.dataset?.kind === kind &&
+    e.dataset?.pre === pre && Number(e.dataset?.i) === i)[0] || null;
+// 一次完整的手势。真浏览器里 drop 之前必然先落住 dragover（不 preventDefault 就没有合法落点），
+// 收尾必然有 dragend（哪怕用户把卡拖到列子外面松手）—— 这里照着走一遍，才不会测出一条
+// 只在脚本里成立的顺序。返回那次 dragover：它是不是被「接住」了，是浏览器放不放行的依据。
+const drag = (from, to) => {
+  document.dispatch("dragstart", head(from[0], from[1], from[2]));
+  document.dispatch("dragover", head(to[0], to[1], to[2]));
+  const over = document.lastEvent;
+  document.dispatch("drop", head(to[0], to[1], to[2]));
+  document.dispatch("dragend", head(from[0], from[1], from[2]));
+  return over;
+};
+check("卡头自己就是手柄（整张卡都可拖会误伤卡里文本的选择）",
+  head("one", "then.", 0)?.attributes?.draggable === "true");
+eq("只有 3B 的动作卡挂得上手柄（路由卡这类「顺序没有意义」的卡片不在其中，光标也不该骗人）",
+  findAll((e) => e.dataset?.act === "drag-card").length, 5);
+const landed = drag(["one", "then.", 0], ["one", "then.", 2]);
+check("落在有效目标上：说成 move 并接住 dragover，否则浏览器压根不会发出 drop",
+  [landed.defaultPrevented, landed.dataTransfer.dropEffect], [true, "move"]);
+eq("第一条拖到第 3 张卡上：它成为第 3 条，中间那些往前挪一格",
+  oneIds(), ["a2", "a3", "a1", "a4"]);
+drag(["one", "then.", 1], ["one", "then.", 1]);
+eq("拖到自己身上什么都不改", oneIds(), ["a2", "a3", "a1", "a4"]);
+const persistedBefore = (h.draft.then.persistent || []).length;
+const refused = drag(["one", "then.", 0], ["persist", "then.", 0]);
+check("跨类的落点不接住：在浏览器那边就是「这里放不下」，而不是放下以后偷偷改语义",
+  refused.defaultPrevented === false);
+eq("一次性动作不能靠一拖变成常驻动作（那改的是归谁执行，不是顺序）",
+  [(h.draft.then.one_shot || []).length, (h.draft.then.persistent || []).length],
+  [4, persistedBefore]);
+check("被拒绝的拖动不留下半透明的卡片：dragend 把样式擦干净了",
+  !findAll((e) => (e.className || "").includes("dragging") || (e.className || "").includes("drag-over")).length);
+resetSaves();
+await h.$("btn-save").onclick();
+p = saveOf("save_profile")?.payload;
+eq("拖出来的顺序就是保存下去的顺序", p?.then?.one_shot?.map((a) => a.id), ["a2", "a3", "a1", "a4"]);
+click(findAll((e) => e.dataset?.act === "add-one" && e.dataset?.pre === "else.")[0]);
+check("ELSE 那一支也有自己的动作列（这是跨支拒绝的前提）", byBind("else.one_shot.0.action.app") !== null);
+const thenBefore = oneIds();
+drag(["one", "then.", 0], ["one", "else.", 0]);
+eq("THEN 的卡拖不进 ELSE：两支各自排队，互不串门", oneIds(), thenBefore);
+h.pick("profile", "office");   // 丢掉这张没填应用名的 ELSE 临时卡
 
 group("广播只换徽标，不重建表单");
 click(officeRow);
@@ -999,20 +1124,57 @@ eq("<html lang> 跟着后端换回 en", document.documentElement.lang, "en");
 eq("English 界面里不残留写死的中文字面", cjkInDom(), []);
 
 group("广播之后，「当前网络」那一格跟着变新");
-// 这张格子的地址/掩码/DNS 来自 `get_interfaces`，而引擎那份身份快照里**没有**这些字段
-// （SSID / 网关 MAC / BSSID / 网卡集合才是它的）。所以窗口开着时下发过一次静态 IP，
-// 若不重新取一次网卡明细，用户看到的就是改设置之前的那个地址。
+// 这一格有两份来源，分开是因为它们的「变新」代价完全不同：
+//   地址/掩码/网关/DNS/信号 —— 引擎每轮广播都自带一份新采样（`status`），零代价、零延迟；
+//   接口标签与这张口自己的 MAC —— 只能问 `get_interfaces`（子进程），而它只在**身份**
+//   变了的时候才会变。所以判据是身份指纹，不是「来了一条广播就再问一次后端」。
+// 早先的版本是每条广播问一次：一轮下发会连发两条（evaluation + status），编辑器于是
+// 跟着每秒拉一次子进程 —— 现场feedback「刷新太慢」的一部分就是这个。
+const askedNics = () => invokeLog.filter((c) => c.cmd === "get_interfaces").length;
 check("开窗时显示的是取到那份地址", findById("st-net").textContent.includes("192.168.1.100/24"));
-nicFixture = nicFixture.map((n) =>
-  n.name === "en0" ? { ...n, ipv4: "10.20.30.40/24", dns: "10.20.30.1" } : n
-);
-const nicsAsked = invokeLog.filter((c) => c.cmd === "get_interfaces").length;
-await broadcast("netsense://status", { language: "en", engine: h.view });
-await new Promise((r) => setImmediate(r)); // refreshNics 是 fire-and-forget：让它那一次 await 落地
-check("广播让它重新取了一次网卡明细", invokeLog.filter((c) => c.cmd === "get_interfaces").length > nicsAsked);
+const nicsAsked = askedNics();
+await broadcast("netsense://status", {
+  language: "en",
+  status: { connected: true, ssid: "Office_5G", ipv4: "10.20.30.40/24", netmask: "255.255.255.0",
+    gateway: "10.20.30.1", dns: "10.20.30.1", rssi: -47, iface: "en0" },
+  engine: h.view,
+});
+check("下发过静态 IP 之后地址立刻见新，而编辑器没有为它多问一次后端",
+  askedNics() === nicsAsked, `get_interfaces 从 ${nicsAsked} 次变成了 ${askedNics()} 次`);
 check("新地址现在就摆在格 3 里", findById("st-net").textContent.includes("10.20.30.40/24"));
 check("旧地址不再留在界面上", !findById("st-net").textContent.includes("192.168.1.100/24"));
 check("DNS 也跟着换了", findById("st-net").textContent.includes("10.20.30.1"));
+check("信号强度用的是广播里那一份", findById("st-net").textContent.includes("-47 dBm"));
+
+group("换了口才重取网卡明细，同一条身份不重复取");
+// 身份指纹里的 `primary_interface` / `interfaces` 一变，就说明连着的是另一张口了：
+// 这时候接口标签、这张口自己的 MAC 才可能不同，才值得付一次子进程的代价。
+nicFixture = [
+  { name: "en5", kind: "wired", label: "USB 10/100/1000 LAN", mac: "aa:00:00:00:00:05", ipv4: "10.20.30.40/24" },
+  { name: "en0", kind: "wireless", ipv4: "192.168.1.100/24", netmask: "255.255.255.0", dns: "192.168.1.1" },
+];
+const movedView = {
+  ...h.view,
+  snapshot: { ...h.view.snapshot, primary_interface: "en5", interfaces: ["en5"], tunnels: [] },
+};
+const beforeMove = askedNics();
+await broadcast("netsense://status", {
+  language: "en",
+  status: { connected: true, ipv4: "10.20.30.40/24", dns: "10.20.30.1", iface: "en5" },
+  engine: movedView,
+});
+check("身份一变，网卡明细重取了一次", askedNics() === beforeMove + 1);
+check("新接口那一张口的标签上了界面", findById("st-net").textContent.includes("USB 10/100/1000 LAN"));
+check("它的 MAC 也带出来了", findById("st-net").textContent.includes("aa:00:00:00:00:05"));
+const afterMove = askedNics();
+await broadcast("netsense://status", {
+  language: "en",
+  status: { connected: true, ipv4: "10.20.30.40/24", dns: "10.20.30.1", iface: "en5" },
+  engine: movedView,
+});
+await broadcast("netsense://evaluation", movedView);
+check("同一份身份再来两条广播，一次都不再多问", askedNics() === afterMove);
+check("有线口不再显示那一行空着的 SSID 值", !findById("st-net").textContent.includes("Office_5G"));
 
 // —————————————————————— 交给 Rust 那半边的材料 ——————————————————————
 

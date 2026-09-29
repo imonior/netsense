@@ -1,11 +1,12 @@
-//! 3B1 一次性动作：按 priority 分批执行。
+//! 3B1 一次性动作：**按配置里的排列顺序**逐条执行。
 //!
-//! 调度规则（方案第 19~23 条）：
+//! 调度规则：
 //!
-//! - `priority` 数字越小越先执行；
-//! - **相同 priority 并发**执行（例：同时启动代理客户端和工作软件，没必要排队）；
-//! - 当前批次**全部结束**（不论成败）才进入下一批；
-//! - 单个动作失败**不阻断**后续批次 —— 这与 3A 相反：3A 失败还继续跑自动化会把
+//! - 列表从上到下就是执行顺序，不做任何重排 —— 编辑器里那一列长什么样，跑起来就什么样；
+//!   要改顺序就在编辑器里移动那两张卡片，而不是给每条动作填一个数字（两处对不上，
+//!   而「谁排在前面」在界面上本来就看得见）；
+//! - 一次只跑一条，跑完（或超过它自己的等待上限）才轮到下一条；
+//! - 单条失败**不阻断**后续 —— 这与 3A 相反：3A 失败还继续跑自动化会把
 //!   一个不通的网络越搞越乱，而「VPN 没连上」不该阻止「打开 Slack」。
 //!
 //! 因此本模块的结果只有 `Success / Partial / Failed` 三种记录，没有「中断」。
@@ -15,11 +16,13 @@
 //! 每个动作都有**自己**的超时（[`timeout_for`]）。超时的含义是「我们不再等了」，
 //! 不是「动作被终止」：Rust 没有安全的手段去杀掉一个已经跑起来的用户进程，
 //! 而提权脚本等的常常是**用户本人**在授权框上的决定。所以超时只会：把该动作记为失败、
-//! 让批次继续往下走；迟到的结果由工作线程自己写进日志，不再计入本次运行。
+//! 让后面的动作继续；迟到的结果由工作线程自己写进日志，不再计入本次运行。
+//!
+//! 顺序执行让总耗时变成各条之和（而不是最慢那条），所以一次运行更该跑在独立线程上：
 //!
 //! ## 谁调用 `execute`
 //!
-//! `execute` 会阻塞到全部批次结束（最坏情况是若干超时之和）。引擎线程是唯一能响应
+//! `execute` 会阻塞到全部动作结束（最坏情况是若干超时之和）。引擎线程是唯一能响应
 //! 网络变化、下发 3A 的地方，因此**必须**通过 [`spawn`] 把一次运行交给独立线程。
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
@@ -59,13 +62,12 @@ pub struct ActionOutcome {
     pub id: String,
     /// 人类可读的动作描述（日志与 UI 用）
     pub label: String,
-    /// 它属于哪一批（= 配置里的 priority）。报告是摊平的，前端要按批还原分组就得靠它。
-    pub priority: u32,
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+/// 一次运行的结果。`outcomes` 的顺序就是执行顺序，界面上要显示的「第几条」直接数下标。
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchReport {
     pub status: BatchStatus,
@@ -79,25 +81,6 @@ impl Default for BatchReport {
             outcomes: Vec::new(),
         }
     }
-}
-
-/// 把「已按 priority 升序稳定排序」的动作切成批：相邻同 priority 归为一批。
-///
-/// 单独成函数是因为这正是调度语义本身（同批并发、批间串行），值得被直接测到，
-/// 而不是藏在一段带副作用的循环里。
-pub(crate) fn group_batches<'a>(ordered: &'a [&'a OneShotAction]) -> Vec<&'a [&'a OneShotAction]> {
-    let mut out: Vec<&[&OneShotAction]> = Vec::new();
-    let mut start = 0usize;
-    while start < ordered.len() {
-        let prio = ordered[start].priority;
-        let mut end = start + 1;
-        while end < ordered.len() && ordered[end].priority == prio {
-            end += 1;
-        }
-        out.push(&ordered[start..end]);
-        start = end;
-    }
-    out
 }
 
 pub(crate) fn status_of(outcomes: &[ActionOutcome]) -> BatchStatus {
@@ -201,7 +184,6 @@ fn outcome_of<P: NetworkPlatform>(
     ActionOutcome {
         id: a.id.clone(),
         label,
-        priority: a.priority,
         ok: res.is_ok(),
         error: res.err(),
     }
@@ -262,7 +244,6 @@ fn missing_outcome(a: &OneShotAction, drained: bool) -> ActionOutcome {
     ActionOutcome {
         id: a.id.clone(),
         label: label_of(&a.action),
-        priority: a.priority,
         ok: false,
         error: Some(if drained {
             i18n::t("act.thread_died")
@@ -275,7 +256,10 @@ fn missing_outcome(a: &OneShotAction, drained: bool) -> ActionOutcome {
     }
 }
 
-/// 执行一批（同 priority）：批内并发，各自受自己的超时约束。
+/// 把手里这几条同时丢出去，各自受自己的超时约束，收齐（或收不齐）后返回。
+///
+/// 顺序执行时每次只进来一条，于是它就是「等这一条，最多等它自己的预算」；函数本身
+/// 按一组来写，是因为超时账目（谁到点了、谁线程没了）在一个和 N 个情况下是同一本账。
 ///
 /// 用「分离线程 + 通道」而不是 `thread::scope`：scope 退出时必然 join，一个卡住的
 /// 动作会把整批钉在原地，超时也就无从谈起。线程 panic 时它的 sender 随之消失，
@@ -327,7 +311,7 @@ where
         .collect()
 }
 
-/// 按 priority 分批执行一次性动作。**会阻塞**到全部批次结束。
+/// 按**排列顺序**逐条执行一次性动作。**会阻塞**到全部动作结束。
 pub fn execute<P>(
     plat: P,
     allowed: &Arc<AllowedScripts>,
@@ -337,17 +321,12 @@ pub fn execute<P>(
 where
     P: NetworkPlatform + Copy + Send + Sync + 'static,
 {
-    let mut ordered: Vec<&OneShotAction> = actions.iter().filter(|a| a.enabled).collect();
-    if ordered.is_empty() {
-        return BatchReport::default();
-    }
-    // 稳定排序：同 priority 时保持配置里的书写顺序，行为可预期。
-    ordered.sort_by_key(|a| a.priority);
-
-    let mut outcomes: Vec<ActionOutcome> = Vec::with_capacity(ordered.len());
-    for batch in group_batches(&ordered) {
-        let owned: Vec<OneShotAction> = batch.iter().map(|a| (*a).clone()).collect();
-        outcomes.extend(run_batch(plat, allowed, &owned, on_step));
+    let mut outcomes: Vec<ActionOutcome> = Vec::with_capacity(actions.len());
+    // 顺序就是列表顺序：这里既不调数字，也不按类型或预计耗时重排 —— 界面上看得见的那一列
+    // 就是执行计划。上一条要么交回结果、要么超过它自己的等待上限，才轮到下一条，所以一次
+    // 运行的最坏耗时是各条预算之和（这也是它必须跑在独立线程上的理由，见模块头）。
+    for a in actions.iter().filter(|a| a.enabled) {
+        outcomes.extend(run_batch(plat, allowed, std::slice::from_ref(a), on_step));
     }
     let status = status_of(&outcomes);
     BatchReport { status, outcomes }
@@ -380,11 +359,10 @@ mod tests {
     use super::*;
     use crate::config::OneShotActionType;
 
-    fn act(id: &str, priority: u32) -> OneShotAction {
+    fn act(id: &str) -> OneShotAction {
         OneShotAction {
             id: id.to_string(),
             enabled: true,
-            priority,
             action: OneShotActionType::LaunchApp {
                 app: format!("/Applications/{}.app", id),
                 args: vec![],
@@ -392,22 +370,24 @@ mod tests {
         }
     }
 
+    /// 执行顺序 = 配置里的排列顺序。这条挡住的是「又加回某种重排」：列表顺序是用户在
+    /// 编辑器里唯一看得见、也唯一能改的顺序，任何按数字/类型/耗时的重新排队都会让
+    /// 「界面上看到的」和「实际跑的」分叉。
     #[test]
-    fn same_priority_forms_one_batch_and_order_is_preserved() {
-        let a = act("a", 1);
-        let b = act("b", 2);
-        let c = act("c", 2);
-        let d = act("d", 3);
-        let refs: Vec<&OneShotAction> = vec![&a, &b, &c, &d];
-        let batches = group_batches(&refs);
-        assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            batches[1].iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
-            vec!["b", "c"],
-            "同批内保持书写顺序"
+    fn actions_run_in_the_order_they_are_listed() {
+        // 三个不存在的应用：每条都会失败，但失败要让后面的照跑（这是 3B1 与 3A 的关键差别）
+        let report = execute(
+            crate::platform::Platform,
+            &Arc::new(AllowedScripts::default()),
+            &[act("first"), act("second"), act("third")],
+            &noop,
         );
-        assert_eq!(batches[2].len(), 1);
+        assert_eq!(
+            report.outcomes.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second", "third"],
+            "结果顺序就是列表顺序，一条都没少"
+        );
+        assert_eq!(report.status, BatchStatus::Failed, "三条都失败该记 Failed，而不是中断");
     }
 
     #[test]
@@ -415,7 +395,6 @@ mod tests {
         let o = |id: &str, ok: bool| ActionOutcome {
             id: id.to_string(),
             label: String::new(),
-            priority: 1,
             ok,
             error: None,
         };
@@ -429,7 +408,7 @@ mod tests {
 
     #[test]
     fn disabled_actions_never_reach_the_scheduler() {
-        let mut off = act("off", 1);
+        let mut off = act("off");
         off.enabled = false;
         let report = execute(
             crate::platform::Platform,
@@ -461,7 +440,6 @@ mod tests {
         OneShotAction {
             id: "a".into(),
             enabled: true,
-            priority: 1,
             action: kind,
         }
     }
@@ -472,7 +450,6 @@ mod tests {
         let outcome = |idx: usize| ActionOutcome {
             id: format!("a{idx}"),
             label: format!("label{idx}"),
-            priority: idx as u32,
             ok: true,
             error: None,
         };
@@ -563,9 +540,9 @@ mod tests {
 
     #[test]
     fn a_branch_with_nothing_enabled_does_not_take_a_run_slot() {
-        let mut off = act("off", 1);
+        let mut off = act("off");
         off.enabled = false;
         assert!(!any_enabled(&[off.clone()]));
-        assert!(any_enabled(&[off, act("on", 1)]));
+        assert!(any_enabled(&[off, act("on")]));
     }
 }

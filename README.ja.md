@@ -34,8 +34,8 @@ macOS、Windows、Linux 向けのクロスプラットフォームなネット�
   さらに ICMP/HTTP のヘルスチェックを追加できます（任意）。ネットワークが失敗し続けるなら DHCP に
   復帰します。
 - **自動化（3B）は 3A を通過した後だけに実行されます。** 単発アクション（`launch_app`、`run_script`、
-  `set_default_printer`）は `priority` ごとにバッチで実行されます —— 低いものが先、同じ優先度は並行、
-  あるバッチが終わってから次のバッチへ進み、1 つのバッチ内の失敗が後のバッチを止めることはありません。
+  `set_default_printer`）は並べた順に 1 本ずつ実行されます —— 前のが終わる（またはその待ち上限に達する）
+  と次へ移り、1 本の失敗が後続のアクションを止めることはありません。
   既定プリンタの設定は *そのユーザー* の既定だけを変えるので、ネットワークを切り替えても認可ダイアログは
   出ません。一致の失敗（Conflict）と実行の失敗（Error）は別の状態であり、分けて報告されます。
 - **検出は Profile 単位です**: ネットワークイベントへの反応、間隔を空けたポーリング、またはその両方。
@@ -179,7 +179,7 @@ Linux は `~/.config/netsense`。実行ファイルと同じ場所には置き�
                                 "fallback": { "enabled": true } } }
       },
       "one_shot": [
-        { "id": "a1", "enabled": true, "priority": 1,
+        { "id": "a1", "enabled": true,
           "action": { "type": "run_script", "path": "/opt/ops/office-init.sh", "elevated": false } }
       ]
     },

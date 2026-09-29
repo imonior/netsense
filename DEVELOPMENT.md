@@ -40,7 +40,7 @@
 │        ↓
 │   3A network: Apply → Verify(readback [+ health]) —— 硬屏障，失败即 3B 一条都不跑
 │        ↓
-│   3B1 automation/one_shot: 过滤 disabled → 按 priority 分批（同批并发，批完才下一批）
+│   3B1 automation/one_shot: 过滤 disabled → 按排列顺序逐条执行（跑完一条才下一条）
 │   3B2 automation/persistent: 期望状态 worker，随 Active 的 THEN 起停（automation/provider 出语义）
 ├─────────────────────────────────────────────┤
 │ PAL  platform.rs: trait NetworkPlatform（18 方法）+ 编译期选平台
@@ -96,7 +96,7 @@ netsense/
 │       │   └── health.rs      # Active 期间的探测循环 + 连续失败回落 DHCP
 │       ├── automation/
 │       │   ├── mod.rs         # 3B 层的脚本 allow-list（安全边界：run_script 能提权）
-│       │   ├── one_shot.rs    # 3B1：enabled + priority 分批执行 + 脚本 allow-list
+│       │   ├── one_shot.rs    # 3B1：enabled 过滤 + 按排列顺序执行 + 脚本 allow-list
 │       │   ├── persistent.rs  # 3B2：每条常驻动作一个 worker 线程（起停 / 错峰 / 自重叠门 / 状态上报）
 │       │   └── provider.rs    # 3B2 的动作语义层：把 PersistentActionType 翻成一次 `Tick`
 │       ├── platform.rs        # ★ PAL trait contract + shared types + shared utils + compile-time platform selection
@@ -272,7 +272,7 @@ Rule    = (all *enabled* Conditions ANDed)
   collapsed into one another. **Only 3A can produce ERROR** (`engine::Engine::record_failure`, reached from
   a `Stage3A::Failed` or from the health monitor falling the config back to DHCP): it clears `active_id`,
   clears the applied fingerprint, and memoises the "this config + this network already failed" pair in
-  `blocked` so the engine stops re-prompting for authorization every pass. A 3B1 batch that ends
+  `blocked` so the engine stops re-prompting for authorization every pass. A 3B1 run that ends
   `Partial`/`Failed` produces **neither** — see §8. Four tests in `engine::tests` are that contract:
   `a_failed_batch_is_a_record_not_a_state_change`, `only_a_3a_failure_turns_the_profile_into_error`,
   `a_health_fallback_drops_active_without_an_error_message`, `conflict_and_error_stay_two_different_layers`.
@@ -326,18 +326,18 @@ the user's NIC. Rewriting by hand against `config.example.json` is the documente
               "http_target": "http://cp.cloudflare.com", "icmp_target": "223.5.5.5",
               "interval": 30, "retries": 3, "timeout": 5 } }
         },
-        "one_shot": [                                 // 3B1
-          { "id": "a1", "enabled": true, "priority": 1,
+        "one_shot": [                                 // 3B1 — runs top to bottom, one action at a time
+          { "id": "a1", "enabled": true,
             "action": { "type": "launch_app", "app": "/Applications/Slack.app" } },
-          { "id": "a2", "enabled": true, "priority": 1,
+          { "id": "a2", "enabled": true,
             // relative → resolved against the config dir, then allow-listed (see §8)
             "action": { "type": "run_script", "path": "scripts/office-vpn.sh", "elevated": false } },
-          { "id": "a3", "enabled": true, "priority": 2,
+          { "id": "a3", "enabled": true,
             // the printer's *name* as the system knows it — the editor lists them (see §8)
             "action": { "type": "set_default_printer", "printer": "Office LaserJet" } }
         ],
         "persistent": [                               // 3B2 — one worker each, started with Active's THEN
-          { "id": "p1", "enabled": true, "priority": 1,
+          { "id": "p1", "enabled": true,
             "action": { "type": "keep_wireguard_connected", "tunnel": "wg0", "interval_secs": 15 } }
         ]
       },
@@ -412,15 +412,20 @@ Key modelling points, each of which is easy to get wrong:
 **3B1 one-shot** (`automation/one_shot.rs`) runs once per *entry into Active*; a re-evaluation that keeps
 the same Profile active does **not** re-run it (otherwise every poll interval re-launches apps).
 
-- Filter out `enabled: false` → sort by `priority` ascending (smaller = earlier) → group adjacent equal
-  priorities into one batch.
-- Within a batch: concurrent. Across batches: the next batch starts only after **every** action of the
-  current one has finished, regardless of success.
-- A failing action does **not** block later batches — the opposite of 3A, on purpose: "VPN didn't connect"
-  should not prevent "open Slack", while "the network config didn't land" must prevent everything.
-- Result recorded as `Empty / Success / Partial / Failed` (`BatchReport` carries per-action outcomes),
-  surfaced in the log and as `engine.one_shot_partial` when incomplete.
-- **A `Partial`/`Failed` batch never touches the Profile's state.** Attributing the report
+- Filter out `enabled: false`; what is left runs **in the order it is listed**, one action at a time:
+  the next starts only once the current one has finished, regardless of success.
+- **The editor shows that order two ways**: drag a card's header onto another card, or use the header's ↑/↓
+  buttons. Dropping lands the dragged card *at the target's position* (the item that was there shifts
+  toward the gap). Either way only two cards in the **same branch and the same kind of list** may change
+  places — a one-shot action dragged onto the persistent list, or a THEN card onto an ELSE one, is
+  refused: that would change which executor owns the action, which is not a matter of position.
+- Because the run is sequential, its worst case is the **sum** of the per-action timeouts rather than the
+  slowest single one — see the budget table below.
+- A failing action does **not** block the actions after it — the opposite of 3A, on purpose: "VPN didn't
+  connect" should not prevent "open Slack", while "the network config didn't land" must prevent everything.
+- Result recorded as `Empty / Success / Partial / Failed` (`BatchReport` carries per-action outcomes in
+  execution order), surfaced in the log and as `engine.one_shot_partial` when incomplete.
+- **A `Partial`/`Failed` run never touches the Profile's state.** Attributing the report
   (`Engine::note_run_done`, then `apply_runs`) fills `last_run` and releases the run slot — nothing else.
   The Profile stays Active and no ERROR badge appears: the 3A config really did land, and "the VPN script
   exited non-zero" is information for the user, not a reason to tear the environment down. §5 names the
@@ -437,8 +442,8 @@ adding a seam anyone can substitute.
 - **Lifecycle: one worker thread per enabled action, started only with Active's THEN branch.** `else`
   branches describe a state to return to, not one to maintain, so a `persistent` action configured there
   cannot run — `Config::warnings()` says so instead of leaving the user to discover it.
-- **Priority only orders worker *start*** (stable sort, `START_SPACING` stagger); once running, workers are
-  independent and never block each other.
+- **The listed order only orders worker *start*** (`START_SPACING` staggers them); once running, workers
+  are independent and never block each other.
 - **A tick that is still running when the next interval arrives is skipped, not queued** (`busy`
   compare-exchange, released by a `Drop` guard so a panicking tick cannot wedge the worker forever). Sleep
   is sliced (`SLEEP_SLICE`), so "stop" lands in ≤500 ms instead of at the end of an hour-long interval.
@@ -691,6 +696,7 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Elevate = Direct | sudoers allow-list script (`sudo -n`, no dialog) | process already admin | `sudo -n` available |
 | Elevate = Prompt | `osascript ... with administrator privileges` — the first change on a machine without the channel installs it in that same prompt (§9.1) | config batches: resident helper (`win_helper.rs`, one UAC per GUI session, same `Start-Process -Verb RunAs` to spawn it); fallback / user scripts: UAC per call (`Start-Process -Verb RunAs`) | `pkexec` |
 | Saved SSID list | `networksetup -listpreferredwirelessnetworks` | read WLAN config XML (`[xml]` parse) | `nmcli con show` filtered to `802-11-wireless` |
+| Which app owns a VPN NIC | **evidence only**: the service whose `-getinfo` reports that tunnel's IPv4, else the single `(Connected)` `scutil --nc` session when exactly one tunnel is up; otherwise left blank | adapter **description** through `VPN_APP_TABLE` | connection name through `VPN_APP_TABLE` |
 | Open log folder | `open` | `explorer` | `xdg-open` |
 
 > The "Connect tunnel" row deliberately uses **neither** elevate channel below: a worker that elevated
@@ -782,7 +788,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **508 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **505 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1023,32 +1029,46 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   first pass always due, timer reset),
   `engine::decide` (0 / 1 / 2+ → `no_active_profile` / `active` / `conflict`, **conflict never picks a
   winner**, stable tagged serialization),
-  `engine` run attribution + **layering** (a `Partial`/`Failed` batch leaves Active untouched, only a 3A
+  `engine` run attribution + **layering** (a `Partial`/`Failed` run leaves Active untouched, only a 3A
   failure clears Active and yields ERROR, and an ERROR never bleeds into a Conflict on another Profile),
+  `engine` resample handover (a forced resample governs **exactly one** pass: nothing is owed one when no
+  one asked, and taking it clears it — a flag left standing would bypass the sampling cadence forever),
   `network` + `network::readback` (Failed carries the reason that blocks 3B; each readback expectation
   including "cleared DNS must not be compared against DHCP servers"),
   `automation` (allow-list trust rules incl. which directory a relative script path is anchored to,
-  batch grouping, and what each action reports on the UI — label text, and the printer action being
-  budgeted like a local handoff rather than like a script),
+  that actions run in the order they are listed, and what each action reports on the UI — label text, and
+  the printer action being budgeted like a local handoff rather than like a script),
   `automation::provider` (an up tunnel issues no connect, labels/budgets come from the action, a script
   outside the allow-list is reported rather than run),
   `automation::persistent` (the self-overlap gate opens on both the panic and the finish path, a stop ends
   the sliced sleep, one report per state change, a superseded generation is not attributed, start order),
   `platform` (MAC parsing, `printers_from_lpstat` — one default marked, and that default taken from the
   text after the last colon rather than from an English label, so a localized CUPS cannot silently read
-  as "no default" — `sh_q` shell-escaping
+  as "no default" — and `printer_label`, which must keep a **subject**: a description that just repeats
+  the queue name leaves `Queue · Location`, never a bare location, because a list of room numbers is not
+  a list of printers — `sh_q` shell-escaping
   round-trip, the op list a `NetworkConfig` compiles to — an absent `dns` key emits no DNS operation
   while `dns: ""` still emits the clear), `update` (https-only urls; an occupied temp name failing
   instead of being reused; a same-named symlink not being followed; the private file / dir / script
   being ours with no group or other bits; and `SHA256SUMS` parsing across GNU, BSD and binary lines —
-  fail-closed hangs on that last one), `ipc` (the check-time install verdict: a Homebrew install
+  fail-closed hangs on that last one: a line that cannot be read is skipped, an asset that is really
+  absent still yields `None`, and neither may be reported as "not listed"), `ipc` (the check-time install
+  verdict: a Homebrew install
   needs no checksums at all, while a missing asset — or a checksum link that is absent, blank or not
-  https — is refused before a request leaves the process), `i18n` (parity / fallback chain / placeholder substitution).
+  https — is refused before a request leaves process; plus the asset choice itself as a pure function,
+  so all three platforms' picking rules run on whichever host is doing `cargo test` — extension before
+  OS token, architecture never traded for a package that cannot install), `i18n` (parity / fallback chain / placeholder substitution).
 - **Frontend**: `scripts/editor-smoke.mjs` loads `editor.html`'s script into a `vm` context with a stubbed
   DOM and a fake `window.__TAURI__`, then drives render → input → click and asserts the binding rules that
   are invisible to every other layer (absent ≠ empty for the tri-state `dns`, disabled actions must drop out
-  of the pre-apply plan while equal-priority ones collapse into one batch, a status broadcast must not rebuild
-  the form under the user's cursor). `--write-fixtures <path>` additionally dumps the exact
+  of the pre-apply plan while the rest keep the order they are listed in, dragging a card header — like its
+  ↑/↓ buttons — rewrites only that array order and refuses to move a card across branches or between the
+  one-shot and persistent lists, a status broadcast must not rebuild
+  the form under the user's cursor, the five external snapshots the editor needs at boot are asked
+  for concurrently — the harness times issue vs. resolve, because a serial chain reads identical in
+  the command list — and a broadcast refreshes the address rows from its own payload instead of
+  re-invoking `get_interfaces`, which only the identity fingerprint may trigger).
+  `--write-fixtures <path>` additionally dumps the exact
   `save_profile` / `save_global` payloads it sent; CI runs the assertions in the `validate` job and
   re-runs the script in each build leg to produce that dump, which the config test
   `config::tests::payloads_the_editor_actually_sends_are_the_ones_serde_accepts` replays through the
@@ -1197,8 +1217,8 @@ without a manual step. Prerelease tags are excluded, and the job no-ops when
 **Shipped** — everything §1–§13 describes is in the binary: the tray shell, popup panel and editor;
 the PAL split into `platform/{macos,windows,linux}.rs` on top of the system's own authorization; the
 config model and condition engine; per-Profile detection cadence; 3A Apply → routes → readback
-Verify; the 0/1/2+ decision with Conflict; 3B1 priority batches running off the engine thread with a
-per-action timeout and a structured `last_run`; 3B2 desired-state workers; the four-target CI matrix
+Verify; the 0/1/2+ decision with Conflict; 3B1 running its actions in listed order off the engine thread
+with a per-action timeout and a structured `last_run`; 3B2 desired-state workers; the four-target CI matrix
 and in-app upgrade.
 
 **Not implemented**, roughly in the order that makes each one useful:
@@ -1225,7 +1245,7 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 | **No Active Profile / Active / Conflict** | The 0 / 1 / 2+ outcome of `decide()`. Conflict applies nothing and names the candidates — there is no tie-break. |
 | **ERROR** | The *execution* verdict: 3A failed. Distinct from Conflict, which is a *condition*-layer verdict. |
 | **3A** | The network configuration itself: IP / mask / gateway / DNS / IPv6 / static routes. |
-| **3B1 / 3B2** | One-shot actions (priority batches, run once per entry into Active) vs. persistent workers (desired state, maintained while Active). |
+| **3B1 / 3B2** | One-shot actions (listed order = execution order, run once per entry into Active) vs. persistent workers (desired state, maintained while Active). |
 | **Apply → Verify** | The 3A barrier: write the configuration, then read it back from the OS. Exit codes are not evidence. |
 | **Tick / `TickOutcome`** | One check of a persistent action's desired state: `Satisfied` (zero commands issued), `Repaired`, `Faulted(reason)`. |
 | **generation** | The monotonic id of a worker session; reports from a superseded session are dropped rather than attributed. |
@@ -1251,14 +1271,15 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 - 3A network configuration is a **hard barrier** in front of 3B, verified by **readback** rather than
   exit code. Health probe (`icmp`/`http`/`both`, `both` needs double failure) is the time-extension of
   that same verification and is bound to the Active Profile's lifecycle.
-- **Only 3A can raise ERROR.** A 3B1 batch that ends `Partial`/`Failed` leaves the Profile Active and is
+- **Only 3A can raise ERROR.** A 3B1 run that ends `Partial`/`Failed` leaves the Profile Active and is
   written to `last_run`; a 3A failure clears Active, marks the Profile ERROR, and memoises the
   (config, network) pair so the engine stops re-prompting. The two must stay separable because the
   remedies differ: "this environment's conditions/config are wrong" versus "one thing inside an
   environment that is correctly in place didn't happen".
-- 3B is split: **3B1 one-shot** (priority batches, same priority concurrent, failure doesn't block later
-  batches, runs once per entry into Active) and **3B2 persistent** (desired-state workers, started only
-  with Active's THEN branch, priority only orders worker *start*). They are never mixed in one list:
+- 3B is split: **3B1 one-shot** (actions run one at a time in the order they are listed, a failure
+  doesn't block the ones after it, runs once per entry into Active) and **3B2 persistent**
+  (desired-state workers, started only with Active's THEN branch, the listed order only ordering
+  worker *start*). They are never mixed in one list:
   one array cannot express "run this once when we arrive" and "keep this true while we are here"
   without a flag that changes the meaning of every other field in it.
 - Static routes are part of 3A, not an automation action.
@@ -1312,6 +1333,39 @@ What no automated gate can reach, and therefore what needs a real machine per OS
 - **Privilege model uses the system's built-in authorization** (macOS sudoers allow-list / Windows UAC / Linux sudo+pkexec); only Windows adds a resident elevated helper (§9.6 rule 3) — macOS / Linux stay daemon-free per §9.2 (narrower scope, no socket-auth surface).
 - `watch_ssid` is adaptive polling (2s/5s) on all three platforms, **not event-driven**: macOS's CoreWLAN notifications need objc2 FFI and handling `CWInterface` notification object lifetime, Windows's `WlanRegisterNotification` likewise needs FFI; the payoff (skipping a subprocess every 2–5s) doesn't justify the complexity, deferred.
   The polling logic is extracted into shared `poll_ssid_watch`; switching to event-driven later only requires changing each platform's `watch_ssid` in one place.
+- The editor's opening line is **one concurrent batch**, not a chain: `get_config` plus the four
+  system-inventory commands and `get_status` go out together (`Promise.all`). Each of them shells out,
+  so awaiting them in sequence priced the window at their *sum* — which is the multi-second blank the
+  field reported.
+  Likewise a broadcast does **not** trigger another `get_interfaces`: one engine pass emits two events
+  (`evaluation` then `status`), so refetching per event means a subprocess per second, and the address
+  rows it was meant to refresh are already inside the `status` payload. What `get_interfaces` uniquely
+  supplies (interface label, that NIC's own MAC) only moves with the **identity fingerprint**, so that
+  is the trigger (§5's `NetworkSnapshot::fingerprint` fields).
+- **A wake from the SSID watcher must also force one resample.** `Msg::Wake` only skips the 1 s loop beat;
+  the 2 s sampling beat still decides when the new SSID enters the snapshot, and the Profile's
+  `change_delay_secs` starts counting from *that* pass — so the delay the user configured was quietly
+  inflated by whatever the sampling rhythm had already queued. `Engine::request_resample()` is the flag
+  that skips both, and it is raised by the sources that know the machine's network has just been
+  rewritten (3A apply, fallback apply,
+  the panel/health DHCP revert, and now the SSID watch) — deliberately **not** by every `Msg::Wake`,
+  because saving the editor or switching language would then pay a full platform sample on the engine
+  thread. The flag is *taken*, not read: one request buys one forced pass.
+  What this does **not** change is `change_delay_secs` itself: those seconds are flap protection, they
+  are per Profile in the editor's condition layer, and shortening them globally would re-introduce the
+  reconnect storm they exist to stop.
+- **macOS never guesses a tunnel's owner from a name list.** `-listallnetworkservices` keeps a service
+  entry for a VPN client that is installed but *disconnected*, so a keyword sweep over it attributes
+  any unclaimed tunnel to whichever client happens to be installed — a specific-looking wrong answer
+  about a device it has nothing to do with. Attribution now requires evidence bound to that interface
+  (its IPv4 reported by a service, or a single connected session when a single tunnel is up), and
+  returns `None` otherwise; the UI falls back to the generic VPN label (§9.6).
+- **The updater's PowerShell leg returns raw bytes, not `.Content`.** `.Content` is typed by the response:
+  `SHA256SUMS` arrives as `application/octet-stream`, so it is a `byte[]`, and printing a `byte[]` to
+  stdout gives one decimal per line — which then parses as "asset not listed". And when it *is* a
+  string, PowerShell encodes stdout in the console code page (CP936 on zh-CN Windows) while the Rust side
+  decodes UTF-8, which is the mojibake in the update dialog. Writing `RawContentStream` (falling back to
+  UTF-8 bytes of `Content`) takes the code page out of the chain entirely.
 - The frontend has no build tooling (no Vite/Svelte), still pure static HTML; `invoke` depends on `withGlobalTauri`.
   **Side effect (good)**: CI needs no Node at all, shorter build chain.
 

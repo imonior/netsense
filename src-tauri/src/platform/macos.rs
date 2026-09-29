@@ -1208,45 +1208,64 @@ fn kind_of(dev: &str, port: Option<&str>) -> super::NicKind {
     super::NicKind::Other
 }
 
-/// 猜 VPN 网卡归属的软件名。
+/// 隧道归属的证据。一次网卡枚举只采集一遍（每条候选服务一个 `networksetup` 子进程）。
 ///
-/// macOS 没有公开的「utun → 进程」映射，可行的两条线索：
-/// 1. **按 IP 认领**：VPN 客户端创建网络服务时用的是自己的名字（Tailscale /
-///    WireGuard / Cisco AnyConnect …），这些服务出现在 `networksetup
-///    -listallnetworkservices` 里、但**不在** `-listallhardwareports` 里（不是硬件）。
-///    逐个问 `-getinfo`，IP 与隧道设备一致的那个服务即归属软件。
-/// 2. 无 IP 或无人认领时，按服务名关键词猜（[`super::guess_vpn_app`]）。
-fn vpn_app_for(dev: &str, ip: Option<&str>, hw_ports: &[HwPort]) -> Option<String> {
-    let hw: std::collections::HashSet<&str> = hw_ports.iter().map(|p| p.port.as_str()).collect();
-    let candidates: Vec<String> = network_services()
-        .into_iter()
-        .filter(|s| !hw.contains(s.as_str()))
-        .collect();
-    if candidates.is_empty() {
-        let _ = dev;
-        return None;
-    }
+/// 字段只装**能对上号**的事实：`svc_ip` 里不含有地址的服务，`connected` 里不含有未连的会话。
+#[derive(Debug, Default)]
+struct VpnEvidence {
+    /// 非硬件网络服务 → 它自己 `-getinfo` 报出的 IPv4。
+    svc_ip: Vec<(String, String)>,
+    /// `scutil --nc list` 里处于 `(Connected)` 的会话标签。
+    connected: Vec<String>,
+}
 
-    if let Some(addr) = ip {
-        if !addr.is_empty() {
-            for svc in &candidates {
-                if let Ok(info) = run("networksetup", &["-getinfo", svc]) {
-                    if let Some(v) = value_of(&info, "IP address") {
-                        if v == addr {
-                            return Some(svc.clone());
-                        }
-                    }
-                }
+/// 采集 [`VpnEvidence`]。
+///
+/// 只对「不是硬件端口」的网络服务问 `-getinfo`：VPN 客户端创建的服务都以自己的名字
+/// 出现在 `-listallnetworkservices` 里而不在 `-listallhardwareports` 里，硬件口既问不
+/// 出隧道的地址、又要多起一倍子进程。
+fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
+    let hw: std::collections::HashSet<&str> = hw_ports.iter().map(|p| p.port.as_str()).collect();
+    let mut svc_ip = Vec::new();
+    for svc in network_services() {
+        if hw.contains(svc.as_str()) {
+            continue;
+        }
+        let info = run("networksetup", &["-getinfo", &svc]).unwrap_or_default();
+        if let Some(ip) = value_of(&info, "IP address") {
+            if !ip.is_empty() {
+                svc_ip.push((svc, ip));
             }
         }
     }
-    for svc in &candidates {
-        if let Some(app) = super::guess_vpn_app(svc) {
-            return Some(app.to_string());
+    VpnEvidence {
+        svc_ip,
+        connected: scutil_nc_connected(),
+    }
+}
+
+/// 判定一条隧道的归属软件；证据对不上就返回 `None`（界面退回通用的「VPN」标签）。
+///
+/// macOS 没有公开的「utun → 进程」映射，所以这里只承认两条**和这台设备有关**的线索：
+/// 1. **按 IP 认领**：哪个网络服务报出了这条隧道的 IPv4，这条隧道就是它建的。服务名是
+///    客户端自己写的，照原样显示（不做关键词归一：用户自建的 "MyVPN" 归一成 "VPN" 是
+///    丢信息，不是提纯）。
+/// 2. **唯一的已连接会话**：`alone`（系统上只有这一条隧道在用）且 `scutil --nc list`
+///    里只有一条 `(Connected)`。两个「唯一」同时成立时它们指的几乎必然是同一件事；
+///    缺任何一个都不再推断。
+///
+/// 曾经还有第三条路，它是错的，别再加回来：无人认领时按关键词扫一遍全部服务、命中即返回。
+/// 装了某家客户端的机器上，那个服务**一直**在清单里（断开也在、也没有地址），于是任何一条
+/// 认领不上的隧道都会被说成是它建的 —— 那个结果和这台设备没有任何关系，界面上得到的却
+/// 是一个**听起来很具体的错答案**。认不出来只是少一格信息，认错才是事故。
+fn attribute_vpn(ev: &VpnEvidence, ip: Option<&str>, alone: bool) -> Option<String> {
+    if let Some(addr) = ip.filter(|a| !a.is_empty()) {
+        if let Some((svc, _)) = ev.svc_ip.iter().find(|(_, a)| a == addr) {
+            return Some(svc.clone());
         }
     }
-    if candidates.len() == 1 {
-        return Some(candidates[0].clone());
+    if alone && ev.connected.len() == 1 {
+        return Some(ev.connected[0].clone());
     }
     None
 }
@@ -1319,6 +1338,22 @@ fn scutil_nc_labels() -> Vec<String> {
         .into_iter()
         .map(|(label, _)| label)
         .collect()
+}
+
+/// 已连接的那些会话标签。
+fn connected_labels(rows: &[(String, String)]) -> Vec<String> {
+    rows.iter()
+        .filter(|(_, line)| scutil_row_connected(line))
+        .map(|(label, _)| label.clone())
+        .collect()
+}
+
+/// 当前处于已连接状态的 VPN 会话标签（未连的一律不进结果）。
+fn scutil_nc_connected() -> Vec<String> {
+    let Ok(out) = run("/usr/sbin/scutil", &["--nc", "list"]) else {
+        return Vec::new();
+    };
+    connected_labels(&scutil_nc_rows(&out))
 }
 
 /// 一次 `scutil --nc list` 的判定结果。不把行文本带出去，省掉一串生命周期问题。
@@ -1516,12 +1551,6 @@ impl NetworkPlatform for MacPlatform {
                 let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
                 let dns = port.and_then(|p| dns_of_service(&p.port));
                 let ipv6 = port.and_then(|p| v6_of_service(&p.port));
-                let app = if kind == super::NicKind::Vpn {
-                    vpn_app_for(&dev, ipv4.as_deref(), &hw)
-                } else {
-                    None
-                };
-
                 out.push(super::NicInfo {
                     name: dev,
                     label: port.map(|p| p.port.clone()),
@@ -1535,8 +1564,26 @@ impl NetworkPlatform for MacPlatform {
                     gateway,
                     gateway_mac,
                     dns,
-                    app,
+                    // 隧道归属留到清单收齐后再填（下面那段）
+                    app: None,
                 });
+            }
+
+            // 隧道归属要在清单收齐以后再判：判据里那条「本机只有这一条隧道在用」必须知道
+            // 一共几条在用，而这要等循环跑完才知道（边枚举边判会低估，进而认错）。
+            let vpn_rows: Vec<usize> = out
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.kind == super::NicKind::Vpn)
+                .map(|(i, _)| i)
+                .collect();
+            if !vpn_rows.is_empty() {
+                let ev = collect_vpn_evidence(&hw);
+                let alone = vpn_rows.len() == 1;
+                for i in vpn_rows {
+                    let ip = out[i].ipv4.clone();
+                    out[i].app = attribute_vpn(&ev, ip.as_deref(), alone);
+                }
             }
 
             // 展示顺序：无线 → 有线 → VPN → 其它；同类按设备名（en0 先于 en5）
@@ -2188,5 +2235,78 @@ mod tests {
         assert_eq!(quoted_token("unbalanced \"label"), None);
         assert_eq!(quoted_token("\"  \""), None);
         assert_eq!(quoted_token("x \"Office WG\" y"), Some("Office WG"));
+    }
+
+    /// 现场形态：一条只有 inet6 的隧道（没有 IPv4 可比），机器上还装着另一家客户端 ——
+    /// 它的服务**常驻** `-listallnetworkservices`，断开也在，而且报不出地址。
+    /// 这一条挡住的是「扫一遍服务名、命中谁就说谁建的」：那样界面会给出一个
+    /// 和这台设备毫无关系的、听起来很具体的错答案。
+    #[test]
+    fn a_service_sitting_in_the_list_is_not_evidence_about_this_tunnel() {
+        let ev = VpnEvidence {
+            svc_ip: vec![("ProtonVPN".into(), "10.64.0.2".into())],
+            connected: Vec::new(),
+        };
+        // 隧道自己没有 IPv4（只有 inet6）→ 地址这条线连不上，认不出
+        assert_eq!(attribute_vpn(&ev, None, true), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), true), None);
+        // 地址是别人的隧道（本例里那条服务）的，也不算这条的证据
+        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), true), None);
+        // 连清单是空的也一样：认不出就是 None，交给界面退回通用标签
+        assert_eq!(
+            attribute_vpn(&VpnEvidence::default(), None, true),
+            None
+        );
+    }
+
+    /// IPv4 是唯一能把「这条隧道」和「那个服务」连起来的证据，所以它优先于任何推断。
+    #[test]
+    fn a_service_that_reports_the_tunnel_address_owns_it() {
+        let ev = VpnEvidence {
+            svc_ip: vec![
+                ("AnyConnect".into(), "192.0.2.9".into()),
+                ("Tailscale".into(), "100.84.1.2".into()),
+            ],
+            connected: v(&["ProtonVPN"]),
+        };
+        // 服务名照原样显示，不做关键词归一（自建名 "MyVPN" 归一成 "VPN" 是丢信息）
+        assert_eq!(
+            attribute_vpn(&ev, Some("100.84.1.2"), false).as_deref(),
+            Some("Tailscale")
+        );
+        // 另一条隧道在用（alone=false）也照样认得出：IP 证据是设备绑定的
+        assert_eq!(
+            attribute_vpn(&ev, Some("192.0.2.9"), false).as_deref(),
+            Some("AnyConnect")
+        );
+    }
+
+    /// 「唯一的已连接会话」要两个唯一同时成立才算数：只有一条隧道在用，且只有一条会话连着。
+    #[test]
+    fn the_single_connected_session_counts_only_when_nothing_else_is_up() {
+        let ev = VpnEvidence {
+            svc_ip: Vec::new(),
+            connected: v(&["Tailscale"]),
+        };
+        assert_eq!(
+            attribute_vpn(&ev, None, true).as_deref(),
+            Some("Tailscale")
+        );
+        // 还有第二条隧道在用 → 说不准这一条是谁建的
+        assert_eq!(attribute_vpn(&ev, None, false), None);
+        // 已连接会话有两条 → 同样说不准
+        let two = VpnEvidence {
+            svc_ip: Vec::new(),
+            connected: v(&["Tailscale", "ProtonVPN"]),
+        };
+        assert_eq!(attribute_vpn(&two, None, true), None);
+        assert_eq!(attribute_vpn(&two, None, false), None);
+    }
+
+    /// 会话标签的筛法：清单里未连的那几行不能进候选（本例只有一条已连）。
+    #[test]
+    fn only_connected_sessions_are_kept() {
+        assert_eq!(connected_labels(&scutil_nc_rows(NC_LIST)), v(&["Tailscale"]));
+        assert!(connected_labels(&[]).is_empty());
     }
 }

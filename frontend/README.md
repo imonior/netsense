@@ -20,11 +20,14 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 两端都按这个口径解释，见 §6）。
 把这些语义「简化」掉是本项目最容易复发的一类倒退。
 
-另有三条是版面，但同样是有意的取舍：
+另有五条是版面，但同样是有意的取舍：
 - **顶部四格与下面四列是同一份事实的两个视图**（`EngineView` 出发的 `renderStrip()` 与
   各列的徽标必须同口径）。所以「生效的那一行发绿」这件事，徽标和行描边要一起跟着广播走 ——
   只更新其中一个就会分裂：用户看到的行说 A 在生效，状态条说 B。
-- **条件值来自系统实况**：SSID 是可输入的下拉（`get_networks`：系统里保存过的无线网络），
+- **条件值来自系统实况**：SSID 绑定的是**输入框**，旁边那个下拉只挂候选（`get_networks`：系统里
+  保存过的无线网络）—— 下拉不写字段，它选中什么就抄进输入框什么，然后退回占位。隐藏网络与
+  「还没连过第二次」的环境要能提前配好，所以输入才是主控件；反过来，若值绑在下拉上，
+  「候选控件自己的状态」就有机会被当成配置值存出去。
   接口是只能选的下拉（`get_adapters`：本机装着的网卡，**含现在没插线、没连上的口**；
   VPN/虚拟网卡不进候选，因为条件比对的集合里根本没有它们）。下拉里另有一条「任意网卡」，
   存的是通配值 `*`（任何一张在用的普通网卡都算命中）。读得到的值才给「用作条件」按钮 ——
@@ -34,6 +37,16 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
   那台共享打印机时，先连上对应网络再回来配。
 - **THEN 与 ELSE 在同一列里上下并列**（没有页签）：两支同时可见，改一支不会牵动另一支，
   也让人看见「ELSE 那支还配了常驻动作」这类互相打架的配置。
+- **3B 两张列表的顺序就是执行的顺序**（3B1 逐条跑，前一条结束才轮到下一条；3B2 只决定 worker
+  谁先起）。改顺序有两种手感，动的都是同一个数组：**拖卡头**到另一张卡上，或点卡头上的 ↑ / ↓。
+  拖动只在「同一支、同一类」之间生效 —— 把一次性动作拖进常驻那一段、或把 THEN 的卡拖到 ELSE，
+  改变的是这条动作归谁执行，不是它排第几，所以直接拒绝（详见 `DEVELOPMENT.md` §8）。
+- **状态条第 3 格（当前网络）有两份来源，各自按自己的代价更新**：地址、掩码、网关、DNS、
+  信号来自 `status` —— 它就在每一条 `netsense://status` 里，引擎每轮都带一份新采样过来，所以
+  这一格天然新鲜，不需要为它再问后端一次；接口标签和这张网卡自己的 MAC 只能问 `get_interfaces`
+  （一次子进程），而它们只随「连着的是哪张口、关联到哪个 AP」变化，于是判据用 `EngineView` 的
+  身份指纹：指纹不动就不取。反过来，每条广播都取一次会把编辑器拖进引擎的节律里 —— 一轮下发
+  连发两条事件，界面就跟着每秒拉一次子进程，而这正是「刷新很慢」的来源之一。
 
 配色也同理：四座窗口共用 `theme.css` 那一套 `--t-*` token，**里面没有一个字面颜色** ——
 面、字、状态点、徽标、浮层各有一档，深色写在 `:root`，浅色写在 `html[data-theme="light"]`，
@@ -55,7 +68,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 508 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 505 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -63,7 +76,13 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
   再按属性把 textContent / `placeholder` / `title` 覆盖一遍（四座窗口都是 `visible = false` 创建的，
   所以这一遍发生在首次绘制之前，看不到语言跳一下）。属性没覆盖到的静态标记，就按标记里那句英文显示 ——
   **那句英文必须与 `en.json` 逐字相同**，否则同一个界面会在同一个画面上混出两种语言。
-  `get_language` 只用来给 `<html lang>` 定值，不参与取词。
+  `get_language` 只用来给 `<html lang>` 定值，不参与取词；而且只有面板、软件设置、日志窗口去问它 ——
+  编辑器读的那一份 `get_status` 里本来就带着同一个 `language`（同一句 `i18n::current().code()`），
+  之后每一次语言广播又会送一个过来，所以它不需要为每次重绘多问一句。
+- 编辑器首屏只等**一批**并发取数：`get_config` + `get_networks` + `get_interfaces` + `get_adapters`
+  + `get_printers` + `get_status` 一次发出（`Promise.all`）。这五份外部数据各要拉起一次系统子进程，
+  串起来 await 的代价是它们**之和**（Windows 上实测能走到几秒的空白窗口），而它们之间没有先后依赖。
+  只有 `get_status` 的失败会让首屏停在报错上：语言、配色和「当前网络」那几项地址全在它身上。
 - 命令返回：返回**大对象快照**的四条命令（`get_status` / `get_engine_status` / `get_interfaces`
   / `get_config`）给出 JSON 字符串，前端自己 `JSON.parse`；其余命令返回结构化值。这条分界
   与「是否采样网络」无关：`get_engine_status` 与 `get_config` 不采样也返回字符串，
@@ -107,10 +126,11 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
       "running": true,                           // true = 还有动作在后台跑
       "status": null,                            // null | empty | success | partial | failed
       "total": 2,                                // 提交时就定下的分母，运行中靠它报「1/2」
-      "outcomes": [ { "id": "a1", "label": "…", "priority": 1, "ok": true,
-                      "error": "…" } ] },          // error 只在失败时出现，成功的那条没有这个键
+      "outcomes": [ { "id": "a1", "label": "…", "ok": true,
+                      "error": "…" } ] },            // error 只在失败时出现，成功的那条没有这个键；
+                                                     // 数组顺序就是执行顺序，界面上的「第几条」数下标
     "workers": [                                  // 3B2 此刻在维持什么；没有 worker 时是空数组，不会省略
-      { "id": "p1", "label": "wireguard:wg0", "priority": 1,
+      { "id": "p1", "label": "wireguard:wg0",
         "state": "pending|satisfied|repaired|faulted|overdue",
         "interval": 15, "repairs": 2, "at": 1770000000,
         "error": "…" } ],                         // 同样：缺席 = 没有错误
@@ -183,7 +203,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 想在不启动 Tauri 的情况下验渲染与序列化，这套 harness 已经入库：`scripts/editor-smoke.mjs` 用 Node 起
 `vm` 上下文加载 `<script>`，stub 一个最小 DOM + `window.__TAURI__`（`get_config` 喂
 `config.example.json`、`get_status` 喂一份冲突态 `EngineView`），驱动点击/输入后断言那些只有跑起来
-才看得见的绑定规则（dns 的三态、禁用动作不进清单、常驻动作的字段要原样回到 payload 里、
+才看得见的绑定规则（dns 的三态、禁用动作不进清单、拖卡头与 ↑/↓ 改的只是数组顺序且不许跨支跨类、
+常驻动作的字段要原样回到 payload 里、
 worker 徽标只在 Active 方案的 THEN 分支出现、广播不重建用户正在输入的表单）。
 `--write-fixtures` 再把它这一次真正发出的 `save_profile` / `save_global` 载荷写成一个文件，
 交给 `config::tests::payloads_the_editor_actually_sends_are_the_ones_serde_accepts`，

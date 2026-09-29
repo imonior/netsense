@@ -4,6 +4,65 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] - 2026-09-29
+
+### Changed
+
+- **3B actions run in the order they are listed; the `priority` field is gone.** A one-shot list executes
+  top to bottom, one action at a time — the next starts once the current one has finished or timed out,
+  and a failure still never blocks the actions below it. A persistent list's order decides which worker
+  starts first; after that they run independently. The editor changes that order two ways, and both move
+  the same array: drag a card's header onto another card, or use the ↑ / ↓ buttons in it. A drag stays
+  inside one branch and one kind of list — putting a one-shot action into the persistent list, or a THEN
+  card onto the ELSE branch, decides *who executes it*, which is not a question of position. The
+  pre-apply confirmation list now numbers the actions instead of grouping them. A config file that still
+  carries `priority` loads as before; the field is simply no longer read.
+- **The automation editor opens in one concurrent batch.** Its six initial reads each shell out (saved
+  Wi-Fi networks, interfaces in use, installed adapters, printers, the current status, the config), and
+  awaiting them one after another priced the window at their *sum* — the multi-second blank it had. Only
+  the status read is fatal now: it carries the language, the palette and the address rows.
+- **A status broadcast no longer starts a subprocess.** The address, netmask, gateway, DNS and signal in
+  the editor's "current network" cell come from the broadcast itself, which the engine refreshes every
+  pass. The two facts only `get_interfaces` can supply — the interface label and that NIC's own MAC —
+  move with the connected interface and association, so that cell is refetched on the **identity
+  fingerprint** instead of on every event (one engine pass emits two).
+- **The SSID condition is a text field with the saved networks beside it.** Hidden networks and an
+  environment you have not joined twice must be configurable in advance, so typing is the primary
+  control and the dropdown only copies a name into the field. Clearing the field clears the condition —
+  previously an emptied select could store an empty string, which then compares against a network whose
+  SSID really is empty.
+- **A printer label always keeps a subject.** When CUPS fills a queue's description with the queue name —
+  what it does for every newly created queue — the old rule dropped the description and left only the
+  location, so a list of printers read as a list of room numbers. It is now `CanonG3860 · XSMS`.
+- **macOS credits a VPN adapter to an app only on evidence about *that* interface**: the network service
+  reporting the tunnel's IPv4, or the single connected session when exactly one tunnel is up. The
+  installed-but-disconnected client that sits in the service list used to win every unclaimed tunnel,
+  which is a specific-looking wrong answer; now an unclaimed one shows the generic VPN label instead.
+- **The editor's "current network" summary no longer appends a VPN tunnel row.** A tunnel is an adapter,
+  not a network you are connected to, and no condition can key on it. The tray panel still lists tunnels.
+
+### Fixed
+
+- **The ACTIVE badge appears seconds earlier after you join a network.** The SSID watcher woke the engine
+  but the sampling beat still decided when the new SSID entered the snapshot, and each Profile's change
+  delay counts from *that* pass — so the wait was the delay you configured plus our own queue. A wake
+  from the SSID watcher now forces one unconditional resample and re-evaluation; the change delay itself
+  is untouched (it is flap protection, per Profile, editable in the editor's condition layer).
+- **Windows: the update dialog is no longer garbled and checksums verify again.** The PowerShell leg read
+  `Invoke-WebRequest`'s `.Content`: for `SHA256SUMS` that is a byte array, which printed as one decimal
+  per line, and for text it re-encoded into the console code page (CP936 on zh-CN Windows) while we
+  decoded UTF-8. The raw response bytes are passed through now. Separately, one line in the manifest
+  that had no whitespace used to abandon the whole file, and the error then claimed the asset "is not
+  listed" — unreadable lines are skipped, an asset that is genuinely absent is still refused.
+- **macOS and Linux find their installer again.** Asset matching is decided by extension first, because
+  the shipped file names carry no OS token at all (an aarch64 dmg, an amd64 deb); the check
+  also no longer falls back to a package for a different architecture, which used to look like success
+  and then not install. The choice is a pure function now, so all three platforms' rules are covered by
+  `cargo test` on whichever host runs it.
+- **`<html lang>` follows the language switch.** The editor asked the backend for it on every repaint and
+  never on the broadcast that announces a new language, so the attribute kept the language the window
+  opened with; screen readers and CJK glyph selection read that attribute.
+
 ## [1.0.3] - 2026-09-28
 
 ### Added

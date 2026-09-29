@@ -32,11 +32,11 @@ network ──▶ │  Rule = enabled Conditions ANDed         │ ──▶ 1 m
   together, and — when the branch configures `verify` — come back verified by reading the system
   state, optionally plus an ICMP/HTTP health probe that reverts to DHCP if the network keeps failing.
 - **Automation (3B) runs only after 3A passed.** One-shot actions (`launch_app`, `run_script`,
-  `set_default_printer`) execute in `priority` batches — lower first, equal priorities concurrent,
-  a batch finishes before the next starts, and a failure inside one batch does not block the later
-  ones. Setting a default printer touches only *your* default, so switching networks never raises an
-  authorization prompt. A match failure (Conflict) and an execution failure (Error) are two different
-  states and are reported separately.
+  `set_default_printer`) run one after another in the order they are listed — the next starts when
+  the current one finishes or times out, and a failure never stops the actions below it.
+  Setting a default printer touches only *your* default, so switching networks never raises an
+  authorization prompt. A match failure (Conflict) and an execution failure (Error) are two
+  different states and are reported separately.
 - **Detection is per Profile**: react to network events, poll on an interval, or both, each with
   its own change delay — so a flaky reconnect does not rewrite the adapter repeatedly.
 - **Persistent actions hold a state instead of repeating a command.** Each enabled one gets its own
@@ -187,7 +187,7 @@ read-only `Program Files` must not be written to. Logs go to NetSense's per-user
                                 "fallback": { "enabled": true } } }
       },
       "one_shot": [
-        { "id": "a1", "enabled": true, "priority": 1,
+        { "id": "a1", "enabled": true,
           "action": { "type": "run_script", "path": "/opt/ops/office-init.sh", "elevated": false } }
       ]
     },

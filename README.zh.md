@@ -29,7 +29,7 @@ Windows 用 PowerShell CIM + `netsh`，Linux 用 `nmcli`。
 - **下发是一道屏障（3A）**：IPv4 / 掩码 / 网关 / DNS / IPv6 与静态路由一起下发；分支配置了 `verify`
   时，再回读系统状态做校验，可选叠加 ICMP/HTTP 健康度探测 —— 持续不通就回落 DHCP。
 - **自动化（3B）只在 3A 通过后才执行。** 一次性动作（`launch_app`、`run_script`、`set_default_printer`）
-  按 `priority` 分批：数值小者先跑、同批并发、一批结束后才进下一批、某一批内失败不影响后续批次。
+  按列表从上到下逐条执行：前一条跑完（或超过它自己的等待上限）才轮到下一条，某一条失败不影响它后面的动作。
   设默认打印机改的只是*当前用户*的默认值，所以切网络不会弹授权框。匹配失败（Conflict）与
   执行失败（Error）是两种状态，分开呈现。
 - **检测策略是 Profile 级的**：响应网络事件、按间隔轮询、或两者并存，各自带变化延迟 —— 一次瞬断
@@ -157,7 +157,7 @@ NetSense 常驻托盘：点图标（左右键都一样）打开面板，所有�
                                 "fallback": { "enabled": true } } }
       },
       "one_shot": [
-        { "id": "a1", "enabled": true, "priority": 1,
+        { "id": "a1", "enabled": true,
           "action": { "type": "run_script", "path": "/opt/ops/office-init.sh", "elevated": false } }
       ]
     },

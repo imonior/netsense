@@ -33,7 +33,7 @@ use crate::i18n;
 use crate::log;
 use crate::platform::NetworkPlatform;
 
-/// 同一批 worker 的启动间隔：priority 小的先开始第一次检查。
+/// 同一批 worker 的启动间隔：配置里排在前面的先开始第一次检查。
 ///
 /// 这不是「让快的那些等慢的那些」，而是**保证顺序**：把 VPN 维持脚本排在隧道动作之前
 /// 的用户，要的就是「隧道先起来，脚本再跑」。分开 500ms 足够让前者发出第一条命令。
@@ -68,7 +68,6 @@ pub struct WorkerStatus {
     pub id: String,
     /// 维持的是什么（`wireguard:office` / `vpn:proton/My VPN` / `run scripts/x.sh`）
     pub label: String,
-    pub priority: u32,
     pub state: WorkerState,
     /// 核对间隔（秒），直接回显配置值：界面上「每 30 秒」这四个字必须来自这里
     pub interval: u64,
@@ -206,7 +205,6 @@ fn run_worker(
     let mut status = WorkerStatus {
         id: action.id.clone(),
         label: label.clone(),
-        priority: action.priority,
         state: WorkerState::Pending,
         interval: interval.as_secs(),
         repairs: 0,
@@ -296,14 +294,12 @@ pub struct Session {
     statuses: Vec<WorkerStatus>,
 }
 
-/// 启动顺序：先按 `priority`，同值时保持配置里的书写顺序（`sort_by_key` 是稳定排序）。
+/// 启动顺序：就是配置里的排列顺序。
 ///
 /// 过滤掉 disabled 也在这里 —— 一条禁用的常驻动作连 worker 都不该有，而不是起来后什么都不做。
-fn by_priority(actions: &[PersistentAction]) -> Vec<PersistentAction> {
-    let mut ordered: Vec<PersistentAction> =
-        actions.iter().filter(|a| a.enabled).cloned().collect();
-    ordered.sort_by_key(|a| a.priority);
-    ordered
+/// 过滤不改顺序，所以「排在前面」这个用户写下来的事实会原样变成「先起来」。
+fn enabled_in_order(actions: &[PersistentAction]) -> Vec<PersistentAction> {
+    actions.iter().filter(|a| a.enabled).cloned().collect()
 }
 
 impl Session {
@@ -312,8 +308,8 @@ impl Session {
     /// 传出去的是 owned 副本（动作 + `Arc<AllowedScripts>` + owned sink）：worker 线程
     /// 绝不回头 lock config，否则「用户在编辑器里保存」与「worker 报告」互相等就是死锁。
     ///
-    /// `actions` 可以是原样顺序 —— 本函数自己按 priority 稳定排序，序号只用于
-    /// 决定启动错峰，不影响任何判定。
+    /// `actions` 就按配置里的顺序传给本函数 —— 顺序即启动顺序，序号只用于决定
+    /// 启动错峰，不影响任何判定。
     pub fn start<P>(
         plat: P,
         allowed: &Arc<AllowedScripts>,
@@ -326,7 +322,7 @@ impl Session {
     where
         P: NetworkPlatform + Copy + Send + Sync + 'static,
     {
-        let ordered = by_priority(actions);
+        let ordered = enabled_in_order(actions);
         let mut stops = Vec::with_capacity(ordered.len());
         let mut statuses = Vec::with_capacity(ordered.len());
         for (idx, action) in ordered.iter().enumerate() {
@@ -337,7 +333,6 @@ impl Session {
             statuses.push(WorkerStatus {
                 id: action.id.clone(),
                 label: provider::label_for(action),
-                priority: action.priority,
                 state: WorkerState::Pending,
                 interval: interval.as_secs(),
                 repairs: 0,
@@ -449,7 +444,6 @@ mod tests {
         WorkerStatus {
             id: id.into(),
             label: id.into(),
-            priority: 100,
             state: WorkerState::Pending,
             interval: 30,
             repairs: 0,
@@ -543,7 +537,6 @@ mod tests {
         let action = PersistentAction {
             id: "p1".into(),
             enabled: true,
-            priority: 100,
             action: PersistentActionType::KeepWireGuardConnected {
                 tunnel: "wg0".into(),
                 interval_secs: 30,
@@ -660,33 +653,26 @@ mod tests {
         assert!(s.statuses().is_empty(), "已经没了的 worker 不该继续列着");
     }
 
-    /// `priority` 在 3B2 里只决定启动顺序，不决定成败 —— 稳定排序保证同 priority
-    /// 时配置里的书写顺序就是启动顺序。
+    /// 3B2 的启动顺序就是配置里的排列顺序：不重排，禁用的那条连排都不该排进来。
     #[test]
-    fn workers_are_ordered_by_priority_then_by_config_order() {
-        let mk = |id: &str, priority: u32, interval: u64| PersistentAction {
+    fn workers_start_in_the_order_they_are_listed() {
+        let mk = |id: &str| PersistentAction {
             id: id.into(),
             enabled: true,
-            priority,
             action: PersistentActionType::KeepWireGuardConnected {
                 tunnel: id.into(),
-                interval_secs: interval,
+                interval_secs: 30,
             },
         };
         let off = |id: &str| PersistentAction {
             enabled: false,
-            ..mk(id, 1, 30)
+            ..mk(id)
         };
-        let ordered = by_priority(&[
-            mk("b", 5, 30),
-            off("sleeping"),
-            mk("c", 5, 30),
-            mk("a", 1, 30),
-        ]);
+        let ordered = enabled_in_order(&[mk("b"), off("sleeping"), mk("c"), mk("a")]);
         assert_eq!(
             ordered.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
-            vec!["a", "b", "c"],
-            "priority 小的先起，同 priority 按书写顺序；禁用的那条连排都不该排进来"
+            vec!["b", "c", "a"],
+            "谁排在前面谁先起，别自作聪明地重排"
         );
     }
 }

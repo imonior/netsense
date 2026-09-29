@@ -854,8 +854,10 @@ fn install_verdict(
     }
 }
 
-/// 从 release JSON 里挑当前 OS+arch 的安装包：优先 .dmg/.zip（mac）/ .exe/.msi（win）/
-/// .deb/.rpm（linux），其次任意带 OS+arch token 的文件；同时取 SHA256SUMS 的下载链接。
+/// 从 release JSON 里挑当前 OS+arch 的安装包，同时取 SHA256SUMS 的下载链接。
+/// 平台判定拆出去做纯函数（[`pick_asset_for`]），这样三个平台的挑法在任何一台机器上
+/// 都能被同一次 `cargo test` 覆盖到 —— 否则「mac 挑不到包」这类只在某个平台成立的错，
+/// 在其余两个平台的 runner 上是测不出来的。
 fn pick_install_asset(
     release: &serde_json::Value,
     assets: &[serde_json::Value],
@@ -875,21 +877,7 @@ fn pick_install_asset(
         "other"
     };
 
-    let mut candidates: Vec<&serde_json::Value> = assets
-        .iter()
-        .filter(|a| asset_matches(a["name"].as_str().unwrap_or(""), goos, goarch))
-        .collect();
-    // 没有精确匹配就退而求其次：只要有当前 OS 的 token 即可。
-    if candidates.is_empty() {
-        candidates = assets
-            .iter()
-            .filter(|a| os_token_present(a["name"].as_str().unwrap_or(""), goos))
-            .collect();
-    }
-    let best = candidates
-        .iter()
-        .find(|a| preferred_ext(a["name"].as_str().unwrap_or(""), goos))
-        .or_else(|| candidates.first());
+    let best = pick_asset_for(assets, goos, goarch);
 
     let checksum_url = release["assets"]
         .as_array()
@@ -912,6 +900,31 @@ fn pick_install_asset(
     }
 }
 
+/// 在 `assets` 里为 `goos`+`goarch` 挑一个装得上的包：先要架构与平台都对得上，在同为
+/// 「装得上」的候选里先取带本平台扩展名的，只靠 OS token 认出来的次之。
+/// 没有任何候选就返回 `None`，由 `install_verdict` 如实报「本平台没有可安装的包」；
+/// 不再退回「不分架构、只要有 OS token 就算」的那一轮 —— 那一轮会在 arm64 机器上挑走
+/// x86_64 的包，装不上不说，还显得像是成功找到了。
+fn pick_asset_for<'a>(
+    assets: &'a [serde_json::Value],
+    goos: &str,
+    goarch: &str,
+) -> Option<&'a serde_json::Value> {
+    let candidates: Vec<&serde_json::Value> = assets
+        .iter()
+        .filter(|a| asset_matches(asset_name(a), goos, goarch))
+        .collect();
+    candidates
+        .iter()
+        .find(|a| installable_ext(asset_name(a), goos))
+        .or_else(|| candidates.first())
+        .copied()
+}
+
+fn asset_name(a: &serde_json::Value) -> &str {
+    a["name"].as_str().unwrap_or("")
+}
+
 fn platform_of(name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
     if n.contains("mac") || n.contains("darwin") || n.ends_with(".dmg") || n.ends_with(".zip") {
@@ -925,26 +938,30 @@ fn platform_of(name: &str) -> &'static str {
     }
 }
 
-fn preferred_ext(name: &str, goos: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    match goos {
-        "macos" => n.ends_with(".dmg") || n.ends_with(".zip"),
-        "windows" => n.ends_with(".exe") || n.ends_with(".msi"),
-        "linux" => n.ends_with(".deb") || n.ends_with(".rpm"),
-        _ => true,
-    }
-}
-
-/// 文件名是否同时含 OS token 与 arch token（锚定在 -/_/. 边界，避免 arm 命中 arm64）。
+/// 文件名是否说明这是当前平台**装得上**的包：先认扩展名，扩展名说不出所以然时才退到
+/// OS token。顺序不能反 —— Tauri 的默认产物名（`NetSense_1.0.3_aarch64.dmg`、
+/// `..._amd64.deb`）里根本没有 OS token，只按 token 判会让 mac 与 linux 永远挑不到包，
+/// 而这两种包正是我们的安装器按扩展名分派处理的（见 `update::install_macos` /
+/// `update::install_linux`）。
 fn asset_matches(name: &str, goos: &str, goarch: &str) -> bool {
     let n = name.to_ascii_lowercase();
     if !arch_token_present(&n, goarch) {
         return false;
     }
-    os_token_present(&n, goos)
-        // Windows 资产常不带 OS token（如 netsense-1.0.0-x86_64-installer.exe），
-        // arch 已证明是运行架构，带 .exe/.msi 即可认定为 Windows 包。
-        || (goos == "windows" && (n.ends_with(".exe") || n.ends_with(".msi")))
+    installable_ext(&n, goos) || os_token_present(&n, goos)
+}
+
+/// 各平台「有对应安装代码」的扩展名。未知平台返回 false：宁可挑不到包并如实说
+/// 「本平台没有可安装的包」，也不要拿着一个没人能装的文件名往下走。
+fn installable_ext(name: &str, goos: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let n = n.as_str();
+    match goos {
+        "macos" => n.ends_with(".dmg") || n.ends_with(".zip"),
+        "windows" => n.ends_with(".exe") || n.ends_with(".msi"),
+        "linux" => n.ends_with(".deb") || n.ends_with(".rpm"),
+        _ => false,
+    }
 }
 
 fn arch_token_present(n: &str, goarch: &str) -> bool {
@@ -1029,8 +1046,20 @@ fn fetch_url_powershell(url: &str) -> Result<String, String> {
     // 首句把 TLS 1.2 **并入**当前协议集：GitHub 只接受 TLS 1.2 及以上，而 Windows PowerShell 5.1
     // 在老 .NET Framework 上默认不协商它。用 `-bor` 而不是直接赋值，是为了只在现状之上补齐、
     // 绝不让某个本来能用的配置变差。
+    //
+    // 取正文时不写 `.Content` 就完事，原因有两个，都够让整条更新链路说谎：
+    // 1. `.Content` 的类型跟着响应走。GitHub 的 release 资产（`SHA256SUMS`）是
+    //    `application/octet-stream`，PowerShell 于是返回 **byte[]**；byte[] 被当字符串打印到
+    //    stdout 时会被逐元素展开成一行一个十进制数，而我们随后把这些数字当成清单去解析 ——
+    //    解析的结果是「这个资产没在 SHA256SUMS 里」，其实是「我读到的根本不是正文」。
+    // 2. 就算正文是字符串，PowerShell 写 stdout 用的仍是控制台代码页（简体中文 Windows 是
+    //    cp936），我们这边按 UTF-8 读：发行说明里的中文先被编成 GBK、再被当成 UTF-8 解码，
+    //    于是弹窗里出现乱码。
+    // 解决办法是让 PowerShell 别做文本转换：把响应**原始字节**直接写进 stdout，代码页就不再
+    // 参与这条链路。RawContentStream 是响应体的字节流，不经任何解码；Content 是字符串时
+    // 退化成它的 UTF-8 编码。
     let ps = format!(
-        "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;(Invoke-WebRequest -Uri '{}' -Headers @{{Accept='application/vnd.github+json'; UserAgent='netsense'}} -TimeoutSec 10 -UseBasicParsing).Content",
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;$r=Invoke-WebRequest -Uri '{}' -Headers @{{Accept='application/vnd.github+json'; UserAgent='netsense'}} -TimeoutSec 10 -UseBasicParsing;$b=$null;$s=$r.RawContentStream;if($s){{$b=$s.ToArray()}};if(-not $b){{if($r.Content -is [byte[]]){{$b=$r.Content}}else{{$b=[Text.Encoding]::UTF8.GetBytes([string]$r.Content)}}}};$o=[Console]::OpenStandardOutput();$o.Write($b,0,$b.Length);$o.Flush()",
         url.replace('\'', "''")
     );
     let out = std::process::Command::new("powershell")
@@ -1122,8 +1151,9 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::install_verdict;
+    use super::{asset_matches, install_verdict, installable_ext, pick_asset_for, platform_of, token_anchored};
     use crate::netproxy::ProxyChoice;
+    use serde_json::json;
 
     fn url(s: &str) -> Option<String> {
         Some(s.to_string())
@@ -1188,5 +1218,90 @@ mod tests {
             ),
             Some("no_sums")
         );
+    }
+
+    /// 1.0.3 那次发布里真实存在的五个资产。名字里**没有** OS token：只按 token 认平台
+    /// 的话，mac 与 linux 会一个都挑不出来。
+    fn shipped_assets() -> Vec<serde_json::Value> {
+        [
+            "NetSense_1.0.3_aarch64.dmg",
+            "NetSense_1.0.3_amd64.deb",
+            "NetSense_1.0.3_x64.dmg",
+            "NetSense_1.0.3_x64-setup.exe",
+            "NetSense_1.0.3_x64_en-US.msi",
+        ]
+        .into_iter()
+        .map(|n| json!({ "name": n, "url": format!("https://example.invalid/{n}") }))
+        .collect()
+    }
+
+    #[test]
+    fn an_asset_is_matched_by_extension_before_os_token() {
+        let assets = shipped_assets();
+        // 这三条是 1.0.3 弹窗上那句 "No installable package for this platform" 的正面：
+        // mac 的两个架构和 linux 都要能挑到自己那个包。
+        assert_eq!(
+            pick_asset_for(&assets, "macos", "arm64").unwrap()["name"],
+            "NetSense_1.0.3_aarch64.dmg"
+        );
+        assert_eq!(
+            pick_asset_for(&assets, "macos", "x86_64").unwrap()["name"],
+            "NetSense_1.0.3_x64.dmg"
+        );
+        assert_eq!(
+            pick_asset_for(&assets, "linux", "x86_64").unwrap()["name"],
+            "NetSense_1.0.3_amd64.deb"
+        );
+        // Windows 的 .exe 与 .msi 都有安装实现（NSIS / msiexec），取清单里先出现的那个。
+        assert_eq!(
+            pick_asset_for(&assets, "windows", "x86_64").unwrap()["name"],
+            "NetSense_1.0.3_x64-setup.exe"
+        );
+    }
+
+    #[test]
+    fn a_wrong_architecture_is_declined_rather_than_downgraded_to() {
+        // 钉住被删掉的那轮退让：本架构挑不到就是挑不到，不能拿别的架构的包凑数 ——
+        // 凑来的包装不上，却会显得「找到了」。
+        let assets = shipped_assets();
+        assert_eq!(pick_asset_for(&assets, "windows", "arm64"), None);
+        assert_eq!(pick_asset_for(&assets, "macos", "other"), None);
+        assert!(!asset_matches("NetSense_1.0.3_x64.dmg", "macos", "arm64"));
+    }
+
+    #[test]
+    fn a_token_only_name_still_qualifies_but_only_for_its_platform() {
+        // 非标准命名（带 darwin 而没有我们的扩展名）走 os token 兜底，架构仍须对得上；
+        // 而一个平台都不认的扩展名不该被当成「装得上」。
+        let loose = json!({ "name": "netsense-1.0.3-darwin-arm64", "url": "https://example.invalid/a" });
+        let assets = vec![loose];
+        assert!(asset_matches("netsense-1.0.3-darwin-arm64", "macos", "arm64"));
+        assert!(!asset_matches("netsense-1.0.3-darwin-arm64", "macos", "x86_64"));
+        assert_eq!(
+            pick_asset_for(&assets, "macos", "arm64").unwrap()["name"],
+            "netsense-1.0.3-darwin-arm64"
+        );
+        assert!(!installable_ext("NetSense.zip", "plan9"));
+    }
+
+    #[test]
+    fn a_token_has_to_sit_on_a_separator_boundary() {
+        // 防的是半个词冒充整个词：`arm` 命中 `arm64`、`mac` 命中 `macos`。
+        assert!(token_anchored("netsense_x64.dmg", "x64"));
+        assert!(token_anchored("netsense_mac.dmg", "mac"));
+        assert!(token_anchored("netsense_macos.dmg", "macos"));
+        assert!(!token_anchored("netsense_arm64.dmg", "arm"));
+        assert!(!token_anchored("netsense_macos.dmg", "mac"));
+        assert!(!token_anchored("", "x64"));
+        assert!(!token_anchored("netsense_x64.dmg", ""));
+    }
+
+    #[test]
+    fn the_asset_list_labels_platforms_by_their_installer_kind() {
+        // popup 的资产清单用这个标签分组；SHA256SUMS 自己也混在资产里，不能被打成某个平台。
+        assert_eq!(platform_of("NetSense_1.0.3_aarch64.dmg"), "macos");
+        assert_eq!(platform_of("NetSense_1.0.3_x64-setup.exe"), "windows");
+        assert_eq!(platform_of("NetSense_1.0.3_amd64.deb"), "linux");
+        assert_eq!(platform_of("SHA256SUMS"), "other");
     }
 }

@@ -386,8 +386,13 @@ pub(crate) fn parse_hash(body: &str, asset_name: &str) -> Option<String> {
             }
             continue;
         }
-        // GNU 风格：hash 之后第一个空白分隔文件名
-        let idx = line.find([' ', '\t'])?;
+        // GNU 风格：hash 之后第一个空白分隔文件名。
+        // 认不出分隔符的行要**跳过**，不是中止：一份清单里只要有一行没有空白（一句表头、
+        // 一段被别的编码换坏的内容），整份清单就都读不到了 —— 而这条路径的失败说法是
+        // 「这个资产没在 SHA256SUMS 里」，把「我没读完」报成了「它没列」。
+        let Some(idx) = line.find([' ', '\t']) else {
+            continue;
+        };
         let hash = &line[..idx];
         let filename = line[idx..].trim_start().trim_start_matches('*');
         if filename.eq_ignore_ascii_case(asset_name) && is_hex(hash) {
@@ -1129,5 +1134,23 @@ mod tests {
         // 未列出必须返回 None —— fail-closed 的判定就靠它。
         assert_eq!(parse_hash(body, "missing.dmg"), None);
         assert_eq!(parse_hash("not-hex  x.txt\n", "x.txt"), None);
+    }
+
+    #[test]
+    fn one_unreadable_line_does_not_void_the_whole_manifest() {
+        // 这一条的形状来自 1.0.2 那次 Windows 报「校验失败」时的现场：正文里混进了
+        // 不含空白的行（一句表头、或者一段被代码页弄坏的字节）。旧实现遇到第一行就
+        // 整份放弃，于是错误说法是「这个资产没在 SHA256SUMS 里」—— 把「我没读完」
+        // 报成了「它没列」。现在只跳过读不懂的行。
+        let body = concat!(
+            "SHA256SUMS\ngarbage-without-any-whitespace\n",
+            "4a6974398b6d34b53aa9c3635a1aa528f193f173312adb8fabc92f5372f889f9 *NetSense_1.0.2_x64-setup.exe\n",
+        );
+        assert_eq!(
+            parse_hash(body, "NetSense_1.0.2_x64-setup.exe").as_deref(),
+            Some("4a6974398b6d34b53aa9c3635a1aa528f193f173312adb8fabc92f5372f889f9")
+        );
+        // 跳过不等于放行：真正没列出的资产仍然要返回 None。
+        assert_eq!(parse_hash(body, "NetSense_1.0.2_aarch64.dmg"), None);
     }
 }
