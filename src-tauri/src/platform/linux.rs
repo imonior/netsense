@@ -18,22 +18,60 @@ use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
 use std::sync::OnceLock;
 
+/// 目标在这台机器上**到底是什么**，决定交给谁去执行。
+///
+/// 只有三条出路，因为「拿 `xdg-open` 打开一个不存在的路径」根本不是打开，而是
+/// 一次没人看的失败：`spawn_detached` 只看 `xdg-open` 起没起来，不看它的退出码，
+/// 于是动作徽标会显示成功。这一层就是把它变成真正的错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// 直接 exec：要么是有执行位的文件，要么是一个应用名（交给 PATH 解析，
+    /// 找不到时 `spawn` 自己会报 No such file or directory）
+    Run,
+    /// 存在但没有执行位（`.desktop`、文档、目录），或带 scheme 的 URL：只能给 `xdg-open`
+    OpenWithXdg,
+    /// 写成了路径，而系统上没有这个东西
+    NotFound,
+}
+
+/// 判定只用两条元数据事实（在不在、有没有执行位）加字符串形状，不查机器上装了什么，
+/// 所以整条决定能在任何一条腿上测到。
+fn classify_target(app: &str, exists: bool, has_exec_bit: bool) -> Target {
+    if has_exec_bit {
+        return Target::Run;
+    }
+    // scheme 先判：`https://x/y` 里有 '/'，但它从来就不是本机路径。
+    if app.contains("://") {
+        return Target::OpenWithXdg;
+    }
+    if exists {
+        return Target::OpenWithXdg;
+    }
+    if app.contains('/') {
+        return Target::NotFound;
+    }
+    Target::Run
+}
+
 /// `launch_app` 到底该执行什么。单独成函数是为了把「选路」这件事测到 ——
 /// 执行本身在这台机器上没法验（CI 没有图形会话）。
 ///
 /// `xdg-open` 只接**一个**参数（要打开的东西），它不会替你把余下的参数转交给应用。
 /// 所以配了 `args` 又走 xdg-open 是一条写错的配置，静悄悄丢掉 args 比报错更难查。
-fn launch_plan(app: &str, args: &[String], is_exec: bool) -> Result<(String, Vec<String>), String> {
-    if is_exec {
-        return Ok((app.to_string(), args.to_vec()));
+fn launch_plan(app: &str, args: &[String], target: Target) -> Result<(String, Vec<String>), String> {
+    match target {
+        Target::Run => Ok((app.to_string(), args.to_vec())),
+        Target::OpenWithXdg => {
+            if !args.is_empty() {
+                return Err(i18n::tf("pal.xdg_no_args", &[
+                    ("app", app),
+                    ("count", &args.len().to_string()),
+                ]));
+            }
+            Ok(("xdg-open".to_string(), vec![app.to_string()]))
+        }
+        Target::NotFound => Err(i18n::tf("pal.launch_missing", &[("app", app)])),
     }
-    if !args.is_empty() {
-        return Err(i18n::tf("pal.xdg_no_args", &[
-            ("app", app),
-            ("count", &args.len().to_string()),
-        ]));
-    }
-    Ok(("xdg-open".to_string(), vec![app.to_string()]))
 }
 
 /// 把进程**丢出去**就返回，不等它退出。
@@ -41,6 +79,8 @@ fn launch_plan(app: &str, args: &[String], is_exec: bool) -> Result<(String, Vec
 /// 与 `run()` 的分工就在这里：`run` 用 `.output()`，会阻塞到子进程结束，而一个浏览器
 /// 能开一下午 —— 那样每次「启动应用」都会撞到 30 秒超时、被记成失败，可应用其实跑得好好的。
 /// `spawn` 自己失败（文件不存在 / 没有执行位）才是失败：那已经是这个动作能给的全部信息。
+/// 正因为「丢出去」看不见子进程的退出码，路径不存在这类错必须在 `launch_plan` 里先拒掉，
+/// 不能留给 `xdg-open` 去失败 —— 它失败了也没人看。
 /// 另起线程回收，否则这个常驻进程会攒下一堆僵尸。
 fn spawn_detached(program: &str, args: &[String]) -> Result<(), String> {
     let mut cmd = std::process::Command::new(program);
@@ -746,15 +786,18 @@ impl NetworkPlatform for LinuxPlatform {
     }
 
     fn launch_app(&self, app: &str, args: &[String]) -> Result<(), String> {
-        // 可执行文件直接跑；否则交给 xdg-open（能处理 .desktop 与文档/URL）
-        let is_exec = std::path::Path::new(app)
-            .metadata()
+        // 三条出路：可执行文件直接跑；存在但不能 exec 的（.desktop、文档）与 URL 交给
+        // xdg-open；写成路径却根本不在机器上的，在这里报错 —— 见 classify_target。
+        let meta = std::path::Path::new(app).metadata().ok();
+        let has_exec_bit = meta
+            .as_ref()
             .map(|m| {
                 use std::os::unix::fs::PermissionsExt;
                 m.is_file() && (m.permissions().mode() & 0o111) != 0
             })
             .unwrap_or(false);
-        let (program, argv) = launch_plan(app, args, is_exec)?;
+        let target = classify_target(app, meta.is_some(), has_exec_bit);
+        let (program, argv) = launch_plan(app, args, target)?;
         spawn_detached(&program, &argv)
     }
 
@@ -899,21 +942,56 @@ mod tests {
     #[test]
     fn an_executable_is_run_as_is_and_keeps_its_arguments() {
         assert_eq!(
-            launch_plan("/usr/bin/foo", &v(&["--flag", "a b"]), true).unwrap(),
+            launch_plan("/usr/bin/foo", &v(&["--flag", "a b"]), Target::Run).unwrap(),
             ("/usr/bin/foo".to_string(), v(&["--flag", "a b"]))
         );
     }
 
     #[test]
     fn anything_else_goes_to_xdg_open_and_only_alone() {
+        // 断言的是渲染后的文案，而字典要 init() 之后才有内容：不叫这一句，t() 回退成 key，
+        // 这条用例就变成了「赌别的用例先跑过 init」。
+        i18n::init();
         assert_eq!(
-            launch_plan("firefox", &[], false).unwrap(),
-            ("xdg-open".to_string(), v(&["firefox"]))
+            launch_plan("readme.txt", &[], Target::OpenWithXdg).unwrap(),
+            ("xdg-open".to_string(), v(&["readme.txt"]))
         );
-        // xdg-open 不会替我们把余下参数转交给应用：静悄悄丢掉比报错更难查，所以直接报错
-        assert!(launch_plan("firefox", &v(&["--new-window"]), false)
+        // xdg-open 不会替我们把余下参数转交给应用：静悄悄丢掉比报错更难查，所以直接报错。
+        // 只挑五种语言里都出现的字面量断言，语言被别的用例切走也不影响。
+        assert!(launch_plan("readme.txt", &v(&["--flag"]), Target::OpenWithXdg)
             .unwrap_err()
             .contains("xdg-open"));
+    }
+
+    /// 徽标不能替用户说谎：路径写错、东西不在机器上，必须是一次失败。
+    /// 这一步发生在任何 spawn 之前，所以它不挑机器 —— 没有图形会话也照样成立。
+    #[test]
+    fn a_path_that_is_not_there_is_an_error_not_a_quiet_success() {
+        i18n::init();
+        assert_eq!(
+            classify_target("/opt/foo/firefox", false, false),
+            Target::NotFound
+        );
+        let err = launch_plan("/opt/foo/firefox", &[], Target::NotFound).unwrap_err();
+        assert!(err.contains("/opt/foo/firefox"), "错误里要点名是哪个目标：{err}");
+        // 带不带 args 都该是同一个错：先判存在性，再谈怎么打开
+        assert!(launch_plan("/opt/foo/firefox", &v(&["--kiosk"]), Target::NotFound).is_err());
+    }
+
+    /// 判定只看「在不在 + 有没有执行位 + 字符串形状」，这四条挡住四种不同配置：
+    /// 目录里的文档、URL、PATH 里的应用名、以及唯一那个真正该报错的形状。
+    #[test]
+    fn target_classification_covers_the_four_shapes_a_user_can_type() {
+        // 有执行位：直接跑，args 原样传，不看别的
+        assert_eq!(classify_target("/usr/bin/foo", true, true), Target::Run);
+        // 存在但没执行位（.desktop / 文档 / 目录）：只能给 xdg-open
+        assert_eq!(classify_target("/usr/share/applications/foo.desktop", true, false), Target::OpenWithXdg);
+        // URL 里有 '/'，但它从来就不是本机路径 —— scheme 必须先于路径判定
+        assert_eq!(classify_target("https://example.com/x", false, false), Target::OpenWithXdg);
+        // 裸应用名：交给 PATH 解析，真找不到时 spawn 自己会报 No such file or directory
+        assert_eq!(classify_target("firefox", false, false), Target::Run);
+        // 写成路径却不在机器上
+        assert_eq!(classify_target("/usr/bin/firefox", false, false), Target::NotFound);
     }
 
     /// 真实形态：WireGuard 接口连上后 `state` 是 `UNKNOWN`，就绪信息只在标志位里。

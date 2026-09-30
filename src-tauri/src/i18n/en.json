@@ -391,6 +391,7 @@
   "pal.no_service_for_iface": "no network service maps to interface {dev}",
   "pal.no_active_conn_on": "device {dev} has no active connection",
   "pal.xdg_no_args": "{app} is not an executable, so only xdg-open can launch it — and xdg-open cannot pass arguments to an app (received {count}). To pass arguments, write app as the absolute path of an executable.",
+  "pal.launch_missing": "nothing exists at {app} on this machine — a target written as a path must really be there; only a bare app name is looked up in PATH, and the name of an app that is installed shows up in your launcher",
   "pal.privileged_no_stderr": "the privileged script failed and wrote nothing to stderr",
   "pal.uac_cancelled": "elevation was cancelled (UAC)",
   "pal.elevate_failed": "elevated execution failed: {error}",

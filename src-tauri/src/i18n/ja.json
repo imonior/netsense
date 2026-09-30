@@ -391,6 +391,7 @@
   "pal.no_service_for_iface": "インターフェース {dev} に対応するネットワークサービスがありません",
   "pal.no_active_conn_on": "デバイス {dev} にアクティブな接続がありません",
   "pal.xdg_no_args": "{app} は実行ファイルではないため xdg-open に委ねられますが、xdg-open はアプリへ引き数を渡せません（{count} 個受信）。引き数を渡すなら app に実行ファイルの絶対パスを指定してください。",
+  "pal.launch_missing": "このマシン上に {app} はありません——パスで書いた対象は実際に存在する必要があります。アプリ名だけを始めたときは PATH を参照し、インストール済みのアプリ名はランチャーに表示されます",
   "pal.privileged_no_stderr": "特権スクリプトが失敗しましたが stderr がありません",
   "pal.uac_cancelled": "昇格が取り消されました (UAC)",
   "pal.elevate_failed": "昇格実行に失敗しました: {error}",

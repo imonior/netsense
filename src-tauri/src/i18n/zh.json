@@ -391,6 +391,7 @@
   "pal.no_service_for_iface": "找不到网卡 {dev} 对应的网络服务",
   "pal.no_active_conn_on": "设备 {dev} 上没有活动连接",
   "pal.xdg_no_args": "{app} 不是可执行文件，只能交给 xdg-open，而它无法向应用传参（收到 {count} 个参数）。要给应用传参就把 app 写成可执行文件的绝对路径。",
+  "pal.launch_missing": "这台机器上没有 {app} 这个位置 —— 写成路径的目标必须真实存在；只有裸应用名才会去 PATH 里找，而装在系统里的应用名会出现在启动器中",
   "pal.privileged_no_stderr": "特权脚本执行失败（无 stderr）",
   "pal.uac_cancelled": "提权被取消（UAC）",
   "pal.elevate_failed": "提权执行失败: {error}",

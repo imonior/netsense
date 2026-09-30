@@ -389,9 +389,9 @@ mod tests {
     /// 「界面上看到的」和「实际跑的」分叉。
     ///
     /// 三条都故意用「没进 allow-list 的脚本」：拒绝发生在平台层之前，于是每条必然失败，
-    /// 而且哪台机器都不会拉起进程。换成「启动一个不存在的 app」就没这么干净 —— Linux 的
-    /// `launch_app` 只把 `xdg-open` 丢出去、不等退出码，spawn 成功就记成功，三条会全绿，
-    /// 而这条测试要守的恰恰是「失败了还往下跑」。
+    /// 而且哪台机器都不会拉起进程 —— 这是唯一不依赖文件系统状态的失败来源。「启动一个不存在
+    /// 的东西」担不起这个前提：Linux 的 `launch_app` 只把 `xdg-open` 丢出去、不等退出码，
+    /// 路径不存在如今会在 spawn 之前被拒掉，而 URL 和文档仍然会以 spawn 成功记成绿灯。
     #[test]
     fn actions_run_in_the_order_they_are_listed() {
         let report = execute(
