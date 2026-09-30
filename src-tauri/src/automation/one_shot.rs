@@ -370,22 +370,44 @@ mod tests {
         }
     }
 
+    /// 一条注定失败、又不会真的碰系统的动作：allow-list 在平台层之前就把它拒了。
+    /// 测试要「每条都失败」这个前提，不能交给某台机器的启动器去成全。
+    fn denied(id: &str) -> OneShotAction {
+        OneShotAction {
+            id: id.to_string(),
+            enabled: true,
+            action: OneShotActionType::RunScript {
+                path: format!("scripts/{id}.sh"),
+                args: vec![],
+                elevated: false,
+            },
+        }
+    }
+
     /// 执行顺序 = 配置里的排列顺序。这条挡住的是「又加回某种重排」：列表顺序是用户在
     /// 编辑器里唯一看得见、也唯一能改的顺序，任何按数字/类型/耗时的重新排队都会让
     /// 「界面上看到的」和「实际跑的」分叉。
+    ///
+    /// 三条都故意用「没进 allow-list 的脚本」：拒绝发生在平台层之前，于是每条必然失败，
+    /// 而且哪台机器都不会拉起进程。换成「启动一个不存在的 app」就没这么干净 —— Linux 的
+    /// `launch_app` 只把 `xdg-open` 丢出去、不等退出码，spawn 成功就记成功，三条会全绿，
+    /// 而这条测试要守的恰恰是「失败了还往下跑」。
     #[test]
     fn actions_run_in_the_order_they_are_listed() {
-        // 三个不存在的应用：每条都会失败，但失败要让后面的照跑（这是 3B1 与 3A 的关键差别）
         let report = execute(
             crate::platform::Platform,
             &Arc::new(AllowedScripts::default()),
-            &[act("first"), act("second"), act("third")],
+            &[denied("first"), denied("second"), denied("third")],
             &noop,
         );
         assert_eq!(
             report.outcomes.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
             vec!["first", "second", "third"],
             "结果顺序就是列表顺序，一条都没少"
+        );
+        assert!(
+            report.outcomes.iter().all(|o| !o.ok),
+            "一条失败不该截断后面的：三条都要留下记录"
         );
         assert_eq!(report.status, BatchStatus::Failed, "三条都失败该记 Failed，而不是中断");
     }
