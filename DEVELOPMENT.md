@@ -126,6 +126,7 @@ netsense/
 │   ├── build-windows.ps1      # ★ one-click Windows build (with MSVC/WebView2/disk preflight)
 │   ├── gen_icons.py           # resample + round + pack the icon set from app-icon.png (pure stdlib)
 │   ├── bump_version.sh        # VERSION → tauri.conf.json + Cargo.toml (VERSION is the single source)
+│   ├── bump-cask.sh           # ★ published Release → homebrew-tap's Casks/netsense.rb (the one copy of the cask template)
 │   ├── check-no-ai.sh         # ★ publish-hygiene guard: no assistant-tool names in commit messages / shipped files
 │   ├── setup-hooks.sh         # point core.hooksPath at scripts/git-hooks (the guard above needs it)
 │   ├── git-hooks/             # commit-msg + pre-commit, both calling the same guard
@@ -967,7 +968,7 @@ sh scripts/install-priv-helper.sh
 `.github/workflows/build.yml` is a four-target matrix: `windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`.
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0     # validate -> release(draft) -> build x4 -> checksums -> publish
+git tag v1.0.0 && git push origin v1.0.0     # validate -> release(draft) -> build x4 -> checksums -> publish -> cask
 gh workflow run build.yml --ref main         # compile + test only; never touches a Release
 ```
 
@@ -1166,7 +1167,7 @@ git commit --allow-empty -m "test: let AI do it"                     # must be b
 
 ### 13.2 Release job: exactly one draft per tag, addressed by id
 
-`build.yml` is `validate → release → build ×4 → checksums → publish`. The `release` job
+`build.yml` is `validate → release → build ×4 → checksums → publish → cask`. The `release` job
 creates the Draft Release **once**, before the matrix, and exports its numeric id; every
 build leg passes it to `tauri-action` as `releaseId`. The final `publish` job PATCHes that
 same release to `draft=false`, and only runs when `checksums` verified the assets it is
@@ -1190,8 +1191,8 @@ Two traps this structure exists to avoid — both were hit for real while cuttin
    run died exactly there: the release was created fine, then the follow-up lookup
    404'd, the `release` job went red, and the whole build matrix was skipped. The job
    therefore takes the id from the **POST /releases response** and never re-looks it up by
-   tag. Resolving a *published* release by tag does work — that is what `cask.yml` relies
-   on, and it is triggered by `release: published`.
+   tag. Resolving a *published* release by tag does work — that is what the cask bump
+   (§13) relies on.
 
 The `release` job also clears stale drafts for the same tag first, so re-running a tag
 self-heals any duplicates, and it **refuses to proceed when the tag already has a
@@ -1202,13 +1203,24 @@ rewrite published assets and hashes.
 > than the release page. The release page shows a draft under a placeholder tag, which
 > makes a correctly-created draft look broken.
 
-**The Homebrew cask is a separate workflow** (`.github/workflows/cask.yml`), triggered by
-`release: published` rather than by the tag. The reason is the 404 above: a Draft Release's
-assets are not reachable at `releases/download/<tag>/…`, so a cask bumped at tag-push time
-would leave `brew install --cask netsense` broken for the whole window between the tag and
-the publish click. Since `publish` now auto-publishes once checksums land, the cask follows
-without a manual step. Prerelease tags are excluded, and the job no-ops when
-`secrets.TAP_PUSH_TOKEN` is absent.
+**The Homebrew cask bump is `scripts/bump-cask.sh`, and it is a job in `build.yml`** (`cask`,
+downstream of `publish`) rather than a listener on `release: published`. It has to run after the
+publish because the cask's `url` points at `releases/download/<tag>/…`, which is 404 for a Draft —
+`brew install --cask netsense` would be broken for the whole window between the tag and the publish
+click. It has to be a *job* rather than an *event* because `publish` flips the draft with
+`GITHUB_TOKEN`, and GitHub does not let a `GITHUB_TOKEN`-caused event start another workflow: the
+`release: published` listener never fired once across four releases, and the tap quietly stayed
+behind while this file said it followed. A job in the same dependency chain needs no cascade at
+all. The bump no-ops when `secrets.TAP_PUSH_TOKEN` is absent, requires the tag to match
+`vMAJOR.MINOR.PATCH[-prerelease]` before anything is written — the tag lands inside a cask file that
+Homebrew evaluates as Ruby, so an unvalidated tag would be code execution for every
+`brew upgrade` user — skips prerelease tags (a `-` in the tag), and carries a no-op guard so a
+re-run cannot push an empty commit.
+`.github/workflows/cask.yml` stays as the human path — `release: published` (someone clicked
+Publish on the page) and `workflow_dispatch` (re-sync a given tag by hand); both call the same
+script, and a shared `concurrency` group plus that no-op guard absorb the overlap. The job going
+red on purpose is the point: a stale cask means `brew upgrade --cask` users never get the release,
+and that failure was silent before.
 
 ---
 

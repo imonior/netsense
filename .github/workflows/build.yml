@@ -431,8 +431,8 @@ jobs:
 
   # Auto-publish once checksums are verified. Keeps the safe gated flow: the release stays a draft
   # through build + checksum, and only goes public after every platform artifact is present and its
-  # SHA256SUMS is uploaded. Publishing also fires the Homebrew cask sync (cask.yml listens on
-  # release: published), so `brew upgrade --cask netsense` tracks the new version without a manual step.
+  # SHA256SUMS is uploaded. The Homebrew cask sync is the job below -- it is downstream of this one,
+  # so `brew upgrade --cask netsense` follows the release without a manual step.
   publish:
     needs: [release, build, checksums]
     if: ${{ !cancelled() && needs.release.result == 'success' && needs.build.result == 'success' && needs.checksums.result == 'success' }}
@@ -453,8 +453,32 @@ jobs:
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RID}" -f draft=false
           echo "published release id=${RID}"
 
-  # Homebrew cask auto-update has moved out of this file into `.github/workflows/cask.yml`.
-  # Reason: tauri-action only creates a **Draft** Release on tag push, and
-  # `releases/download/<tag>/...` returns 404 for an unpublished Draft -- if the cask pointed at
-  # that tag now, `brew install --cask netsense` would fail until you publish manually. Switching to
-  # `release: published` makes the cask update only at the moment the release goes truly public.
+  # The Homebrew cask follows the release. It has to run *after* publish: the cask's url points at
+  # `releases/download/<tag>/...`, and that path is 404 for a Draft (a Draft has no real tag name
+  # yet). So this cannot run beside `publish` -- it goes underneath it.
+  #
+  # Why a job instead of a `release: published` listener in `.github/workflows/cask.yml`: the
+  # publish step above flips the draft with GITHUB_TOKEN, and GitHub does not let an event caused
+  # by GITHUB_TOKEN start another workflow. That chain never fired once -- four releases, zero cask
+  # bumps, the tap quietly left behind. A job on the same dependency chain needs no cascade at all.
+  # cask.yml stays for the two human paths (someone clicks Publish on the release page; or a manual
+  # re-sync) and calls the same script, so the cask template has one copy.
+  #
+  # Letting this job turn the run red is deliberate: a stale cask means `brew upgrade --cask` users
+  # never receive the release, and that failure was silent before -- hard to notice, worse to debug.
+  cask:
+    needs: [publish]
+    # A manual workflow_dispatch verification run creates no Release, so there is no cask to sync.
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Sync Casks/netsense.rb
+        env:
+          TAG: ${{ github.ref_name }}
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/bump-cask.sh "$TAG"
