@@ -98,7 +98,7 @@
   "editor.iface_placeholder": "Select adapter…",
   "editor.iface_any": "Any adapter (*)",
   "editor.state_active_profile": "Active profile",
-  "editor.state_conditions": "Why it matched",
+  "editor.state_conditions": "What is matched",
   "editor.state_network": "Current network",
   "editor.state_actions": "What it runs",
   "editor.state_none": "Nothing",
