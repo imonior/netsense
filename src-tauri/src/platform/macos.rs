@@ -1262,13 +1262,11 @@ fn kind_of(dev: &str, port: Option<&str>) -> super::NicKind {
 
 /// 隧道归属的证据。一次网卡枚举只采集一遍（每条候选服务一个 `networksetup` 子进程）。
 ///
-/// 字段只装**能对上号**的事实：`svc_ip` 里不含有地址的服务，`connected` 里不含有未连的会话。
+/// 字段只装**能对上号**的事实：`svc_ip` 里不含有地址的服务。
 #[derive(Debug, Default)]
 struct VpnEvidence {
     /// 非硬件网络服务 → 它自己 `-getinfo` 报出的 IPv4。
     svc_ip: Vec<(String, String)>,
-    /// `scutil --nc list` 里处于 `(Connected)` 的会话标签。
-    connected: Vec<String>,
 }
 
 /// 采集 [`VpnEvidence`]。
@@ -1276,10 +1274,7 @@ struct VpnEvidence {
 /// 只对「不是硬件端口」的网络服务问 `-getinfo`：VPN 客户端创建的服务都以自己的名字
 /// 出现在 `-listallnetworkservices` 里而不在 `-listallhardwareports` 里，硬件口既问不
 /// 出隧道的地址、又要多起一倍子进程。
-///
-/// `nc_rows` 是调用方现场读过一次的 `scutil --nc list`（[`scutil_nc_rows_now`]）：
-/// 归属判定和「装了但没连」的那几张卡要的是同一份清单，不该各起一次子进程。
-fn collect_vpn_evidence(hw_ports: &[HwPort], nc_rows: &[(String, String)]) -> VpnEvidence {
+fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
     let hw: std::collections::HashSet<&str> = hw_ports.iter().map(|p| p.port.as_str()).collect();
     let mut svc_ip = Vec::new();
     for svc in network_services() {
@@ -1293,10 +1288,7 @@ fn collect_vpn_evidence(hw_ports: &[HwPort], nc_rows: &[(String, String)]) -> Vp
             }
         }
     }
-    VpnEvidence {
-        svc_ip,
-        connected: connected_labels(nc_rows),
-    }
+    VpnEvidence { svc_ip }
 }
 
 /// 判定一条隧道的归属软件；证据对不上就返回 `None`（界面退回通用的「VPN」标签）。
@@ -1305,43 +1297,51 @@ fn collect_vpn_evidence(hw_ports: &[HwPort], nc_rows: &[(String, String)]) -> Vp
 /// 1. **按 IP 认领**：哪个网络服务报出了这条隧道的 IPv4，这条隧道就是它建的。服务名是
 ///    客户端自己写的，照原样显示（不做关键词归一：用户自建的 "MyVPN" 归一成 "VPN" 是
 ///    丢信息，不是提纯）。
-/// 2. **唯一的已连接会话**：`alone`（系统上只有这一条隧道在用）且 `scutil --nc list`
-///    里只有一条 `(Connected)`。两个「唯一」同时成立时它们指的几乎必然是同一件事；
-///    缺任何一个都不再推断。这一条还带一个**反证**：那个会话自己的服务如果报得出地址、
-///    而那个地址不是这条隧道的（含这条隧道根本没报出 IPv4 的情况），两件事就不是同一件，
-///    照样不认 —— 「唯一」只是没人 competing，反证才是这里真正的证据。
+/// 2. **wireguard-go 的控制套接字**（[`wireguard_sock`]）：隧道名下挂着上游实现留下的
+///    套接字，就说明这条隧道由 wireguard-go 管。这条是设备绑定的直接证据，但名字只写到
+///    实现为止 —— 套接字说得出「wireguard-go」，说不出背后是哪个 GUI/脚本拉起来的，
+///    硬指一个牌子就是把猜测写成答案。
 ///
 /// 界面上「连着没有」每一张卡都写得出来（`up` 是 `ifconfig`/`scutil` 直接给的），程序名
 /// 却只有证据才给：认不出只是少一格信息，界面退回通用的「VPN」；认错是给用户的设备安一个
 /// 具体到某家软件的假答案，它会接着被当成 3B2「维持连接」的对象。
 ///
-/// 曾经还有第三条路，它是错的，别再加回来：无人认领时按关键词扫一遍全部服务、命中即返回。
-/// 装了某家客户端的机器上，那个服务**一直**在清单里（断开也在、也没有地址），于是任何一条
-/// 认领不上的隧道都会被说成是它建的 —— 那个结果和这台设备没有任何关系，界面上得到的却
-/// 是一个**听起来很具体的错答案**。认不出来只是少一格信息，认错才是事故。
-fn attribute_vpn(ev: &VpnEvidence, ip: Option<&str>, alone: bool) -> Option<String> {
+/// 曾经还有两条路，都是错的，别再加回来：
+/// - 无人认领时按关键词扫一遍全部服务、命中即返回。装了某家客户端的机器上，那个服务
+///   **一直**在清单里（断开也在、也没有地址），于是任何一条认领不上的隧道都会被说成是
+///   它建的 —— 那个结果和这台设备没有任何关系，界面上得到的却是一个听起来很具体的
+///   错答案。
+/// - 「唯一在用隧道 + 唯一已连接会话」的推断，配一句「那个会话的服务报出的地址不是这条
+///   隧道的」当反证。可 macsys 版 Tailscale 这类客户端**从不出**地址，反证永远不成立，
+///   而它们恰恰是这条规则唯一要照顾的形态：现场一条别人家的 wireguard 隧道，就因为没人在
+///   争，被安上了「Tailscale」。反证只在会开口的客户端身上存在，这道门就只剩「唯一」。
+///
+/// 认不出来只是少一格信息，认错才是事故。
+fn attribute_vpn(ev: &VpnEvidence, ip: Option<&str>, wg_sock: bool) -> Option<String> {
     let addr = ip.filter(|a| !a.is_empty());
     if let Some(a) = addr {
         if let Some((svc, _)) = ev.svc_ip.iter().find(|(_, reported)| reported == a) {
             return Some(svc.clone());
         }
     }
-    if alone && ev.connected.len() == 1 {
-        let label = ev.connected[0].clone();
-        // 反证：这个会话的服务报得出的那个地址，不是脚下这条隧道的。
-        // 名字比对忽略大小写：会话标签与网络服务名是同一家客户端写的两处，只差个大小写
-        // 不代表它们是两个东西，而这里宁可少一格信息。
-        let owns_it = ev
-            .svc_ip
-            .iter()
-            .find(|(svc, _)| svc.eq_ignore_ascii_case(&label))
-            .map_or(true, |(_, reported)| addr.is_some_and(|a| a == *reported));
-        if owns_it {
-            return Some(label);
-        }
-        return None;
+    if wg_sock {
+        return Some("WireGuard".to_string());
     }
     None
+}
+
+/// wireguard-go 给每条它管的隧道留一个控制套接字（上游约定：`<dir>/<dev>.sock`）。
+///
+/// 这是设备绑定的证据，不是关键词命中：文件在，就说明这个设备名对应的是 wireguard-go
+/// 的一条隧道。诚实边界：崩溃残留的套接字会让「设备名后来被别的 VPN 复用」这一种组合
+/// 认错，但比旧规则的误报窄得多；够不着的部分交给界面退回通用「VPN」。
+fn wireguard_sock(dev: &str) -> bool {
+    wireguard_sock_in(std::path::Path::new("/var/run/wireguard"), dev)
+}
+
+/// [`wireguard_sock`] 的可注入目录版本：系统路径在测试里碰不得，也不该碰。
+fn wireguard_sock_in(dir: &std::path::Path, dev: &str) -> bool {
+    dir.join(format!("{dev}.sock")).exists()
 }
 
 /// 「装了、此刻没连」的 VPN 客户端：给界面一张不带地址、状态写着没连的卡。
@@ -1460,18 +1460,10 @@ fn scutil_nc_labels() -> Vec<String> {
         .collect()
 }
 
-/// 已连接的那些会话标签。
-fn connected_labels(rows: &[(String, String)]) -> Vec<String> {
-    rows.iter()
-        .filter(|(_, line)| scutil_row_connected(line))
-        .map(|(label, _)| label.clone())
-        .collect()
-}
-
 /// 现场读一次 `scutil --nc list` 的行（标签 + 整行文本）。
 ///
-/// 三条路都靠这一份：隧道的归属判定、报错时列给用户看的清单、以及界面上那些
-/// 「装了但没连」的 VPN 卡。它们各自起一次子进程的话，一次网卡枚举要多拉两趟。
+/// 两条路都靠这一份：报错时列给用户看的清单、以及界面上那些「装了但没连」的 VPN 卡。
+/// 它们各自起一次子进程的话，一次网卡枚举要多拉一趟。
 fn scutil_nc_rows_now() -> Vec<(String, String)> {
     run("/usr/sbin/scutil", &["--nc", "list"])
         .map(|out| scutil_nc_rows(&out))
@@ -1696,8 +1688,9 @@ impl NetworkPlatform for MacPlatform {
                 });
             }
 
-            // 隧道归属要在清单收齐以后再判：判据里那条「本机只有这一条隧道在用」必须知道
-            // 一共几条在用，而这要等循环跑完才知道（边枚举边判会低估，进而认错）。
+            // 隧道归属要在清单收齐以后再判：`collect_vpn_evidence` 每条服务要起一个
+            // `networksetup` 子进程，而有没有隧道值得归属，要等上面的过滤跑完才知道 ——
+            // 一条隧道都没进清单的场合（整机只有普通口在用）一个子进程都不该起。
             let vpn_rows: Vec<usize> = out
                 .iter()
                 .enumerate()
@@ -1705,11 +1698,11 @@ impl NetworkPlatform for MacPlatform {
                 .map(|(i, _)| i)
                 .collect();
             if !vpn_rows.is_empty() {
-                let ev = collect_vpn_evidence(&hw, &nc_rows);
-                let alone = vpn_rows.len() == 1;
+                let ev = collect_vpn_evidence(&hw);
                 for i in vpn_rows {
                     let ip = out[i].ipv4.clone();
-                    out[i].app = attribute_vpn(&ev, ip.as_deref(), alone);
+                    let wg = wireguard_sock(&out[i].name);
+                    out[i].app = attribute_vpn(&ev, ip.as_deref(), wg);
                 }
             }
 
@@ -2413,21 +2406,19 @@ mod tests {
     fn a_service_sitting_in_the_list_is_not_evidence_about_this_tunnel() {
         let ev = VpnEvidence {
             svc_ip: vec![("ProtonVPN".into(), "10.64.0.2".into())],
-            connected: Vec::new(),
         };
         // 隧道自己没有 IPv4（只有 inet6）→ 地址这条线连不上，认不出
-        assert_eq!(attribute_vpn(&ev, None, true), None);
-        assert_eq!(attribute_vpn(&ev, Some(""), true), None);
+        assert_eq!(attribute_vpn(&ev, None, false), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), false), None);
         // 地址是别人的隧道（本例里那条服务）的，也不算这条的证据
-        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), true), None);
-        // 连清单是空的也一样：认不出就是 None，交给界面退回通用标签
-        assert_eq!(
-            attribute_vpn(&VpnEvidence::default(), None, true),
-            None
-        );
+        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), false), None);
+        // 连证据清单是空的也一样：认不出就是 None，交给界面退回通用标签
+        assert_eq!(attribute_vpn(&VpnEvidence::default(), None, false), None);
     }
 
-    /// IPv4 是唯一能把「这条隧道」和「那个服务」连起来的证据，所以它优先于任何推断。
+    /// IPv4 是能把「这条隧道」和「那个服务」连起来的当面证据：报出这条隧道的地址的那个
+    /// 服务认领它，服务名照原样显示（不做关键词归一：自建名 "MyVPN" 归一成 "VPN" 是丢
+    /// 信息）；别的服务报着别的地址不影响。
     #[test]
     fn a_service_that_reports_the_tunnel_address_owns_it() {
         let ev = VpnEvidence {
@@ -2435,85 +2426,64 @@ mod tests {
                 ("AnyConnect".into(), "192.0.2.9".into()),
                 ("Tailscale".into(), "100.84.1.2".into()),
             ],
-            connected: v(&["ProtonVPN"]),
         };
-        // 服务名照原样显示，不做关键词归一（自建名 "MyVPN" 归一成 "VPN" 是丢信息）
         assert_eq!(
             attribute_vpn(&ev, Some("100.84.1.2"), false).as_deref(),
             Some("Tailscale")
         );
-        // 另一条隧道在用（alone=false）也照样认得出：IP 证据是设备绑定的
         assert_eq!(
             attribute_vpn(&ev, Some("192.0.2.9"), false).as_deref(),
             Some("AnyConnect")
         );
-    }
-
-    /// 「唯一的已连接会话」要两个唯一同时成立才算数：只有一条隧道在用，且只有一条会话连着。
-    #[test]
-    fn the_single_connected_session_counts_only_when_nothing_else_is_up() {
-        let ev = VpnEvidence {
-            svc_ip: Vec::new(),
-            connected: v(&["Tailscale"]),
-        };
-        assert_eq!(
-            attribute_vpn(&ev, None, true).as_deref(),
-            Some("Tailscale")
-        );
-        // 还有第二条隧道在用 → 说不准这一条是谁建的
-        assert_eq!(attribute_vpn(&ev, None, false), None);
-        // 已连接会话有两条 → 同样说不准
-        let two = VpnEvidence {
-            svc_ip: Vec::new(),
-            connected: v(&["Tailscale", "ProtonVPN"]),
-        };
-        assert_eq!(attribute_vpn(&two, None, true), None);
-        assert_eq!(attribute_vpn(&two, None, false), None);
-    }
-
-    /// 两个「唯一」只是没有别的东西来争，那个会话的服务**自己报得出的地址**才是正面证据。
-    /// 它和脚下这条隧道对不上，就说明这两件事不是同一件 —— 这条挡住的是「唯一已连接会话」
-    /// 被当成免检通道：界面上宁可退回通用的「VPN」，也不要一个具体到某家软件的假答案，
-    /// 因为那个名字接下来会被 3B2 的「维持连接」拿去当对象。
-    #[test]
-    fn a_connected_session_that_reports_a_different_address_does_not_own_this_tunnel() {
-        let ev = VpnEvidence {
-            svc_ip: vec![("Tailscale".into(), "100.84.1.2".into())],
-            connected: v(&["Tailscale"]),
-        };
-        // 这条隧道有 IPv4，但不是那个会话报出的那个
-        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), true), None);
-        // 这条隧道报不出 IPv4（只有 inet6）：会话那条有，两者就不是同一条
-        assert_eq!(attribute_vpn(&ev, None, true), None);
-        assert_eq!(attribute_vpn(&ev, Some(""), true), None);
-        // 地址对上时两条款给出同一个答案（这里同时确认反证不会把正确的认领一起否掉）
+        // 服务名比实现名具体：两条证据同时在场时，报出地址的服务优先
         assert_eq!(
             attribute_vpn(&ev, Some("100.84.1.2"), true).as_deref(),
             Some("Tailscale")
         );
-        // 会话标签与服务名只差大小写，仍是同一家客户端写的同一个东西
-        let ci = VpnEvidence {
-            svc_ip: vec![("tailscale".into(), "100.84.1.2".into())],
-            connected: v(&["Tailscale"]),
-        };
-        assert_eq!(attribute_vpn(&ci, Some("10.64.0.7"), true), None);
-        // 那个会话报不出地址（正在连、或这类客户端不问 networksetup）→ 反证不存在，
-        // 「唯一的已连接会话」照旧算数：收紧这条不能把已有的能力削掉
-        let mute = VpnEvidence {
-            svc_ip: Vec::new(),
-            connected: v(&["Tailscale"]),
-        };
+    }
+
+    /// 现场回归：macsys 版 Tailscale 的服务**从不出**地址，旧规则「唯一在用隧道 + 唯一已
+    /// 连接会话」里那句反证于是永远不成立 —— 别人家的 wireguard 隧道（utun4）被安上了
+    /// 「Tailscale」。规则删掉之后：没有设备绑定的证据就退回通用「VPN」，而 wireguard-go
+    /// 的套接字这类看得见的证据照旧认得出实现名。
+    #[test]
+    fn a_foreign_tunnel_stays_unnamed_without_device_bound_evidence() {
+        let ev = VpnEvidence::default();
+        assert_eq!(attribute_vpn(&ev, Some("10.30.35.2"), false), None);
+        assert_eq!(attribute_vpn(&ev, None, false), None);
         assert_eq!(
-            attribute_vpn(&mute, Some("10.64.0.7"), true).as_deref(),
+            attribute_vpn(&ev, Some("10.30.35.2"), true).as_deref(),
+            Some("WireGuard")
+        );
+        assert_eq!(attribute_vpn(&ev, None, true).as_deref(), Some("WireGuard"));
+    }
+
+    /// IP 认领必须地址真对上：服务报着另一个地址时，这条隧道仍是无人认领的。
+    #[test]
+    fn a_service_reporting_another_address_does_not_own_this_tunnel() {
+        let ev = VpnEvidence {
+            svc_ip: vec![("Tailscale".into(), "100.84.1.2".into())],
+        };
+        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), false), None);
+        assert_eq!(attribute_vpn(&ev, None, false), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), false), None);
+        // 地址对上才认领；套接字在同时也不会把正确的认领盖掉
+        assert_eq!(
+            attribute_vpn(&ev, Some("100.84.1.2"), true).as_deref(),
             Some("Tailscale")
         );
     }
 
-    /// 会话标签的筛法：清单里未连的那几行不能进候选（本例只有一条已连）。
+    /// 套接字路径是设备一对一：`<dev>.sock`，前缀相同不算。
     #[test]
-    fn only_connected_sessions_are_kept() {
-        assert_eq!(connected_labels(&scutil_nc_rows(NC_LIST)), v(&["Tailscale"]));
-        assert!(connected_labels(&[]).is_empty());
+    fn the_wireguard_socket_is_matched_by_exact_device() {
+        let dir = std::env::temp_dir().join(format!("netsense-wg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("utun9.sock"), b"").unwrap();
+        assert!(wireguard_sock_in(&dir, "utun9"));
+        assert!(!wireguard_sock_in(&dir, "utun"));
+        assert!(!wireguard_sock_in(&dir, "utun4"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn live_vpn(name: &str, app: Option<&str>) -> NicInfo {

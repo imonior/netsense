@@ -1442,13 +1442,15 @@ What no automated gate can reach, and therefore what needs a real machine per OS
 - **macOS never guesses a tunnel's owner from a name list.** `-listallnetworkservices` keeps a service
   entry for a VPN client that is installed but *disconnected*, so a keyword sweep over it attributes
   any unclaimed tunnel to whichever client happens to be installed — a specific-looking wrong answer
-  about a device it has nothing to do with. Attribution now requires evidence bound to that interface
-  (its IPv4 reported by a service, or a single connected session when a single tunnel is up), and
-  returns `None` otherwise; the UI falls back to the generic VPN label (§9.6). The second route carries
-  a falsifier too: if that session's own service reports an IPv4 and it is *not* this tunnel's address
-  (including the case where this tunnel reports no IPv4 at all), the two are demonstrably different
-  things and the name is withheld. "Uniqueness" only means nothing else was competing; the address is
-  the evidence.
+  about a device it has nothing to do with. Attribution requires evidence bound to that interface: an
+  IPv4 one of those services reports, or the wireguard-go control socket upstream keeps at
+  `/var/run/wireguard/<dev>.sock` (its presence means this device **is** a wireguard-go tunnel; the
+  name stops at the implementation, because the socket cannot say which GUI or script launched it).
+  Anything else returns `None` and the UI falls back to the generic VPN label (§9.6). A "single tunnel
+  up + single connected session" inference used to be a third route; it was removed because its
+  falsifier — that session's own service reporting a *different* IPv4 — can never fire for clients
+  like macsys Tailscale, which never report an address at all. The case the route existed for is the
+  case where it is unfalsifiable, and in the field it mislabelled a foreign WireGuard tunnel.
 - **A VPN card always says whether it is connected; the app name only appears on evidence.** That
   asymmetry is the whole rule for this section: `up` comes straight from `ifconfig`/`scutil`/`Status`,
   so it is never a guess, while the tag above it is withheld whenever the evidence does not bind to
