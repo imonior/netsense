@@ -420,6 +420,7 @@
   "pal.iface_missing_none": "Windows に {name} というネットワークアダプターがありません（このマシンにはトンネルが一つもありません）",
   "upd.no_sums": "この Release には SHA256SUMS が付いていないため、未検証のアセットのインストールを拒否します",
   "upd.sums_fetch": "SHA256SUMS の取得に失敗しました: {error}",
+  "upd.fetch_retry": "{url} の取得に失敗しました（{attempt} 回目）、再試行します: {error}",
   "upd.not_in_sums": "SHA256SUMS に {asset} が含まれていません",
   "upd.checksum_mismatch": "{asset} のチェックサムが一致しません（期待値 {want}、実際 {got}）",
   "upd.curl_start": "ダウンロードで curl を起動できませんでした: {error}",

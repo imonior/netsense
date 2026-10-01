@@ -420,6 +420,7 @@
   "pal.iface_missing_none": "Windows 上没有名为 {name} 的网卡（这台机器上一个隧道都没有）",
   "upd.no_sums": "该 Release 没有附带 SHA256SUMS，拒绝安装未经校验的资产",
   "upd.sums_fetch": "获取 SHA256SUMS 失败: {error}",
+  "upd.fetch_retry": "拉取 {url} 失败（第 {attempt} 次），将重试: {error}",
   "upd.not_in_sums": "SHA256SUMS 里没有 {asset} 这一项",
   "upd.checksum_mismatch": "{asset} 校验和不符：期望 {want}，实际 {got}",
   "upd.curl_start": "下载没能启动 curl: {error}",

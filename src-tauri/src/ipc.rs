@@ -899,7 +899,12 @@ fn install_verdict(
     }
     // 这一次拉取同时回答两个问题：拿不拿得到、里面列没列我们这个资产。
     match fetch_url(cu, choice) {
-        Err(_) => Some("sums_unreachable"),
+        Err(e) => {
+            // 重试的 warn 只覆盖中间的尝试（见 [`fetch_url`]），最后一次的失败原因要在
+            // 这里落一条 —— 否则用户报「SHA256SUMS 无法下载」时，日志里只有前两次的。
+            log::warn(&i18n::tf("upd.sums_fetch", &[("error", &e)]));
+            Some("sums_unreachable")
+        }
         Ok(sums) if crate::update::parse_hash(&sums, name).is_some() => None,
         Ok(_) => Some("no_sums"),
     }
@@ -1066,12 +1071,45 @@ pub fn run_update(
     crate::update::run_update(&app, &t, &choice)
 }
 
-/// 拉一个 URL 的正文。两条实现（Windows 的 PowerShell 与其余平台的 curl）都在这里，
-/// 因为它们对代理的态度不同 —— 见 [`crate::netproxy`] 与下面那条分支上的注释。
+/// [`fetch_url`] 的总尝试次数。三次覆盖的是秒级抖动；真断网就是三次都失败。
+const FETCH_ATTEMPTS: u32 = 3;
+
+/// 拉一个 URL 的正文；失败会重试（见 [`FETCH_ATTEMPTS`]）。
+///
+/// 重试只能放在这里：现场（macOS，LibreSSL）release-assets 的 TLS 握手会偶发
+/// `SSL_ERROR_SYSCALL`（三次里两次），而 `curl --retry` 不覆盖 SSL 错误（退出码 35 不在
+/// 它的重试列表里），Windows 10 自带的 curl 7.60.1 又不认 `--retry-all-errors`。
 ///
 /// `pub(crate)`：`update.rs` 取 SHA256SUMS 走的是同一个函数，两次对外请求因此
 /// 用同一个出口，不会出现「检查更新走了代理、下载没走」。
 pub(crate) fn fetch_url(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=FETCH_ATTEMPTS {
+        if attempt > 1 {
+            std::thread::sleep(std::time::Duration::from_millis(400 * u64::from(attempt - 1)));
+        }
+        match fetch_url_once(url, choice) {
+            Ok(body) => return Ok(body),
+            Err(e) => {
+                // 中间的失败不吞掉：现场报告只有「SHA256SUMS 无法下载」一句，没有任何可查
+                // 的线索 —— 失败原因（TLS？超时？404？）至少要落到日志里。
+                if attempt < FETCH_ATTEMPTS {
+                    log::warn(&i18n::tf("upd.fetch_retry", &[
+                        ("url", url),
+                        ("attempt", &attempt.to_string()),
+                        ("error", &e),
+                    ]));
+                }
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// 一次拉取尝试（不含重试）。两条实现（Windows 的 PowerShell 与其余平台的 curl）都在这里，
+/// 因为它们对代理的态度不同 —— 见 [`crate::netproxy`] 与下面那条分支上的注释。
+fn fetch_url_once(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<String, String> {
     #[cfg(windows)]
     {
         // 「跟随系统」继续交给 PowerShell：它按 WinINET 的系统设置走，正是这个选择的意思。
@@ -1110,7 +1148,7 @@ fn fetch_url_powershell(url: &str) -> Result<String, String> {
     // 参与这条链路。RawContentStream 是响应体的字节流，不经任何解码；Content 是字符串时
     // 退化成它的 UTF-8 编码。
     let ps = format!(
-        "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;$r=Invoke-WebRequest -Uri '{}' -Headers @{{Accept='application/vnd.github+json'; UserAgent='netsense'}} -TimeoutSec 10 -UseBasicParsing;$b=$null;$s=$r.RawContentStream;if($s){{$b=$s.ToArray()}};if(-not $b){{if($r.Content -is [byte[]]){{$b=$r.Content}}else{{$b=[Text.Encoding]::UTF8.GetBytes([string]$r.Content)}}}};$o=[Console]::OpenStandardOutput();$o.Write($b,0,$b.Length);$o.Flush()",
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;$r=Invoke-WebRequest -Uri '{}' -Headers @{{Accept='application/vnd.github+json'; UserAgent='netsense'}} -TimeoutSec 15 -UseBasicParsing;$b=$null;$s=$r.RawContentStream;if($s){{$b=$s.ToArray()}};if(-not $b){{if($r.Content -is [byte[]]){{$b=$r.Content}}else{{$b=[Text.Encoding]::UTF8.GetBytes([string]$r.Content)}}}};$o=[Console]::OpenStandardOutput();$o.Write($b,0,$b.Length);$o.Flush()",
         url.replace('\'', "''")
     );
     let out = std::process::Command::new("powershell")
@@ -1132,13 +1170,15 @@ fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<String, String> {
     // `--proto =https`：`-L` 跟随时，重定向落点也必须是 https。只校验我们传进来的那个 URL
     // 是不够的 —— 一个 https→http 的跳转会把明文请求送出去。这条筛选不会被重定向放宽
     // （curl 对跳转目标用的是同一份协议集，实测报 `Protocol "http" disabled (in redirect)`）。
+    // `--max-time 15`：现场成功拉取的那一次总耗时 8.66s，10s 的旧值把一个只是慢了一点的
+    // 连接直接记成失败。与 PowerShell 腿的 `-TimeoutSec` 取同一个数。
     let mut cmd = Command::new("curl");
     cmd.args([
         "-fsSL",
         "--proto",
         "=https",
         "--max-time",
-        "10",
+        "15",
         "-H",
         "Accept: application/vnd.github+json",
         "-H",

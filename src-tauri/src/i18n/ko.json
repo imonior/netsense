@@ -420,6 +420,7 @@
   "pal.iface_missing_none": "Windows에 이름이 {name}인 네트워크 어댑터가 없습니다 (이 컴퓨터에는 터널이 전혀 없습니다)",
   "upd.no_sums": "이 Release에 SHA256SUMS가 없어 검증되지 않은 에셋 설치를 거부합니다",
   "upd.sums_fetch": "SHA256SUMS 가져오기 실패: {error}",
+  "upd.fetch_retry": "{url} 가져오기 실패({attempt}번째 시도), 재시도합니다: {error}",
   "upd.not_in_sums": "SHA256SUMS에 {asset} 항목이 없습니다",
   "upd.checksum_mismatch": "{asset} 체크섬 불일치: 기대값 {want}, 실제 {got}",
   "upd.curl_start": "다운로드에서 curl을 시작하지 못했습니다: {error}",

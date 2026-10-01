@@ -420,6 +420,7 @@
   "pal.iface_missing_none": "there is no network adapter named {name} on Windows (this machine has no tunnels installed at all)",
   "upd.no_sums": "this release carries no SHA256SUMS, so installing its asset unverified is refused",
   "upd.sums_fetch": "fetching SHA256SUMS failed: {error}",
+  "upd.fetch_retry": "fetch of {url} failed (attempt {attempt}), retrying: {error}",
   "upd.not_in_sums": "{asset} is not listed in SHA256SUMS",
   "upd.checksum_mismatch": "checksum mismatch for {asset}: expected {want}, got {got}",
   "upd.curl_start": "the download could not start curl: {error}",
