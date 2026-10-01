@@ -6,9 +6,9 @@
 //!
 //! ## 三条硬规则
 //!
-//! 1. **worker 只属于当前 Active Profile 的 THEN 分支**。ELSE 分支里的常驻动作
-//!    不启动（它表达的是「离开这个环境时要维持什么」，而离开时并没有一个持续成立的
-//!    现场可维持），由 `Config::warnings` 明确报出，而不是静默不执行。
+//! 1. **worker 只属于当前 Active Profile 的 THEN 分支，或零命中时的兜底**。ELSE 分支
+//!    里的常驻动作不启动（它表达的是「离开这个环境时要维持什么」，而离开时并没有一个
+//!    持续成立的现场可维持），由 `Config::warnings` 明确报出，而不是静默不执行。
 //! 2. **新的下发之前必须先停掉旧的一组**（见 `engine::deactivate`）。否则旧环境的
 //!    「保持 VPN 连接」会和新环境抢同一张路由表 —— 那种故障没有日志能解释。
 //! 3. **一条 worker 同一时刻只跑一次检查**（[`await_tick`] 的重入闸）。上一次还没回来
@@ -66,6 +66,12 @@ pub enum WorkerState {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerStatus {
     pub id: String,
+    /// 这条 worker 属于哪个 Profile（兜底则是保留名 `__fallback__`）。
+    ///
+    /// 动作 id 只在**一个** Profile 内唯一，而 `workers[]` 是全部 worker 的平铺列表：
+    /// 界面要把一枚实时状态挂回它那张卡片，除了 id 还必须按归属过滤，否则两个 Profile
+    /// 里同名（编辑器生成的 id 只在自己那份表单里查重）的动作会互相串台。
+    pub profile_id: String,
     /// 维持的是什么（`wireguard:office` / `vpn:proton/My VPN` / `run scripts/x.sh`）
     pub label: String,
     pub state: WorkerState,
@@ -204,6 +210,7 @@ fn run_worker(
     let label = provider::label_for(&action);
     let mut status = WorkerStatus {
         id: action.id.clone(),
+        profile_id: profile_id.clone(),
         label: label.clone(),
         state: WorkerState::Pending,
         interval: interval.as_secs(),
@@ -332,6 +339,7 @@ impl Session {
             let stop = Arc::new(AtomicBool::new(false));
             statuses.push(WorkerStatus {
                 id: action.id.clone(),
+                profile_id: profile_id.to_string(),
                 label: provider::label_for(action),
                 state: WorkerState::Pending,
                 interval: interval.as_secs(),
@@ -370,6 +378,11 @@ impl Session {
 
     pub fn statuses(&self) -> &[WorkerStatus] {
         &self.statuses
+    }
+
+    /// 这一组 worker 属于谁。引擎靠它区分「兜底的那一组」与「某个 Profile 的那一组」。
+    pub fn owner_id(&self) -> &str {
+        &self.profile_id
     }
 
     /// 收下一次报告。返回 `false` = 它属于已被取代的那一组，调用方丢弃即可。
@@ -443,6 +456,7 @@ mod tests {
     fn status(id: &str) -> WorkerStatus {
         WorkerStatus {
             id: id.into(),
+            profile_id: "home".into(),
             label: id.into(),
             state: WorkerState::Pending,
             interval: 30,
@@ -450,6 +464,15 @@ mod tests {
             error: None,
             at: 0,
         }
+    }
+
+    /// 前端要按归属把 worker 徽标过滤回各自的表单：`profile_id` 必须出现在序列化
+    /// 结果里 —— 缺了它，两个 Profile 里同名（id 只在各自表单内查重）的动作会串台。
+    #[test]
+    fn a_status_carries_its_owner_profile_id_across_the_wire() {
+        let v = serde_json::to_value(status("p1")).unwrap();
+        assert_eq!(v["profile_id"], "home");
+        assert_eq!(v["id"], "p1");
     }
 
     #[test]

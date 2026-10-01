@@ -409,6 +409,9 @@
   const BRANCHES = () => (sel && sel.kind === "profile" ? ["then.", "else."] : [""]);
   const branchTitle = (pre) =>
     pre === "then." ? "editor.then" : pre === "else." ? "editor.else_branch" : "editor.global_fallback";
+  /// 与 Rust 侧 `config::FALLBACK_ID` 同一个保留 id（镜像，不是配置项）：
+  /// 引擎用这个合成身份记录兜底的运行留痕与 worker 归属，界面按它对上号。
+  const FALLBACK_ID = "__fallback__";
 
   /* —————————————————————— 引擎视图查询 —————————————————————— */
   const profileView = (id) => (view && view.profiles || []).find(p => p.id === id) || null;
@@ -993,14 +996,12 @@
     $("verify-mask").hidden = false;
   }
 
-  /* —————————————————————— 第 4 列：3B 动作（先 THEN 后 ELSE） —————————————————————— */
+  /* —————————————————————— 第 4 列：3B 动作（先 THEN 后 ELSE；兜底只有一块） —————————————————————— */
   function renderActColumn() {
     const box = $("col-act");
     if (!sel) { box.innerHTML = emptySel(); return; }
-    if (sel.kind === "fallback") {
-      box.innerHTML = `<div class="empty">${esc(t("editor.action_none"))}</div>`;
-      return;
-    }
+    // 兜底也有 3B（BRANCHES() 对它返回 [""]）：零命中期间的一次性动作与常驻 worker
+    // 都由引擎真跑，所以这里和 THEN 一样可编辑，只是没有 ELSE 那一块。
     box.innerHTML = BRANCHES().map(pre => actBlock(pre)).join("");
   }
 
@@ -1019,7 +1020,7 @@
 
     html += `<div class="group-title"><span>${esc(t("editor.persistent_title"))}</span>` +
       `<button class="mini-btn" data-act="add-persist" data-pre="${pre}">${esc(t("editor.add_persistent"))}</button></div>` +
-      `<div class="hint">${esc(t(pre === "else." ? "editor.persistent_else" : "editor.persistent_hint"))}</div>`;
+      `<div class="hint">${esc(t(pre === "else." ? "editor.persistent_else" : pre === "" ? "editor.persistent_fallback" : "editor.persistent_hint"))}</div>`;
     const pl = b.persistent || [];
     html += pl.length ? pl.map((a, i) => persistCard(`${pre}persistent.${i}`, pre, a, i, pl.length)).join("")
       : `<div class="empty">${esc(t("editor.action_none"))}</div>`;
@@ -1199,10 +1200,13 @@
 
   /// 最近一次 3B1 运行是否就是「这一列的这一个分支」。
   /// 必须三者都对上才显示：别的 Profile 或另一分支的结果挂在这张表单上，
-  /// 读起来就像刚刚跑过一遍，是纯粹的误导。
+  /// 读起来就像刚刚跑过一遍，是纯粹的误导。兜底没有分支可言（引擎记的是 THEN），
+  /// 只认合成 id。
   function runOfBranch(pre) {
     const lr = view && view.last_run;
-    if (!lr || !sel || sel.kind !== "profile") return null;
+    if (!lr || !sel) return null;
+    if (sel.kind === "fallback") return lr.profile_id === FALLBACK_ID ? lr : null;
+    if (sel.kind !== "profile") return null;
     return (lr.profile_id === sel.id && lr.branch === pre.slice(0, -1)) ? lr : null;
   }
 
@@ -1255,21 +1259,26 @@
     overdue: ["editor.worker_overdue", "run"],
   };
 
-  /// 此刻真的在被维持的 worker；不满足条件时返回 null。
+  /// 此刻真的在被维持的 worker（已按归属过滤）；不满足条件时返回 null。
   ///
-  /// 别的分支与别的方案**不会**有 worker（常驻动作只随 Active 的 THEN 起，见后端
-  /// `automation::persistent` 规则 1）。这里返回 null 让徽标全部留空：把上一个环境的
-  /// 「已恢复」挂在用户正在填的表单上，比什么都不显示误导得多。
+  /// worker 只随「Active 的 THEN」或「零命中的兜底」起（见后端 `automation::persistent`
+  /// 规则 1）。这里返回 null 让徽标全部留空：把上一个环境的「已恢复」挂在用户正在填的
+  /// 表单上，比什么都不显示误导得多。
   function liveWorkers() {
     const ws = view && view.workers;
-    if (!Array.isArray(ws) || !ws.length) return null;
-    if (!sel || sel.kind !== "profile" || sel.id !== activeId()) return null;
-    return ws;
+    if (!Array.isArray(ws) || !ws.length || !sel) return null;
+    // `workers[]` 是全部 Profile 的平铺列表，动作 id 只在各自表单内唯一：
+    // 不按 profile_id 过滤，两个 Profile 里同名的动作会互相串台。
+    const owner = sel.kind === "fallback"
+      ? FALLBACK_ID
+      : (sel.id === activeId() ? sel.id : null);
+    if (!owner) return null;
+    return ws.filter(w => w.profile_id === owner);
   }
 
   /// 常驻 worker 的实时状态。与 3B1 一样只改徽标，重建表单会把用户正在填的东西冲掉。
   function refreshWorkers() {
-    if (!sel || sel.kind !== "profile") return;
+    if (!sel) return;
     const ws = liveWorkers();
     for (const pre of BRANCHES()) {
       const list = (scope(pre).persistent) || [];
@@ -1279,8 +1288,9 @@
         const err = $("werr-" + key);
         if (chip) { chip.className = "achip"; chip.textContent = ""; chip.title = ""; }
         if (err) { err.hidden = true; err.textContent = ""; }
-        // worker 只随 Active 的 THEN 起：ELSE 那一支的表单上永远不该有它的状态
-        if (!ws || pre !== "then." || a.enabled === false || !chip) return;
+        // ELSE 那一支的表单上永远不该有 worker 状态（它不会起任何 worker）；
+        // 兜底（pre=""）与 THEN 一样会起。
+        if (!ws || pre === "else." || a.enabled === false || !chip) return;
         const w = ws.find(x => x.id === a.id);
         // 表单里有这条、worker 集合里却没有 = 它此刻根本没在被维持（草稿里刚加的、
         // 或改过 id 之后还没重新应用）。留空：「起好了但还没跑完第一次核对」后端会用
@@ -1796,11 +1806,17 @@
 
   /// `save_global` 是**整份替换**：兜底与脚本白名单一起写，缺一个就等于把它清空了。
   /// 白名单的编辑界面已经搬到软件设置里，这里必须原样带过去，不能顺手丢掉。
+  /// 兜底的 3B 同理：不带 one_shot / persistent，一次保存就把用户配的动作全删了。
   async function saveGlobal(fallback) {
-    const payload = {
-      fallback: fallback ? { enabled: fallback.enabled !== false, ...(fallback.network ? { network: cleanNetwork(fallback.network) } : {}) } : null,
-      allowed_scripts: globalDraft.allowed_scripts,
-    };
+    const fb = fallback ? { enabled: fallback.enabled !== false } : null;
+    if (fb) {
+      if (fallback.network) fb.network = cleanNetwork(fallback.network);
+      const one = cleanActionList(fallback.one_shot, "one");
+      if (one.length) fb.one_shot = one;
+      const per = cleanActionList(fallback.persistent, "persist");
+      if (per.length) fb.persistent = per;
+    }
+    const payload = { fallback: fb, allowed_scripts: globalDraft.allowed_scripts };
     try {
       await invoke("save_global", { payload: JSON.stringify(payload) });
       toast(t("editor.saved", { name: t("editor.global_fallback") }));
@@ -1980,7 +1996,11 @@
         await loadAll(false);
       } catch (err) { toast(String(err)); }
     } else if (globalDraft.fallback) {
+      // 兜底的「删除」= 回到「什么都不做」：网络与 3B 一起清掉（单清网络在网卡那一格
+      // 有自己的小按钮）。保留下面的启用开关 —— 用户删的是内容，不是兜底本身。
       delete globalDraft.fallback.network;
+      delete globalDraft.fallback.one_shot;
+      delete globalDraft.fallback.persistent;
       renderAll();
     }
   };

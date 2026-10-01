@@ -50,7 +50,7 @@ use crate::automation::{self, one_shot, persistent, AllowedScripts};
 use crate::conditions::{
     evaluate_all, eval_profile, Evaluation, NetworkSnapshot, ProfileEvaluation,
 };
-use crate::config::{Branch, Config, Profile};
+use crate::config::{Branch, Config, FallbackConfig, Profile, FALLBACK_ID};
 use crate::detection::{self, Scheduler};
 use crate::i18n;
 use crate::log;
@@ -540,6 +540,23 @@ impl Engine {
         n
     }
 
+    /// 只叫停属于兜底的那一组 worker。返回叫停条数（0 = 没有或不属于兜底）。
+    ///
+    /// 存在的理由：兜底的启用/内容变化只该动自己那一组 —— 当前这一组若属于某个
+    /// Active Profile（用户在零命中判定落地前的一瞬间改的配置），停它就是误伤。
+    fn stop_fallback_workers(&mut self) -> usize {
+        let mine = self
+            .workers
+            .as_ref()
+            .map(|s| s.owner_id() == FALLBACK_ID)
+            .unwrap_or(false);
+        if mine {
+            self.stop_workers()
+        } else {
+            0
+        }
+    }
+
     /// 为这一支分支的常驻动作起一组 worker。**只有 THEN 分支会走到这里** ——
     /// ELSE 表达的是「离开这个环境时要维持什么」，而离开时并没有一个持续成立的现场。
     ///
@@ -668,6 +685,10 @@ impl Engine {
             // 只要真下发过，就得让下一轮重看一遍现场：3A 的读回校验用的是 `fresh_status`
             // （绕过缓存），而引擎这份快照走的是缓存路径，两者在这里不是一回事。
             self.request_resample();
+            // 这次下发一碰网卡，旧的兜底记档就不再描述当前网络了（哪怕下发失败，
+            // 现场也可能已经被改了一半）—— 作废它，否则下一次零命中会误以为
+            // 「兜底早应用过」而跳过重新下发。
+            self.fallback_fp = None;
             match network::apply_3a(&state.plat, net) {
                 Stage3A::Failed { reason } => {
                     // 保底：探测里开了 fallback 就回落 DHCP（3A 失败处置的一部分）
@@ -1228,7 +1249,7 @@ fn reconcile(
             } else {
                 eng.stop_monitor();
             }
-            apply_fallback(state, eng, cfg);
+            apply_fallback(state, eng, cfg, allowed);
         }
         Decision::Active { id } => {
             eng.conflict_shown.clear();
@@ -1288,35 +1309,92 @@ fn reconcile(
     }
 }
 
-/// 零命中时应用 fallback 网络配置（如果配了）。
+/// 零命中时的处置：3A（如果配了网卡配置）+ 3B（一次性动作与常驻 worker）。
 ///
-/// 它不是 Profile：没有条件、不参与匹配、永远不会 Conflict。存在理由只有一个 ——
-/// 上一个 Profile 可能下发了静态 IP，零命中时必须有「回到自动获取」的落点。
-fn apply_fallback(state: &Arc<AppState>, eng: &mut Engine, cfg: &Config) {
-    let Some(net) = cfg
-        .fallback
-        .as_ref()
-        .filter(|f| f.enabled)
-        .and_then(|f| f.network.as_ref())
-    else {
+/// 它不是 Profile：没有条件、不参与匹配、永远不会 Conflict。网络配置的存在理由只有一个 ——
+/// 上一个 Profile 可能下发了静态 IP，零命中时必须有「回到自动获取」的落点；3B 则是
+/// 「零命中期间该维持什么」，与 THEN 分支同一套执行链路。
+///
+/// 指纹覆盖整份 fallback 内容（网络 + 动作）：改任何一项都会重新走一遍，
+/// 没改就一个字都不动 —— 否则每一轮评估都会重跑动作、重启 worker。
+fn apply_fallback(
+    state: &Arc<AppState>,
+    eng: &mut Engine,
+    cfg: &Config,
+    allowed: &Arc<AllowedScripts>,
+) {
+    let Some(fb) = cfg.fallback.as_ref().filter(|f| f.enabled) else {
+        // 兜底被禁用/清空：之前那一组 worker 不该继续维持 —— 它守的是一个
+        // 用户已经撤销的期望。记档一并作废：重新启用时要重新下发，而不是被
+        // 「内容没变」挡住。
+        eng.stop_fallback_workers();
+        eng.fallback_fp = None;
         return;
     };
-    let fp = format!("fallback|{}", serde_json::to_string(net).unwrap_or_default());
+    let has_actions = one_shot::any_enabled(&fb.one_shot)
+        || fb.persistent.iter().any(|a| a.enabled);
+    if fb.network.is_none() && !has_actions {
+        // 全空的兜底 = 什么都不做（保持现状）。空配置的语义是「不干预」，
+        // 不是「把之前干预过的东西撤掉」。
+        eng.stop_fallback_workers();
+        eng.fallback_fp = None;
+        return;
+    }
+    let fp = format!("fallback|{}", serde_json::to_string(fb).unwrap_or_default());
     if eng.fallback_fp.as_deref() == Some(fp.as_str()) {
         return;
     }
-    // 下发的就是本机真实的网络改动：下一轮必须先重采样，否则「零命中 → 回落 DHCP」
-    // 之后引擎还拿着静态 IP 时代的旧快照，指纹里的 primary/接口列表都可能是老的。
-    eng.request_resample();
-    let applied = network::apply_3a(&state.plat, net);
-    if let Stage3A::Failed { reason } = applied {
-        log::error(&i18n::tf("engine.fallback_failed", &[("error", &reason)]));
-        return;
+    // 新的一组起来之前先把旧的叫停 —— 与 `execute_branch` 同一条顺序规则：
+    // 旧配置的「保持 VPN 连接」不能在 3A 下发的同时还去抢路由表。
+    eng.stop_fallback_workers();
+    // —— 3A：下发 + 回读校验 ——
+    let mut three_a = ThreeAOutcome::Skipped;
+    if let Some(net) = &fb.network {
+        // 下发的就是本机真实的网络改动：下一轮必须先重采样，否则「零命中 → 回落 DHCP」
+        // 之后引擎还拿着静态 IP 时代的旧快照，指纹里的 primary/接口列表都可能是老的。
+        eng.request_resample();
+        match network::apply_3a(&state.plat, net) {
+            Stage3A::Failed { reason } => {
+                log::error(&i18n::tf("engine.fallback_failed", &[("error", &reason)]));
+                // 3A 失败 = 3B 一条都不跑（与分支同一道硬屏障）；记档不写，
+                // 下一轮（网络或配置一变）会自动重试。
+                return;
+            }
+            Stage3A::Applied => three_a = ThreeAOutcome::Applied,
+        }
     }
     eng.fallback_fp = Some(fp);
     eng.applied_fp = None;
     eng.active_id = None;
     log::info(&i18n::t("engine.fallback_applied"));
+    // —— 3B：合成一个说得清归属的身份 ——
+    let holder = fallback_holder(fb);
+    let branch = holder
+        .then
+        .as_ref()
+        // i18n-exempt: panic 消息说的是内部不变量，给改代码的人看 —— 它既不进字典，
+        // 也没有任何一条路径能把它渲染到界面上。
+        .expect("fallback_holder 必然挂着一支 THEN");
+    eng.submit_one_shot(state, &holder, Which::Then, branch, allowed, three_a);
+    eng.start_workers(state, &holder, branch, allowed);
+}
+
+/// 给兜底合成一个「说得清归属」的 Profile。
+///
+/// 3B1 的留痕（`RunRecord`）与 3B2 的 worker 归属都按 Profile id 记录；兜底没有 Profile，
+/// 合成一个（id 用保留名 [`FALLBACK_ID`]）之后，界面与日志不必为「这条记录是不是兜底的」
+/// 另写一套特判。`network` 留空：3A 已由 [`apply_fallback`] 亲自跑过，挂上去会二次下发。
+fn fallback_holder(fb: &FallbackConfig) -> Profile {
+    Profile {
+        id: FALLBACK_ID.to_string(),
+        name: i18n::t("engine.fallback_name"),
+        then: Some(Branch {
+            network: None,
+            one_shot: fb.one_shot.clone(),
+            persistent: fb.persistent.clone(),
+        }),
+        ..Default::default()
+    }
 }
 
 /// 「立即应用」：**仍然要经过该 Profile 自己的条件判定**（方案第 38/39/40 条）。
@@ -1832,5 +1910,42 @@ mod tests {
             !eng.take_resample_request(),
             "取走即清：再往后该回到自己的采样节律"
         );
+    }
+
+    /// 兜底的身份是合成的：id 用保留名（运行留痕与 worker 归属都认它）、名字来自字典
+    /// （用户没有可改的 name）、网络必须留空 —— 3A 由 `apply_fallback` 亲自跑过，
+    /// 挂在这支分支上会让 `execute_branch` 再下发一次。
+    #[test]
+    fn the_fallback_holder_is_a_synthetic_identity_for_attribution_only() {
+        use crate::config::{OneShotAction, OneShotActionType, PersistentAction, PersistentActionType};
+        let fb = FallbackConfig {
+            enabled: true,
+            network: None,
+            one_shot: vec![OneShotAction {
+                id: "o1".into(),
+                enabled: true,
+                action: OneShotActionType::LaunchApp {
+                    app: "Notes.app".into(),
+                    args: Vec::new(),
+                },
+            }],
+            persistent: vec![PersistentAction {
+                id: "p1".into(),
+                enabled: true,
+                action: PersistentActionType::KeepWireGuardConnected {
+                    tunnel: "wg0".into(),
+                    interval_secs: 30,
+                },
+            }],
+        };
+        let holder = fallback_holder(&fb);
+        assert_eq!(holder.id, FALLBACK_ID, "归属记录用的就是保留 id");
+        assert!(holder.enabled, "合成身份永远可执行：enabled 描述的是用户的选择");
+        assert!(holder.else_branch.is_none(), "兜底没有 ELSE 可言");
+        assert!(holder.rules.is_empty(), "它不参与匹配，条件一个都不该有");
+        let then = holder.then.as_ref().expect("3B 挂在这支分支上");
+        assert!(then.network.is_none(), "3A 不能挂在合成分支上（见函数文档）");
+        assert_eq!(then.one_shot.len(), 1, "动作按原样带过去");
+        assert_eq!(then.persistent.len(), 1);
     }
 }

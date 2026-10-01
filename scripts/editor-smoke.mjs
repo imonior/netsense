@@ -1000,8 +1000,10 @@ const activeOffice = (workers) =>
     null,
     workers,
   );
+// worker 集合是全部 Profile 的平铺列表：动作 id 只在各自表单内唯一，所以每一条都必须
+// 带自己的归属（profile_id），界面才分得清两个 Profile 里同名的 p1。
 const status = (over) => ({
-  id: "p1", label: "wireguard:wg0", state: "repaired",
+  id: "p1", profile_id: "office", label: "wireguard:wg0", state: "repaired",
   interval: 15, repairs: 2, at: 100, ...over,
 });
 
@@ -1020,17 +1022,17 @@ check("faulted 的徽标是红的", findById("wchip-then.persistent.0").classNam
 eq("失败原文摊在卡片上，不留给用户猜", werr?.textContent, "tunnel wg0 not found");
 check("失败原文不是 hidden（藏着等于没说）", werr?.hidden === false);
 
-h.view = activeOffice([{ id: "p1", label: "wireguard:wg0", state: "satisfied", interval: 15, repairs: 0, at: 100 }]);
+h.view = activeOffice([{ id: "p1", profile_id: "office", label: "wireguard:wg0", state: "satisfied", interval: 15, repairs: 0, at: 100 }]);
 h.refreshLive();
 eq("satisfied 与 repaired 用词不同：一个什么都没做，一个修过一次",
   findById("wchip-then.persistent.0")?.textContent, strings["editor.worker_satisfied"]);
 
-h.view = activeOffice([{ id: "p1", label: "wireguard:wg0", state: "pending", interval: 15, repairs: 0, at: 100 }]);
+h.view = activeOffice([{ id: "p1", profile_id: "office", label: "wireguard:wg0", state: "pending", interval: 15, repairs: 0, at: 100 }]);
 h.refreshLive();
 eq("pending 由后端发（worker 起了，第一次核对还没回）",
   findById("wchip-then.persistent.0")?.textContent, strings["editor.worker_pending"]);
 check("未知的状态取值不会串成一条假的成功徽标", (() => {
-  h.view = activeOffice([{ id: "p1", label: "x", state: "some_future_state", interval: 15, at: 1 }]);
+  h.view = activeOffice([{ id: "p1", profile_id: "office", label: "x", state: "some_future_state", interval: 15, at: 1 }]);
   h.refreshLive();
   return findById("wchip-then.persistent.0").textContent === strings["editor.worker_pending"];
 })());
@@ -1046,6 +1048,12 @@ h.view = engineView(
 );
 h.refreshLive();
 eq("Active 的是别的方案：这一支的徽标不能借它的状态来显示",
+  findById("wchip-then.persistent.0")?.textContent, "");
+
+// worker 列表是平的，动作 id 只在各自表单内唯一：归属对不上时，哪怕 id 一样也不许点亮。
+h.view = activeOffice([status({ profile_id: "home" })]);
+h.refreshLive();
+eq("同 id 但属于别的方案：这一支的徽标同样不认它",
   findById("wchip-then.persistent.0")?.textContent, "");
 
 h.view = activeOffice([status({})]);
@@ -1094,8 +1102,23 @@ check("兜底的条件区是空的，并说明「空 = 任意条件」",
   findById("col-cond").textContent.includes(strings["editor.any_conditions"]));
 check("兜底的 3A 没有分支前缀（它没有 THEN / ELSE 之分）",
   !!byBind("network.mode") && byBind("then.network.mode") === null);
-check("Action 列对兜底关门：它只处置网卡，不跑动作",
-  findById("col-act").textContent === strings["editor.action_none"]);
+check("兜底的 3B 同样没有分支前缀，并且可以编辑（示例里的两条动作都在）",
+  !!byBind("one_shot.0.action.app") && !!byBind("persistent.0.action.path") &&
+  byBind("then.one_shot.0.action.app") === null);
+check("兜底只有一块：没有 ELSE 那一块的标题与提示",
+  !findById("col-act").textContent.includes(strings["editor.else_branch"]) &&
+  !findById("col-act").textContent.includes(strings["editor.persistent_else"]));
+check("兜底的常驻动作提示说的是「零命中期间维持」",
+  findById("col-act").textContent.includes(strings["editor.persistent_fallback"]));
+check("兜底的添加按钮挂在无前缀的 data-pre 上",
+  !!byActPre("add-one", "") && !!byActPre("add-persist", ""));
+// 兜底的 worker 由后端用合成 id 归属（与 editor.html 的 FALLBACK_ID 镜像）。广播到的这一帧
+// 可能是切换中的瞬态，但表单旁边该看到的是「兜底自己那条 f2 被维持到哪一步」—— 认合成归属，
+// 不认巧合的同名 id。视图顺手留给下一组：office 仍命中。
+h.view = activeOffice([{ id: "f2", profile_id: "__fallback__", label: "script:keepalive.sh", state: "satisfied", interval: 60, repairs: 0, at: 1 }]);
+h.refreshLive();
+eq("归兜底管的 worker（profile_id 是合成 id）把状态亮在兜底卡片上",
+  findById("wchip-persistent.0")?.textContent, strings["editor.worker_satisfied"]);
 resetSaves();
 await h.$("btn-save").onclick();
 let g = saveOf("save_global")?.payload;
@@ -1104,6 +1127,10 @@ check("兜底不是 Profile：payload 里没有 rules / detection", g && !("rule
 eq("save_global 是整份替换：白名单必须原样带过去，不能因为这里没编辑就丢掉",
   g?.allowed_scripts, configFixture.allowed_scripts);
 check("save_global 不会顺手写 profiles", g && !("profiles" in g));
+check("兜底的动作原样往返：一次保存不会把它们删掉",
+  g?.fallback?.one_shot?.length === 1 && g.fallback.one_shot[0].action.app === "/Applications/Notes.app" &&
+  g?.fallback?.persistent?.length === 1 && g.fallback.persistent[0].action.path === "scripts/keepalive.sh" &&
+  g.fallback.persistent[0].action.interval_secs === 60);
 check("脚本白名单的编辑界面已经搬到软件设置", findById("scripts-box") === null);
 
 group("立即应用前的执行清单");

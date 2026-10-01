@@ -11,7 +11,7 @@ use crate::i18n;
 pub use model::{
     Branch, Condition, ConditionType, Config, DetectionMode, FallbackConfig, HealthConfig, Mode,
     NetworkConfig, OneShotAction, OneShotActionType, PersistentAction, PersistentActionType,
-    Profile, ProbeMode, Rule, V6Mode, SCHEMA,
+    Profile, ProbeMode, Rule, V6Mode, FALLBACK_ID, SCHEMA,
 };
 
 /// 校验产物：一个可展示的告警。
@@ -110,6 +110,11 @@ impl Config {
             if ids.contains(&p.id.as_str()) {
                 return Err(i18n::tf("cfg.dup_id", &[("id", &p.id)]));
             }
+            // 兜底的合成身份用的是保留 id（见 [`FALLBACK_ID`]）：真 Profile 占了它，
+            // 运行留痕与 worker 归属就会把两件事说成一件。
+            if p.id == FALLBACK_ID {
+                return Err(i18n::tf("cfg.reserved_id", &[("id", &p.id)]));
+            }
             ids.push(&p.id);
             if p.rules.is_empty() {
                 return Err(i18n::tf("cfg.no_rules", &[("name", &p.name)]));
@@ -147,6 +152,9 @@ impl Config {
             if let Some(n) = &fb.network {
                 validate_network("fallback.network", n)?;
             }
+            // 兜底的动作也要过同一道校验：它跑起来和一条 THEN 分支没有区别
+            //（3A 屏障、3B1 屏障、3B2 worker 都是同一套代码路径）。
+            validate_actions("fallback", &fb.one_shot, &fb.persistent)?;
         }
         Ok(())
     }
@@ -263,10 +271,21 @@ fn validate_branch(what: &str, b: &Branch) -> Result<(), String> {
     if let Some(n) = &b.network {
         validate_network(what, n)?;
     }
+    validate_actions(what, &b.one_shot, &b.persistent)
+}
+
+/// 一个分支（或兜底）里的 3B 动作：载荷完整、id 唯一。
+///
+/// 与 [`validate_branch`] 拆开是因为兜底同样有 3B —— 它没有条件，但动作校验一条都不能少。
+fn validate_actions(
+    what: &str,
+    one_shot: &[OneShotAction],
+    persistent: &[PersistentAction],
+) -> Result<(), String> {
     // 3B1 与 3B2 共用一套 id。动作结果（`EngineView.last_run`）是按 id 找回对应卡片的，
     // 撞名会让两条动作显示同一个成败；3B2 落地后那条更会成为串台。
     let mut ids: Vec<&str> = Vec::new();
-    for a in &b.one_shot {
+    for a in one_shot {
         claim_action_id(what, &mut ids, &a.id, "one_shot")?;
         let missing = match &a.action {
             OneShotActionType::LaunchApp { app, .. } => {
@@ -300,7 +319,7 @@ fn validate_branch(what: &str, b: &Branch) -> Result<(), String> {
             ]));
         }
     }
-    for a in &b.persistent {
+    for a in persistent {
         claim_action_id(what, &mut ids, &a.id, "persistent")?;
         let (kind, interval) = match &a.action {
             PersistentActionType::PeriodicScript { path, interval_secs, .. } => {
@@ -604,6 +623,45 @@ mod tests {
         let cfg = Config::from_json(raw).unwrap();
         let err = cfg.validate().unwrap_err();
         assert!(err.ends_with("a"), "报错要以撞名的那个 id 收尾: {}", err);
+    }
+
+    /// 兜底的 3B 现在真的会跑（`engine::apply_fallback`），所以它的动作载荷必须
+    /// 和分支里的过同一道校验 —— 「配了却什么都没发生」的来源不分分支还是兜底。
+    #[test]
+    fn fallback_actions_go_through_the_same_validation() {
+        dicts_ready();
+        let raw = r#"{"schema":1,"profiles":[],
+          "fallback":{"network":{"mode":"dhcp"},
+          "one_shot":[{"id":"o1","action":{"type":"launch_app","app":""}}]}}"#;
+        let cfg = Config::from_json(raw).unwrap();
+        let err = cfg.validate().expect_err("兜底的空动作载荷必须被拒绝");
+        assert!(err.contains("app") && err.contains("fallback"), "报错内容: {}", err);
+
+        let raw = r#"{"schema":1,"profiles":[],
+          "fallback":{"persistent":[{"id":"x","action":{"type":"keep_wireguard_connected","tunnel":""}}]}}"#;
+        let cfg = Config::from_json(raw).unwrap();
+        let err = cfg.validate().expect_err("兜底的常驻动作同样要校验");
+        assert!(err.contains("tunnel"), "报错内容: {}", err);
+
+        // 3B1 与 3B2 在兜底里也共用一套 id
+        let raw = r#"{"schema":1,"profiles":[],
+          "fallback":{"one_shot":[{"id":"x","action":{"type":"launch_app","app":"Notes.app"}}],
+                      "persistent":[{"id":"x","action":{"type":"keep_wireguard_connected","tunnel":"wg0"}}]}}"#;
+        let cfg = Config::from_json(raw).unwrap();
+        let err = cfg.validate().expect_err("兜底跨列表撞 id 必须被拒绝");
+        assert!(err.ends_with("x"), "报错内容: {}", err);
+    }
+
+    /// `__fallback__` 是引擎为兜底合成身份预留的 id：真 Profile 占了它，
+    /// 运行留痕与 worker 归属就会把两件事说成一件。
+    #[test]
+    fn the_fallback_id_is_reserved_for_the_synthetic_identity() {
+        dicts_ready();
+        let raw = r#"{"schema":1,"profiles":[
+          {"id":"__fallback__","name":"F","rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}]}]}"#;
+        let cfg = Config::from_json(raw).unwrap();
+        let err = cfg.validate().expect_err("保留 id 必须被拒绝");
+        assert!(err.contains(FALLBACK_ID), "报错要带上那个 id: {}", err);
     }
 
     /// 前端 `clean*` 序列化出来的动作标签必须能被 serde 认出来。

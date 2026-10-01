@@ -374,7 +374,11 @@ the user's NIC. Rewriting by hand against `config.example.json` is the documente
     }
   ],
   "fallback": { "enabled": true,                      // zero-match handling; NOT a Profile
-    "network": { "mode": "dhcp", "dns": "", "v6mode": "automatic" } }
+    "network": { "mode": "dhcp", "dns": "", "v6mode": "automatic" },
+    "one_shot": [ { "id": "f1", "enabled": true,
+      "action": { "type": "launch_app", "app": "/Applications/Notes.app" } } ],
+    "persistent": [ { "id": "f2", "enabled": true,
+      "action": { "type": "periodic_script", "path": "scripts/keepalive.sh", "interval_secs": 60 } } ] }
 }
 ```
 
@@ -383,7 +387,11 @@ Key modelling points, each of which is easy to get wrong:
 - **`id` is the stable handle**, names are decoration. IPC, status reports and "Apply now" all address a
   Profile by `id`, so renaming one cannot point the state at a different Profile.
 - **`fallback` is not a Profile.** It has no conditions, so it never participates in matching and can
-  never be picked as "current"; it is a top-level field that only handles zero-match.
+  never be picked as "current"; it is a top-level field that only handles zero-match. It carries the same
+  `network` + `one_shot` + `persistent` shape as a THEN branch and goes through the same execution paths
+  (3A barrier, then 3B1 / 3B2) — only the identity differs: runs and workers are attributed to the
+  reserved id `__fallback__` (`config::FALLBACK_ID`, which `validate()` refuses to let a real Profile
+  take), and its worker group is torn down the moment any Profile becomes Active.
 - **For the fields that honour it, a missing optional key means "don't touch it" and an empty string
   means "clear it".** `v6mode` and `dns` are both modelled this way, and each keeps the distinction all
   the way down to the wire (§7): `None` pushes no command at all on all three platforms, `Some("")`
@@ -465,7 +473,8 @@ trait rather than a per-kind provider trio: the kinds differ only in which two P
 three traits would each have exactly one implementation and would add a file per action type without
 adding a seam anyone can substitute.
 
-- **Lifecycle: one worker thread per enabled action, started only with Active's THEN branch.** `else`
+- **Lifecycle: one worker thread per enabled action, started only with Active's THEN branch or by the
+  zero-match fallback** (whose synthetic holder makes its group addressable as `__fallback__`). `else`
   branches describe a state to return to, not one to maintain, so a `persistent` action configured there
   cannot run — `Config::warnings()` says so instead of leaving the user to discover it.
 - **The listed order only orders worker *start*** (`START_SPACING` staggers them); once running, workers
@@ -479,7 +488,9 @@ adding a seam anyone can substitute.
 - **Workers never elevate** (see §4): an unattended repeating loop plus an interactive auth UI is a
   permission dialog every N seconds.
 - **Status reports only on change**, carrying a monotonic `generation`; a late report from a superseded
-  session is dropped rather than painted onto the new one. The engine folds them into
+  session is dropped rather than painted onto the new one. Each entry also carries its owner's
+  `profile_id` — action ids are only unique inside one form, and `workers[]` is a flat list, so the
+  editor filters by ownership before painting a chip. The engine folds them into
   `EngineView.workers` (`pending` / `satisfied` / `repaired` / `faulted` / `overdue`), which the editor
   shows as a chip per card and the popup collapses into one "Maintained" line. A worker's failure
   **never** changes Profile state — same layering as 3B1: 3A owns ERROR, 3B only leaves traces.
@@ -828,7 +839,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **515 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **518 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1316,7 +1327,7 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 | **No Active Profile / Active / Conflict** | The 0 / 1 / 2+ outcome of `decide()`. Conflict applies nothing and names the candidates — there is no tie-break. |
 | **ERROR** | The *execution* verdict: 3A failed. Distinct from Conflict, which is a *condition*-layer verdict. |
 | **3A** | The network configuration itself: IP / mask / gateway / DNS / IPv6 / static routes. |
-| **3B1 / 3B2** | One-shot actions (listed order = execution order, run once per entry into Active) vs. persistent workers (desired state, maintained while Active). |
+| **3B1 / 3B2** | One-shot actions (listed order = execution order, run once per entry into Active) vs. persistent workers (desired state, maintained while Active's THEN — or the zero-match fallback — holds). |
 | **Apply → Verify** | The 3A barrier: write the configuration, then read it back from the OS. Exit codes are not evidence. |
 | **Tick / `TickOutcome`** | One check of a persistent action's desired state: `Satisfied` (zero commands issued), `Repaired`, `Faulted(reason)`. |
 | **generation** | The monotonic id of a worker session; reports from a superseded session are dropped rather than attributed. |
@@ -1348,9 +1359,10 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
   remedies differ: "this environment's conditions/config are wrong" versus "one thing inside an
   environment that is correctly in place didn't happen".
 - 3B is split: **3B1 one-shot** (actions run one at a time in the order they are listed, a failure
-  doesn't block the ones after it, runs once per entry into Active) and **3B2 persistent**
-  (desired-state workers, started only with Active's THEN branch, the listed order only ordering
-  worker *start*). They are never mixed in one list:
+  doesn't block the ones after it, runs once per entry into Active — or into the zero-match fallback)
+  and **3B2 persistent**
+  (desired-state workers, started only with Active's THEN branch or the zero-match fallback, the listed
+  order only ordering worker *start*). They are never mixed in one list:
   one array cannot express "run this once when we arrive" and "keep this true while we are here"
   without a flag that changes the meaning of every other field in it.
 - Static routes are part of 3A, not an automation action.

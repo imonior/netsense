@@ -11,7 +11,7 @@
 //! 3. **动作分成 3A / 3B1 / 3B2 三层，且各有 THEN / ELSE 两支**。3A（网络配置 +
 //!    静态路由 + 校验）是 3B 的硬屏障：3A 失败则 3B 一条都不执行。
 //!
-//! 零命中时的网络处置是顶层 `fallback`：它不是一个可匹配的
+//! 零命中时的处置（网络配置 + 3B 动作）是顶层 `fallback`：它不是一个可匹配的
 //! Profile（它没有条件），因此不该占用 Profile 名额。
 //!
 //! 这里**没有**界面语言、日志保留天数之类的软件配置 —— 它们住在同一目录的
@@ -22,6 +22,14 @@ use serde::{Deserialize, Serialize};
 
 /// 本版本认识的配置 schema。
 pub const SCHEMA: u32 = 1;
+
+/// 引擎执行兜底 3B 时用的**保留 Profile id**。
+///
+/// 兜底没有 Profile，但 3B1 的留痕（`RunRecord`）与 3B2 的 worker 归属都按 Profile id
+/// 记录。给它一个合成身份，界面就不必为「这条记录是不是兜底的」另写一套特判 ——
+/// 代价是这个 id 不能被任何真实 Profile 占用（[`Config::validate`] 拦下）。
+/// 真实的 Profile id 由编辑器生成（`p<时间戳>` 之类），撞名只会发生在手改配置时。
+pub const FALLBACK_ID: &str = "__fallback__";
 
 /// 顶层配置。落盘为 `config.json`。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -41,13 +49,22 @@ pub struct Config {
     pub allowed_scripts: Vec<String>,
 }
 
-/// 零命中时的处置。`network: None` = 什么都不做（保持现状）。
+/// 零命中时的处置。全空 = 什么都不做（保持现状）。
+///
+/// 结构与 [`Branch`] 同构（网络 + 3B1 + 3B2），因为它就是「兜底这一支」：
+/// 3A 没配就跳过、3B 照跑；3A 失败则 3B 一条都不跑（同一道硬屏障）。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct FallbackConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
+    /// 3B1：零命中进入兜底时跑一次。
+    #[serde(default, rename = "one_shot", skip_serializing_if = "Vec::is_empty")]
+    pub one_shot: Vec<OneShotAction>,
+    /// 3B2：零命中期间一直维持；一旦有 Profile 命中，先停这一组再切过去。
+    #[serde(default, rename = "persistent", skip_serializing_if = "Vec::is_empty")]
+    pub persistent: Vec<PersistentAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]

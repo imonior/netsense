@@ -8,7 +8,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | 文件 | 承载窗口（label） | 作用 |
 |------|------------------|------|
 | `popup.html` | `popup` | **状态栏弹窗面板**（主入口，托盘唯一的交互面）：当前网络信息（含在用网卡明细）+ 其他在用网卡 + VPN/虚拟网卡（逐张标已连接/未连接，含装了但没连的条目）+ Profile 快速切换（带实时状态徽标）+ 在线升级 |
-| `editor.html` | `main` | **配置编辑器**：三层 —— 顶部「当前状态」条（生效方案 / 命中它的条件 / 当前网络 / 生效的动作，四格与下面四列一一对应）+ 中部四列（Profile 列表含兜底 · 条件 · 3A 网络 · 3B 动作）+ 底部动作键。THEN 与 ELSE **同时呈现**（THEN 在上、ELSE 在下），校验按钮在「3A 网络」列标题里 |
+| `editor.html` | `main` | **配置编辑器**：三层 —— 顶部「当前状态」条（生效方案 / 命中它的条件 / 当前网络 / 生效的动作，四格与下面四列一一对应）+ 中部四列（Profile 列表含兜底 · 条件 · 3A 网络 · 3B 动作）+ 底部动作键。THEN 与 ELSE **同时呈现**（THEN 在上、ELSE 在下），校验按钮在「3A 网络」列标题里；兜底那一行是单个区块（没有 ELSE）：网络与 3B 都可配，动作只在零命中期间执行 |
 | `settings.html` | `settings` | **软件设置**：界面语言（默认跟随系统的界面语言）· 界面配色（跟随系统 / 浅色 / 深色）· 开机启动（读系统实况）· 升级代理（直连 / 跟随系统 / 手填一个地址）· 检查更新与就地升级（和面板同一套判定，同三条命令）· 自动化配置与日志的位置（打开文件夹）· 脚本白名单 · 日志保留天数 · 备份（导出一份 / 从列表恢复） · 提权通道/平台/版本（macOS 且通道已装时可在这里撤销免密） |
 | `logs.html` | `logs` | **日志窗口**：按天的日志文件下拉（新→旧）· 只读尾部若干行 · 级别上色 · 子串过滤 · 「跟随」定时刷新（窗口隐藏时不刷） |
 | `theme.css` | —（四座窗口共用） | **唯一的颜色真相来源**：`--t-*` 一套 token 写两遍 —— 深色在 `:root`，浅色在 `html[data-theme="light"]`，加上一条 `color-scheme`；四座窗口的内联样式只引用它，不再各自写字面值 |
@@ -98,7 +98,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 515 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 518 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -158,6 +158,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
                                  "conditions":[{"id":"c1","kind":"wifi_ssid","value":"…","status":"match|no_match|inactive"}] } ] } ],
     "last_run": {                                 // 最近一次「走到 3B」的执行；没走到过就省略
       "profile_id": "office", "profile": "Office_5G", "branch": "then|else",
+                                                  // 兜底那次的 profile_id 是 "__fallback__"（branch 仍是 then）
       "at": 1770000000, "three_a": "applied|skipped",
       "running": true,                           // true = 还有动作在后台跑
       "status": null,                            // null | empty | success | partial | failed
@@ -166,7 +167,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
                       "error": "…" } ] },            // error 只在失败时出现，成功的那条没有这个键；
                                                      // 数组顺序就是执行顺序，界面上的「第几条」数下标
     "workers": [                                  // 3B2 此刻在维持什么；没有 worker 时是空数组，不会省略
-      { "id": "p1", "label": "wireguard:wg0",
+      { "id": "p1", "profile_id": "office",        // 归属：动作 id 只在各自表单内唯一，列表是平的
+        "label": "wireguard:wg0",
         "state": "pending|satisfied|repaired|faulted|overdue",
         "interval": 15, "repairs": 2, "at": 1770000000,
         "error": "…" } ],                         // 同样：缺席 = 没有错误
@@ -184,6 +186,9 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `workers[]` 同理：一条 `faulted` 的常驻动作说的是「有个东西没维持住」，不是「环境错了」，
 所以它只染徽标、不动状态。`pending`（worker 起了、第一次核对还没回）由后端报，前端不替它补；
 表单里有这条动作、`workers[]` 里却没有 = 引擎此刻没在维持它，这时徽标留空。
+`workers[]` 是**全部 Profile 平铺在一起**的一张表：动作 id 只在各自表单内唯一，所以每条都带
+`profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
+不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
 ### 后端命令一览（`src-tauri/src/ipc.rs`，46 条）
 
@@ -196,7 +201,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `get_adapters` | — | 本机**装着**的网卡 `[{name,label,kind,up}]`（第 2 列「接口」条件值的候选）：含现在没插线、没连上的物理口，好让用户提前给另一个口配好网络；没有地址类字段，也不做 TTL 缓存（刚插上扩展坞之后那次刷新就该看到新口） |
 | `get_config` | — | 全量自动化配置 JSON（schema 1），编辑器回填用。里面**没有**界面语言 —— 那是软件配置 |
 | `save_profile` | `payload: Profile`（JSON 字符串） | 按 `id` 新增或替换一个 Profile；**整份配置**校验通过才落盘 |
-| `save_global` | `payload: {fallback, allowed_scripts}` | 保存 Profile 之外的全局项（零命中兜底 + 脚本白名单）。兜底**不是** Profile：它没有条件，不参与匹配与冲突。**整份替换**这两个字段，所以两侧都必须带齐 —— 白名单的编辑面在软件设置窗口，编辑器保存兜底时必须把读到的 `allowed_scripts` 原样传回去，反之亦然，否则一次保存就清空另一项 |
+| `save_global` | `payload: {fallback, allowed_scripts}` | 保存 Profile 之外的全局项（零命中兜底 + 脚本白名单）。兜底**不是** Profile：它没有条件，不参与匹配与冲突；但网络与 3B 动作（`one_shot` / `persistent`）和 THEN 分支同形，引擎会真跑、真起 worker。**整份替换**这两个字段，所以两侧都必须带齐 —— 白名单的编辑面在软件设置窗口，编辑器保存兜底时必须把读到的 `allowed_scripts` 原样传回去（兜底的动作同理：编辑器带着整份动作清单保存），反之亦然，否则一次保存就清空另一项 |
 | `delete_profile` | `id` | 删除并按 id 找不到时报错 |
 | `apply_profile` | `id` | 请求「立即应用」。**不绕过条件**：引擎重评该 Profile 自己的 Rules/Conditions，禁用中直接拒、冲突中拒绝并回 `netsense://action` |
 | `force_dhcp` | — | 把当前网络切回 DHCP（异步，结果走 `netsense://action`） |
@@ -245,7 +250,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `config.example.json`、`get_status` 喂一份冲突态 `EngineView`），驱动点击/输入后断言那些只有跑起来
 才看得见的绑定规则（dns 的三态、禁用动作不进清单、拖卡头与 ↑/↓ 改的只是数组顺序且不许跨支跨类、
 常驻动作的字段要原样回到 payload 里、
-worker 徽标只在 Active 方案的 THEN 分支出现、广播不重建用户正在输入的表单）。
+worker 徽标只在 Active 方案的 THEN 分支或兜底出现且按 `profile_id` 归属过滤、广播不重建用户正在输入的表单）。
 `--write-fixtures` 再把它这一次真正发出的 `save_profile` / `save_global` 载荷写成一个文件，
 交给 `config::tests::payloads_the_editor_actually_sends_are_the_ones_serde_accepts`，
 沿 `ipc.rs` 的 upsert + validate 路径跑一遍 —— 从前端到 serde 的完整链路，不需要任何平台权限。
