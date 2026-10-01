@@ -160,7 +160,11 @@ NetSense 常駐托盤：點圖示（左右鍵皆同）開啟面板，所有入�
     },
     "else": { "network": { "mode": "dhcp", "dns": "", "routes": [{ "dest": "10.0.0.0/8", "delete": true }] } }
   }],
-  "fallback": { "enabled": true, "network": { "mode": "dhcp", "dns": "", "v6mode": "automatic" } }
+  "fallback": { "enabled": true, "network": { "mode": "dhcp", "dns": "", "v6mode": "automatic" },
+    "one_shot": [ { "id": "f1", "enabled": true,
+      "action": { "type": "launch_app", "app": "/Applications/Notes.app" } } ],
+    "persistent": [ { "id": "f2", "enabled": true,
+      "action": { "type": "periodic_script", "path": "scripts/keepalive.sh", "interval_secs": 60 } } ] }
 }
 ```
 

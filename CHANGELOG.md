@@ -4,6 +4,67 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.6] - 2026-10-02
+
+### Added
+
+- **A WireGuard tunnel is now credited to the software behind it.** Every wireguard-go tunnel used
+  to be labelled "WireGuard", because the only thing an unprivileged process can see — the control
+  socket upstream keeps at `/var/run/wireguard/<dev>.sock` — says what the device *is*, not which
+  app opened it. The passwordless privileged channel gains one read-only query for the process
+  holding that socket, and the card shows the application its executable path belongs to. The query
+  writes nothing and takes one argument, validated as an interface name (`[A-Za-z0-9]{1,16}`)
+  before the filesystem is touched, and it exits without an answer when there is no socket or no
+  holder, because no answer beats a guessed one. The app never asks unless the channel is already
+  installed, and caches each device's answer — the absence of one included — for 30 seconds, so the
+  two-second network refresh never puts a root subprocess behind every repaint. The channel now
+  counts as installed only when the script on disk is byte-for-byte the one this build shipped,
+  since an older copy has no such query at all; the cost is that the first configuration apply
+  after an upgrade that changed the wrapper shows a single authorization prompt, the same one a
+  fresh install shows, and every apply after that stays passwordless.
+- **The zero-match fallback has its own 3B actions.** The fallback — what NetSense does when no
+  profile matches the network it is on — used to hold nothing but a network configuration. It now
+  carries the same two action lists a profile carries: a one-shot list that runs once when the
+  fallback is entered, and a persistent list whose workers stay up for as long as nothing matches
+  and are stopped before a matching profile's own workers start. Applying any profile's
+  configuration invalidates that memory, so a fallback that already ran at startup still runs when
+  the machine moves to a network where nothing matches. The editor shows it as one section with the
+  two lists and no THEN/ELSE split: an else needs something to fall back from, and this *is* that
+  case.
+
+### Fixed
+
+- **macOS: a tunnel is no longer named after whichever VPN session happens to be connected.** When
+  exactly one tunnel was up and exactly one VPN session was connected, that session was credited
+  with the tunnel — unless its own network service reported a different address. Clients that never
+  report an address made that counter-proof unable to fire, and in the field this labelled a
+  foreign WireGuard tunnel "Tailscale"; a specific wrong name is worse than a generic one, because
+  the persistent "keep connected" action adopts whatever the card says as its target. Attribution
+  now requires evidence bound to the interface — an address one of the services reports for this
+  tunnel, or the process holding its control socket — the socket alone names the implementation, and
+  anything unclaimed keeps the generic VPN label.
+- **Saved-network candidates are sorted, and the popup opens where there is room.** The list followed
+  the order the system reports networks in, which is roughly association history and reads as
+  random; it is now sorted by name. Its direction was decided by comparing the input's bottom edge
+  with the bottom edge of the *expanded* list — a difference that is always negative, so every popup
+  opened upward and the first entries of a list near the top of a column were clipped out of sight.
+  The choice is now made from the room above and below the input inside the scrollable area it sits
+  in, taking the roomier side when neither fits a full column, and the list's own height is capped to
+  that side so the rest stays reachable by its scrollbar.
+- **The status strip's second cell says what it shows.** Its English heading read "Why it matched",
+  which promises a rationale, while the cell lists the condition values the active profile matched
+  on. It reads "What is matched" now. The other four languages already named the conditions, so this
+  is a wording fix in the English dictionary.
+- **One flaky handshake no longer fails the update check, and a failure says why.** "This update
+  cannot be verified: SHA256SUMS could not be downloaded" was the whole report of a single
+  interrupted TLS handshake: the fetch was tried once, and the reason was discarded. It is now tried
+  up to three times with a short wait between attempts, each attempt gets 15 seconds rather than 10
+  (the one fetch that succeeded in the field took 8.7), every retried attempt is logged, and the
+  final failure is logged with the error behind it. The retry sits in the app rather than in
+  `curl --retry`, which does not retry SSL errors and only learned `--retry-all-errors` after the
+  version Windows 10 ships. The same fetch serves the version check, the pre-click verdict and the
+  pre-install verification, so all three inherit it.
+
 ## [1.0.5] - 2026-10-01
 
 ### Added

@@ -185,7 +185,11 @@ Linux は `~/.config/netsense`。実行ファイルと同じ場所には置き�
     },
     "else": { "network": { "mode": "dhcp", "dns": "", "routes": [{ "dest": "10.0.0.0/8", "delete": true }] } }
   }],
-  "fallback": { "enabled": true, "network": { "mode": "dhcp", "dns": "", "v6mode": "automatic" } }
+  "fallback": { "enabled": true, "network": { "mode": "dhcp", "dns": "", "v6mode": "automatic" },
+    "one_shot": [ { "id": "f1", "enabled": true,
+      "action": { "type": "launch_app", "app": "/Applications/Notes.app" } } ],
+    "persistent": [ { "id": "f2", "enabled": true,
+      "action": { "type": "periodic_script", "path": "scripts/keepalive.sh", "interval_secs": 60 } } ] }
 }
 ```
 
