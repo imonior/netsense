@@ -322,10 +322,14 @@
       el("v-platform").textContent = d.platform || "—";
       el("v-priv").textContent = d.priv === "direct"
         ? t("sett.priv_direct", "Elevated access configured: changes apply without a system prompt")
+        : d.priv === "outdated"
+        ? t("sett.priv_outdated", "An older version of the helper is installed: the next change asks once and updates it, later changes stay passwordless")
         : t("sett.priv_prompt", "Each change asks the system for authorization");
-      // 「撤销免密」这一颗按钮只在 macOS 且通道确实装着时出现：Windows 的免密来自常驻提权
-      // 助手、Linux 来自 sudo 策略，两边都没有一条 netsense 的 sudoers 规则可删。
-      el("row-priv-remove").hidden = !(d.platform === "macos" && d.priv === "direct");
+      // 「撤销免密」这一颗按钮只在 macOS 且这里确实留着 netsense 的东西时出现：删的是那条
+      // sudoers 规则，装着旧版脚本的机器同样有它可删。旧版也算的一层意义是「用户不必先应用
+      // 一次才能撤销」—— 那一趟会把脚本换成本版，撤销窗口就关了。
+      // Windows 的免密来自常驻提权助手、Linux 来自 sudo 策略，两边都没有一条 sudoers 规则可删。
+      el("row-priv-remove").hidden = !(d.platform === "macos" && (d.priv === "direct" || d.priv === "outdated"));
       el("v-version").textContent = d.version || "—";
       // 三态与手填地址住在软件配置文件里，跟着这一趟一起回来。「跟随系统此刻会走哪条路」
       // 不在此列 —— 那得现问操作系统，见 loadProxy。

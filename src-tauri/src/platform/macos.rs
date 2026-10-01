@@ -201,10 +201,21 @@ impl PrivOp {
 ///
 /// 代价说清楚：应用升级后、包装脚本确实有改动的那一次，第一次应用配置会像全新安装那样弹
 /// **一次**授权框（[`exec_ops_bootstrap`] 顺手把通道换成本版），此后照旧免密。
+///
+/// 这一档要单独报给界面（[`PrivChannel::Outdated`]）：那句话和「什么都没装」不一样 ——
+/// 那里是每次都要授权，这里是下一次要、之后不要；而且这里确实有一份 netsense 的 sudoers
+/// 规则摆着，撤销入口在这台机器上是有意义的。执行侧不分档：旧版一样走 bootstrap。
 pub fn priv_channel() -> PrivChannel {
-    match std::fs::read(PRIV_SCRIPT) {
-        Ok(installed) if installed == PRIV_SCRIPT_SRC.as_bytes() => PrivChannel::Direct,
-        _ => PrivChannel::Prompt,
+    channel_for(std::fs::read(PRIV_SCRIPT).ok().as_deref())
+}
+
+/// [`priv_channel`] 的判定本身，摆在读盘之外：三档的映射是这条通道最容易被人「顺手简化
+/// 回两档」的地方，而读 `/usr/local/libexec` 的现场在测试里摆不出来。
+fn channel_for(installed: Option<&[u8]>) -> PrivChannel {
+    match installed {
+        Some(bytes) if bytes == PRIV_SCRIPT_SRC.as_bytes() => PrivChannel::Direct,
+        Some(_) => PrivChannel::Outdated,
+        None => PrivChannel::Prompt,
     }
 }
 
@@ -323,7 +334,9 @@ pub fn exec_ops(ops: &[PrivOp]) -> Result<(), String> {
         // 装好通道的机器上仍会有表达不了的一批（例如目标是 `default` 的路由）：
         // 这种批次照旧走授权框，不能因为「通道在」就把它判死。
         PrivChannel::Direct => exec_ops_osascript(ops),
-        PrivChannel::Prompt => exec_ops_bootstrap(ops),
+        // 旧版通道与没有通道在执行侧是同一件事：那一次授权既下发本批，也顺手把脚本换成
+        // 本版（exec_ops_bootstrap）。分档只为了界面怎么说。
+        PrivChannel::Prompt | PrivChannel::Outdated => exec_ops_bootstrap(ops),
     };
     // 网络刚被本进程改动：丢掉状态快照。3A 的「下发 → 读回校验」紧跟着就要读一次
     // `get_status`，那份读数必须是下发**之后**的实况，否则校验屏障形同虚设。
@@ -2115,6 +2128,30 @@ mod tests {
         // 包装脚本必须是 root 属主、0755，且装完就把临时输入清掉
         assert!(script.contains("-o root -g wheel -m 0755"), "{script}");
         assert!(script.contains("rm -f '"), "{script}");
+    }
+
+    /// 通道三档的映射：读不到 = 每次都要授权；装着但不是这一版 = 问一次、之后免密；
+    /// 逐字节相同 = 免密。
+    ///
+    /// 这一位挡的是「把 `Some(_) => Outdated` 折回 `_ => Prompt`」那类顺手简化：执行侧两档
+    /// 都走 bootstrap，所以编译器不响、下发测试也不会红，只有界面会对着一台只问一次的机器
+    /// 说「每次改动都需要系统授权」，并且把那台机器上确实存在的 sudoers 规则的撤销入口藏掉。
+    /// 它挡不住「文件读得到、sudoers 那条已经被撤销」：那一现场照样报 Outdated，
+    /// 「之后的改动仍然免密」要等第一次真跑 `sudo -n` 才验得着。
+    #[test]
+    fn an_installed_wrapper_of_another_version_is_its_own_channel() {
+        assert_eq!(channel_for(None), PrivChannel::Prompt);
+        assert_eq!(
+            channel_for(Some(PRIV_SCRIPT_SRC.as_bytes())),
+            PrivChannel::Direct
+        );
+        assert_eq!(
+            channel_for(Some(b"#!/bin/sh\n# an earlier release\n")),
+            PrivChannel::Outdated
+        );
+        // 空文件与读一半的文件也算「装着但不是这一版」：那里有得撤销，也只问一次。
+        assert_eq!(channel_for(Some(b"")), PrivChannel::Outdated);
+        assert_eq!(PrivChannel::Outdated.code(), "outdated");
     }
 
     /// 形状镜像的**单向**核对：Rust 判「白名单装得下」的每一个值，包装脚本自己也得判合法。

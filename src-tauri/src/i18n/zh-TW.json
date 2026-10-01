@@ -304,6 +304,7 @@
   "sett.platform": "平台",
   "sett.privilege": "提權通道",
   "sett.priv_direct": "已設定免授權提權：改變無需系統彈窗",
+  "sett.priv_outdated": "裝著的是舊版助手：下一次改變會授權一次並更新它，之後的改變仍然免密",
   "sett.priv_prompt": "每次改變都需要系統授權",
   "sett.priv_remove": "撤銷免密變更",
   "sett.version": "版本",

@@ -304,6 +304,7 @@
   "sett.platform": "플랫폼",
   "sett.privilege": "권한 상승 경로",
   "sett.priv_direct": "권한 상승이 설정됨: 시스템 확인 없이 변경이 적용됩니다",
+  "sett.priv_outdated": "이전 버전 도우미가 설치되어 있습니다: 다음 변경에서 한 번 승인을 요청한 뒤 갱신하고, 이후 변경은 비밀번호 없이 진행됩니다",
   "sett.priv_prompt": "변경마다 시스템 승인이 필요합니다",
   "sett.priv_remove": "비밀번호 없는 변경 삭제",
   "sett.version": "버전",

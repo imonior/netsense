@@ -304,6 +304,7 @@
   "sett.platform": "プラットフォーム",
   "sett.privilege": "権限昇格チャネル",
   "sett.priv_direct": "昇格済み: システムの確認なしで変更を適用できます",
+  "sett.priv_outdated": "古いバージョンのヘルパーがインストールされています: 次回の変更で一度だけ承認を求め、その後はパスワード不要のままです",
   "sett.priv_prompt": "変更のたびにシステムの承認が必要です",
   "sett.priv_remove": "パスワード不要の適用を取り消す",
   "sett.version": "バージョン",

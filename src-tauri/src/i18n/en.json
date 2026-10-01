@@ -304,6 +304,7 @@
   "sett.platform": "Platform",
   "sett.privilege": "Privilege channel",
   "sett.priv_direct": "Elevated access configured: changes apply without a system prompt",
+  "sett.priv_outdated": "An older version of the helper is installed: the next change asks once and updates it, later changes stay passwordless",
   "sett.priv_prompt": "Each change asks the system for authorization",
   "sett.priv_remove": "Remove password-free changes",
   "sett.version": "Version",

@@ -407,6 +407,15 @@ pub enum PrivChannel {
     /// Windows: UAC (`Start-Process -Verb RunAs`)
     /// Linux: `pkexec`
     Prompt,
+    /// 提权机制**装着，但不是这个二进制所带的那一份**：执行时按 [`Prompt`](Self::Prompt)
+    /// 走（那一次授权顺手把它换成本版），但界面上不能就说「每次都要授权」—— 一次之后
+    /// 就免密了，而且这里确实有一份可以撤销的东西。
+    ///
+    /// 只有 macOS 会报这一档：Windows 的免密来自「进程是不是管理员」，Linux 来自
+    /// `sudo -n` 探一下，两边都没有一份带版本的本机脚本可比。另外两条腿上它因此
+    /// 「永不被构造」，那条 dead_code 是本设计的形状，不是漏了接线。
+    #[allow(dead_code)]
+    Outdated,
 }
 
 impl PrivChannel {
@@ -414,6 +423,7 @@ impl PrivChannel {
         match self {
             PrivChannel::Direct => "direct",
             PrivChannel::Prompt => "prompt",
+            PrivChannel::Outdated => "outdated",
         }
     }
 }
@@ -1073,7 +1083,8 @@ pub fn open_path(path: &str) -> Result<(), String> {
 /// 走的是自由函数而不是 [`NetworkPlatform`] 的方法：这条通道是 macOS 独有的机制
 /// （Windows 靠常驻提权助手、Linux 靠 sudo/pkexec，两边都没有「撤销一个 sudoers 行」
 /// 这件事），放进 trait 就要在另外两条腿上各写一个空壳。
-/// 界面上的按钮只在 `priv == "direct"` 且平台为 macOS 时出现；下面那条错误是
+/// 界面上的按钮在平台为 macOS 且 `priv` 为 `direct` 或 `outdated` 时出现 —— 撤销的对象是
+/// 那条 sudoers 规则，脚本新旧都有得删；`prompt`（什么都没装）才没有入口。下面那条错误是
 /// 「有人绕过界面直接调用命令」时的兜底，不是正常路径。
 #[cfg(target_os = "macos")]
 pub fn uninstall_priv_channel() -> Result<(), String> {
