@@ -869,6 +869,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - Global `OnceLock<Mutex<Logger>>` serializes writes, thread-safe; four levels `error/warn/info/debug`, and all four are written (the level is a line label, not a filter).
 - Logs before `init()` degrade to stderr, so early-startup failures are not lost.
 - `init(dir, true, days)`: 第二个参数是 `to_stderr`（dev 为 `true`，终端里看得见；release 可为 `false`），第三个是保留天数。保留天数的后续变更走 `set_retention_days`，它立刻按新窗口清一次 —— 用户把 30 天改成 3 天时，期待的是「现在就少一些」，不是「下次启动再说」。
+- **一条记录 = 文件里的一行**（`one_line`）：消息里的 `\n` 与 `\r` 先折成看得见的记号再落盘，panic hook 走同一折法。日志窗是按行读尾部、再逐行上色的，所以一条带换行的消息等于在文件里凭空多出一段没有前缀的续行，而它看着就像一条记录；更新失败那几句会把外部来的地址拼进消息，那正是最不该由外部输入决定行边界的地方。不含换行时返回借用，每条日志都走的这条路不额外分配。
 
 ### 10.3 Config hot-reload (`engine.rs::reload_if_changed`)
 

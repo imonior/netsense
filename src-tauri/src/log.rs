@@ -143,7 +143,12 @@ fn install_panic_hook(dir: &Path) {
             "<non-string panic payload>".to_string()
         };
         let today = today_str();
-        let line = format!("[{}] [PANIC] {} @ {}\n", today, msg, loc);
+        let line = format!(
+            "[{}] [PANIC] {} @ {}\n",
+            today,
+            one_line(&msg),
+            loc
+        );
         // 刻意绕开全局 Logger 的 Mutex：panic 可能就发生在持有该锁的线程里，
         // 再去 lock() 会死锁。直接以追加方式另开一个句柄写。
         let p = dir.join(format!("netsense-{}.log", today));
@@ -358,6 +363,27 @@ fn read_tail_in(dir: &Path, name: &str, max_lines: usize) -> Result<LogContent, 
     })
 }
 
+/// 一条记录 = 文件里的一行：消息里的换行在这里折成看得见的 `\n`。
+///
+/// 日志窗是按行读尾部再逐行上色的（见 `tail_log` 的 `text.lines()`），所以一条带换行的
+/// 消息会在文件里留下一段**没有前缀的续行**，界面把它当成另一条记录。要挡的不只是难看：
+/// 更新失败那几条日志会把外部来的地址拼进消息，一个换行就能写出一整行带时间戳的假记录。
+/// 不含换行时返回借用 —— 这是每条日志都走的路，不该为此分配。
+fn one_line(msg: &str) -> std::borrow::Cow<'_, str> {
+    if !msg.contains(['\n', '\r']) {
+        return std::borrow::Cow::Borrowed(msg);
+    }
+    let mut out = String::with_capacity(msg.len() + 8);
+    for c in msg.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// 核心写日志。任何地方调用，未初始化则降级到 stderr。
 pub fn log(level: Level, msg: &str) {
     if let Some(g) = GLOBAL.get() {
@@ -375,7 +401,13 @@ pub fn log(level: Level, msg: &str) {
             now.minute(),
             now.second()
         );
-        let line = format!("[{} {}] [{}] {}\n", l.today, ts, level.as_str(), msg);
+        let line = format!(
+            "[{} {}] [{}] {}\n",
+            l.today,
+            ts,
+            level.as_str(),
+            one_line(msg)
+        );
         if let Some(f) = l.file.as_mut() {
             let _ = f.write_all(line.as_bytes());
             let _ = f.flush();
@@ -481,5 +513,25 @@ mod tests {
         }
         assert!(read_tail_in(&dir, &today, 0).is_ok(), "行数下限夹到 1，不该报错");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 一条日志 = 文件里的一行。
+    ///
+    /// 带换行的消息会在按 `.lines()` 读的日志窗里造出一段**没有前缀的续行**，而那条续行
+    /// 看起来就像一条记录 —— 更新失败那几句会把外部来的地址拼进消息，所以这里钉住形状。
+    #[test]
+    fn a_message_with_a_newline_stays_one_record() {
+        let forged = "download ok\n[2026-01-08 00:00:01] [ERROR] invented";
+        let folded = one_line(forged);
+        assert_eq!(folded.lines().count(), 1, "折完必须只剩一行: {folded:?}");
+        assert!(
+            folded.contains("\\n"),
+            "换行要留下看得见的记号，不能静默吃掉: {folded:?}"
+        );
+        assert_eq!(&*one_line("a\nb"), "a\\nb");
+        assert_eq!(&*one_line("a\r\nb"), "a\\r\\nb");
+        assert_eq!(&*one_line("a\rb"), "a\\rb");
+        // 绝大多数日志不含换行，那条路返回借用而不是另起一个 String。
+        assert!(matches!(one_line("plain text"), std::borrow::Cow::Borrowed(_)));
     }
 }
