@@ -112,9 +112,9 @@
                   background: var(--bg-panel); border: 1px solid var(--border-color);
                   border-radius: var(--radius-sm); box-shadow: var(--t-shadow-pop);
                   max-height: 168px; overflow-y: auto; display: none; }
-    /* 浮层锚在行上，而行在 `.panel-content{overflow-y:auto}` 里面：那一列滚到底时
-       下方空间不足，清单的下半截就落在裁剪边外面（看着像「下拉只出来三行」）。空间不够时
-       由脚本挂 `.up`，让它朝上长。 */
+    /* 浮层锚在行上，而行在 `.panel-content{overflow-y:auto}` 里面：锚点靠边时清单会落在
+       裁剪边外面（看着像「下拉只出来三行」）。方向与高度由脚本按锚点两侧余量定：不够就
+       让位、挂 `.up` 朝上长，并把 max-height 收到这一边的余量（见 comboPlan / comboFlip）。 */
     .combo-list.up { top: auto; bottom: 100%; }
     .combo-list.open { display: block; }
     .combo-opt { display: block; padding: 3px 6px; font-size: 11px; cursor: pointer;
@@ -774,7 +774,10 @@
     const type = c.type || "wifi_ssid";
     if (type === "wifi_ssid") {
       const cur = String(c.value ?? "");
-      const ssids = wifiList.filter(Boolean);
+      // 候选按名字排，而不是沿用系统给的顺序（`get_networks` 的排列按加入先后来，
+      // 扫着像乱序）。排的是这份展示清单，输入框里的值不受影响。
+      const ssids = wifiList.filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
       // 一个都不现成时不留箭头：点开一个空浮层比没有这个控件更像坏了。
       const drop = ssids.length ?
         `<button type="button" class="combo-caret" data-act="combo-toggle" data-path="${b}.value" ` +
@@ -848,15 +851,40 @@
   const comboLists = () => Array.from(document.querySelectorAll("[data-combo-list]"));
   const comboCloseAll = () => comboLists().forEach(l => l.classList.remove("open"));
   const comboListFor = (path) => comboLists().find(l => l.dataset.comboList === path) || null;
-  /// 展开之后：下方空间不够一整列（`.combo-list` 的 max-height 是 168px，两处一起改）就朝上长，
-  /// 否则那一列滚到底的条件行只能看见清单的前三行 —— 浮层在它自己的滚动容器外面被裁掉了。
-  /// 假 DOM 里没有几何，这里逐层判空放过：这一条只有真窗口能验，冒烟测试覆盖不到。
+  /// 朝哪边开、能长多高：输入是锚点两侧的余量（px），输出与几何无关 —— 于是冒烟测试
+  /// 可以直接喂数。判据曾经是「清单展开后的矩形」，可它展开后的 bottom 本就在锚点下方
+  /// 一列处，减法永远是负数，于是每一列都朝上开：行靠顶部时头几行落在滚动容器的裁剪边
+  /// 外面（「第一行看不见」就是这么来的）。
+  /// 下方放得下一整列就照常朝下；放不下且上方更宽裕就朝上；两边都不够时挑更宽的一边，
+  /// 高度收到这一边的余量（-4 是离裁剪边留的一条缝），剩下的行交给清单自己的滚动条。
+  const COMBO_MAX_H = 168; // 与 `.combo-list` 的 max-height 一起改
+  const COMBO_MIN_H = 66;  // 三行的底线：再矮就只能显示半行
+  function comboPlan(below, above) {
+    const up = below < COMBO_MAX_H && above > below;
+    const maxHeight = Math.max(COMBO_MIN_H, Math.min(COMBO_MAX_H, (up ? above : below) - 4));
+    return { up, maxHeight };
+  }
+  /// 清单会被谁裁：最近的 `overflow-y: auto/scroll` 祖先（列容器 `.panel-content`），
+  /// 一个都没有就按视口算。要减的就是这个盒子的边，而不是它外面更大或更小的什么。
+  function comboClipRect(list) {
+    for (let el = list.parentElement; el; el = el.parentElement) {
+      if (typeof el.getBoundingClientRect !== "function") continue;
+      const oy = typeof window.getComputedStyle === "function"
+        ? window.getComputedStyle(el).overflowY : "";
+      if (oy === "auto" || oy === "scroll") return el.getBoundingClientRect();
+    }
+    return { top: 0, bottom: window.innerHeight || 0 };
+  }
+  /// 假 DOM 里没有几何，这里逐层判空放过：这一条只有真窗口能验。
   function comboFlip(list) {
     if (typeof list.getBoundingClientRect !== "function") return;
-    const r = list.getBoundingClientRect();
     const host = list.parentElement;
     const hr = host && typeof host.getBoundingClientRect === "function" ? host.getBoundingClientRect() : null;
-    list.classList.toggle("up", (hr ? hr.bottom : window.innerHeight) - r.bottom < 168);
+    if (!hr) return;
+    const clip = comboClipRect(list);
+    const plan = comboPlan(clip.bottom - hr.bottom, hr.top - clip.top);
+    list.classList.toggle("up", plan.up);
+    list.style.maxHeight = `${plan.maxHeight}px`;
   }
 
   /* —————————————————————— 第 3 列：3A 网络（先 THEN 后 ELSE） —————————————————————— */

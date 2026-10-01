@@ -555,7 +555,8 @@ const ctx = vm.createContext(sandbox);
 const code =
   script[1] +
   "\n;globalThis.__h = { $: (id) => document.getElementById(id), pick, loadAll, renderAll, refreshLive," +
-  " applyPlan, planList, planPersistent, profileView, get cfg() { return cfg }, get draft() { return draft }," +
+  " applyPlan, planList, planPersistent, profileView, comboPlan," +
+  " get cfg() { return cfg }, get draft() { return draft }," +
   " get sel() { return sel }, get view() { return view }, set view(v) { view = v }," +
   " get wifiList() { return wifiList }, get nicList() { return nicList }," +
   " get adapterList() { return adapterList }," +
@@ -710,8 +711,11 @@ eq("输入框显示的就是配置里的值", [ssidInp?.value, ssidInp?.placehol
 // 这一条是「候选和输入框在一起」的结构判据：同一个 `.combo-box` 之下，而不是行里的两块。
 check("候选浮层挂在输入框同一个盒子里：它就是这一条条件的附属控件",
   !!ssidList && ssidList.parent === ssidInp.parent);
-eq("候选只列系统已保存的 SSID，不掺任何哨兵项", ssidOpts.map((o) => o.dataset.v), ["Office_5G", "Café"]);
-eq("候选显示的文本就是它要填进去的那个名字", ssidOpts.map((o) => o.textContent), ["Office_5G", "Café"]);
+// 排序：系统给的顺序是 ["Office_5G", "Café"]（见装载那一段），候选要按名字排，C 在 O 前 ——
+// 于是这里恰好与系统顺序相反；断言的是展示清单，而不是 `get_networks` 的原始返回。
+eq("候选只列系统已保存的 SSID，不掺任何哨兵项，且按名字排序",
+  ssidOpts.map((o) => o.dataset.v), ["Café", "Office_5G"]);
+eq("候选显示的文本就是它要填进去的那个名字", ssidOpts.map((o) => o.textContent), ["Café", "Office_5G"]);
 check("默认收起：没点开之前浮层不占位（.open 不在）", ssidList?.classList?.contains("open") === false);
 eq("候选自己不绑定字段：它写不进配置", ssidList?.dataset?.bind, undefined);
 const caret0 = findAll((e) => e.dataset?.act === "combo-toggle" &&
@@ -723,6 +727,18 @@ check("同一个箭头再点一次：收起", !ssidList.classList.contains("open
 click(caret0);
 click(findById("col-net"));
 check("点别处（这里是第三列的空白处）：浮层收起，不会一直挂着", !ssidList.classList.contains("open"));
+
+group("浮层朝哪边开、能长多高：纯函数喂数（真几何冒烟测试量不到）");
+// 现场回归：判据曾拿「清单展开后的矩形」与锚点比，可它展开后的 bottom 本就在锚点下方
+// 一列处，减法永远是负数 —— 每一列都朝上开，条件行靠顶部时头几行落在 `.panel-content`
+// 的裁剪边外面（「第一行看不见」就是这么来的）。下面喂的是锚点两侧的余量。
+eq("下方放得下一整列：朝下，按上限", h.comboPlan(400, 500), { up: false, maxHeight: 168 });
+eq("下方不够、上方更宽裕：朝上，高度仍是上限", h.comboPlan(80, 300), { up: true, maxHeight: 168 });
+eq("两边都不够：挑更宽的一边，高度收到那一边的余量（-4 是离裁剪边留的缝）",
+  h.comboPlan(80, 120), { up: true, maxHeight: 116 });
+eq("上方更窄时不为所动：朝下，高度收到下方的余量", h.comboPlan(100, 80), { up: false, maxHeight: 96 });
+eq("两侧都快贴边：守住三行的底线，余下的交给清单自己滚", h.comboPlan(30, 20), { up: false, maxHeight: 66 });
+
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
 eq("候选来自本机网卡：没插线的口（en7）也在，VPN 隧道（utun3）不在",
@@ -747,12 +763,12 @@ const ssidOpts2 = (ssids?.children || []).filter((e) => e.dataset?.act === "comb
 eq("接口条件切成 SSID 类型后：en9 不混进候选，值也被清空",
   [ssidOpts2.map((o) => o.dataset.v), byBind("rules.0.conditions.2.value")?.value,
    h.draft.rules[0].conditions[2].value],
-  [["Office_5G", "Café"], "", undefined]);
+  [["Café", "Office_5G"], "", undefined]);
 // 浮层只是选取器：点开、选中，名字交给输入框，浮层自己收起；直接打字则完全不经过它。
 const ssidInp2 = byBind("rules.0.conditions.2.value");
 click(findAll((e) => e.dataset?.act === "combo-toggle" &&
   e.dataset?.path === "rules.0.conditions.2.value")[0]);
-click(ssidOpts2[1]);
+click(ssidOpts2[0]);
 eq("从候选里选一个：输入框与配置收到的都是那个 SSID",
   [ssidInp2?.value, h.draft.rules[0].conditions[2].value], ["Café", "Café"]);
 check("选完浮层收起：它不留下「自己选中了什么」这份状态冒充配置",
