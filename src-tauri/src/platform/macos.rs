@@ -25,6 +25,9 @@
 //! 通道还没装上时，**第一次**应用配置的那一个授权框顺手把通道装好（见
 //! [`exec_ops_bootstrap`]），此后同一台机器上的每一次应用都不再问；免密不可用
 //! （被撤销 / 需密码 / 装不上）、或这一批的形状白名单表达不了时才回落到逐次授权。
+//! 通道算不算「已装好」看的是**装着的脚本与本二进制烤进去的那份是否逐字节相同**（见
+//! [`priv_channel`]）：改了包装脚本的那次升级，第一次应用会再问一次，那一次顺手把通道换到
+//! 本版本 —— 白名单加一条只读子命令，否则老机器上永远等不到它。
 
 use super::{
     dedupe_sort_apps, extract_mac, parse_kv, poll_ssid_watch, prefers_dark_from_defaults,
@@ -187,12 +190,21 @@ impl PrivOp {
     }
 }
 
-/// 当前特权通道：包装脚本存在即视为「已安装」；真正可用性由首次 `sudo -n` 结果决定。
+/// 当前特权通道：包装脚本**装着、而且和这个二进制烤进来的那一份逐字节相同**才算就绪；
+/// 真正可用性还要由首次 `sudo -n` 的结果决定（见 [`nopasswd_probe`]）。
+///
+/// 为什么不只看出在不在：
+/// 1. [`allow_list_takes`] 是对**某一版**白名单规则的镜像。脚本换了规则而这边还按旧规则
+///    放行，后果是界面下发的行被 root 那边拒掉、整批配置直接失败。
+/// 2. 只读子命令（`tunowner`）只有新版脚本认得。装过旧版通道的机器如果「存在即就绪」，
+///    这项能力就永远补不上 —— 谁也不会想到要手动重装一次通道。
+///
+/// 代价说清楚：应用升级后、包装脚本确实有改动的那一次，第一次应用配置会像全新安装那样弹
+/// **一次**授权框（[`exec_ops_bootstrap`] 顺手把通道换成本版），此后照旧免密。
 pub fn priv_channel() -> PrivChannel {
-    if std::path::Path::new(PRIV_SCRIPT).exists() {
-        PrivChannel::Direct
-    } else {
-        PrivChannel::Prompt
+    match std::fs::read(PRIV_SCRIPT) {
+        Ok(installed) if installed == PRIV_SCRIPT_SRC.as_bytes() => PrivChannel::Direct,
+        _ => PrivChannel::Prompt,
     }
 }
 
@@ -200,6 +212,15 @@ pub fn priv_channel() -> PrivChannel {
 /// 与包装脚本的 `is_service` 同一套规则。
 fn slot_ok(s: &str) -> bool {
     !s.is_empty() && !s.starts_with('-') && !s.contains(['|', '\n', '\r'])
+}
+
+/// 接口名：1~16 个字母数字 —— 包装脚本 `is_iface` 的同一套规则（字母数字这条已经排掉了
+/// 以 `-` 开头的写法，脚本里那句 `-*` 只是把话说白）。
+///
+/// 取值只许比脚本严、不许比脚本松（同 [`ipv4`] 的理由）：这个名字会拼进 root 去 stat 的
+/// 那一个路径，`/`、`.`、空白一个都不能漏。
+fn iface_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 16 && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// `a.b.c.d`：恰好四段，每段 1~3 位十进制且 ≤255，且不收 `010` 这种前导零写法 ——
@@ -1293,11 +1314,16 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
 
 /// 判定一条隧道的归属软件；证据对不上就返回 `None`（界面退回通用的「VPN」标签）。
 ///
-/// macOS 没有公开的「utun → 进程」映射，所以这里只承认两条**和这台设备有关**的线索：
+/// 非特权进程拿不到「utun → 进程」这张表，所以这里只承认三条**和这台设备有关**的线索：
 /// 1. **按 IP 认领**：哪个网络服务报出了这条隧道的 IPv4，这条隧道就是它建的。服务名是
 ///    客户端自己写的，照原样显示（不做关键词归一：用户自建的 "MyVPN" 归一成 "VPN" 是
 ///    丢信息，不是提纯）。
-/// 2. **wireguard-go 的控制套接字**（[`wireguard_sock`]）：隧道名下挂着上游实现留下的
+/// 2. **套接字的持有进程**（[`tunnel_owner`]）：root 侧认出「正握着这条设备那枚控制套接字」
+///    的进程，给出的是它的可执行路径 —— 这是设备绑定的证据里最具体的一条，直接到软件。
+///    但它要起一个特权子进程、而且问不出的场合不少（免密通道没装、装的是不认这个子命令的
+///    旧版脚本、持有者已经退出），所以它排在按 IP 认领之后：那条不用提权就能问，成立时
+///    报出的还是用户自己给服务取的名字。
+/// 3. **wireguard-go 的控制套接字**（[`wireguard_sock`]）：隧道名下挂着上游实现留下的
 ///    套接字，就说明这条隧道由 wireguard-go 管。这条是设备绑定的直接证据，但名字只写到
 ///    实现为止 —— 套接字说得出「wireguard-go」，说不出背后是哪个 GUI/脚本拉起来的，
 ///    硬指一个牌子就是把猜测写成答案。
@@ -1317,12 +1343,20 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
 ///   争，被安上了「Tailscale」。反证只在会开口的客户端身上存在，这道门就只剩「唯一」。
 ///
 /// 认不出来只是少一格信息，认错才是事故。
-fn attribute_vpn(ev: &VpnEvidence, ip: Option<&str>, wg_sock: bool) -> Option<String> {
+fn attribute_vpn(
+    ev: &VpnEvidence,
+    ip: Option<&str>,
+    wg_sock: bool,
+    owner: Option<&str>,
+) -> Option<String> {
     let addr = ip.filter(|a| !a.is_empty());
     if let Some(a) = addr {
         if let Some((svc, _)) = ev.svc_ip.iter().find(|(_, reported)| reported == a) {
             return Some(svc.clone());
         }
+    }
+    if let Some(name) = owner.filter(|s| !s.is_empty()) {
+        return Some(name.to_string());
     }
     if wg_sock {
         return Some("WireGuard".to_string());
@@ -1344,10 +1378,92 @@ fn wireguard_sock_in(dir: &std::path::Path, dev: &str) -> bool {
     dir.join(format!("{dev}.sock")).exists()
 }
 
+/// 套接字持有者查询结果的缓存 TTL。
+///
+/// 一次查询要起一个 root 子进程，而网卡枚举每 2s 就可能重采一轮（平台层那张网卡缓存的
+/// 节律），逐轮去问等于把后台线程反复钉在特权子进程上。取 30s 是两头都不吃亏的折中：
+/// 设备名被另一家客户端复用（隧道断了又起、换了软件）时最多 30s 自己纠正，而正常刷新几乎
+/// 不会重复起进程。
+const TUN_OWNER_TTL: Duration = Duration::from_secs(30);
+
+/// [`TUN_OWNER_TTL`] 缓存里存的那一条：采样时刻 + 当时问出的归属（问不出就是 `None`）。
+type TunOwnerEntry = (Instant, Option<String>);
+
+/// 查询缓存：设备名 → 最近一次的采样。`None` 也要存 ——「问不出答案」本身就是接下来
+/// 30s 内不必再问的理由。
+static TUN_OWNER_CACHE:
+    OnceLock<Mutex<std::collections::HashMap<String, TunOwnerEntry>>> = OnceLock::new();
+
+/// 隧道归属的第三条证据：**谁正握着 wireguard-go 为这条设备留的控制套接字**。
+///
+/// 普通用户读不到答案：`/var/run/wireguard` 是 root 的 `0700`，握着那个套接字的又是 root
+/// 进程，非特权的 `lsof` 看不见它的 fd。所以这一问只能走 [`PRIV_SCRIPT`] 那条免密通道 ——
+/// 也就是说**只有通道已经就绪才问**。
+///
+/// 绝不为了一个显示用的名字去弹授权框：那是拿「界面少一格信息」换「每次刷新都打断用户」。
+/// 于是下面这些场合一律安静地返回 `None`，归属退回 [`attribute_vpn`] 原有的两条证据：
+/// 通道没装 / 装的是旧版脚本（不认这个子命令）、sudo 免密被撤销、套接字没有持有者、
+/// 进程名拿不到。
+fn tunnel_owner(dev: &str) -> Option<String> {
+    if priv_channel() != PrivChannel::Direct || !iface_ok(dev) {
+        return None;
+    }
+    let cache = TUN_OWNER_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let hit = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(dev)
+        .filter(|(at, _)| at.elapsed() < TUN_OWNER_TTL)
+        .map(|(_, name)| name.clone());
+    if let Some(hit) = hit {
+        return hit;
+    }
+    let name = ask_tun_owner(dev);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dev.to_string(), (Instant::now(), name.clone()));
+    name
+}
+
+/// 真去问一次：`sudo -n <priv script> tunowner <dev>`，stdout 就是那条可执行路径。
+fn ask_tun_owner(dev: &str) -> Option<String> {
+    let out = run("sudo", &["-n", PRIV_SCRIPT, "tunowner", dev]).ok()?;
+    let path = out.lines().map(str::trim).find(|l| !l.is_empty())?;
+    app_name_from_path(path)
+}
+
+/// 把 root 报出的可执行路径归一成界面那一格的名字。
+///
+/// 三种形状各有一个读法：
+/// - 路径在某个 `.app` 包里 → 包名（`/Applications/Foo.app/Contents/MacOS/foo-helper` →
+///   `Foo`）：用户认识的是那个包，不是包里的某个辅助可执行文件。
+/// - Apple 特权辅助工具的命名约定（`com.厂商.helper`）→ 去掉这层约定名，留下厂商那一段
+///   （`/Library/PrivilegedHelperTools/com.example.helper` → `example`）。
+/// - 其余 → 可执行文件名本身（`/usr/local/bin/wireguard-go` → `wireguard-go`）。
+///
+/// 这里**不**做厂商关键词归一：路径是这台机器上的事实，照原样显示就够；把名字翻译成某个
+/// 牌子正是平台层那张产品名关键词表认错过人的地方（见 [`attribute_vpn`] 末尾的教训）。
+fn app_name_from_path(path: &str) -> Option<String> {
+    let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    if let Some(bundle) = comps.iter().rev().find_map(|c| {
+        c.strip_suffix(".app")
+            .filter(|base| !base.is_empty())
+            .map(str::to_string)
+    }) {
+        return Some(bundle);
+    }
+    let last = *comps.last()?;
+    let s = last.strip_prefix("com.").unwrap_or(last);
+    let s = s.strip_suffix(".helper").unwrap_or(s);
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// 「装了、此刻没连」的 VPN 客户端：给界面一张不带地址、状态写着没连的卡。
 ///
-/// macOS 没有「utun → 进程」的公开映射（见 [`attribute_vpn`]），归属只能等客户端自己报出
-/// 地址；但「这台机器上有 Tailscale、ProtonVPN 这么几个 VPN 客户端，它们现在没连」是
+/// 归属只能等证据（见 [`attribute_vpn`]）：问到套接字持有进程那一条要免密通道在场，而
+/// 「客户端自己报出地址」那一条对下面这些卡永远不成立 —— 没连就没有地址；但「这台机器上有
+/// Tailscale、ProtonVPN 这么几个 VPN 客户端，它们现在没连」是
 /// `scutil --nc list` 直接答得出的事实，不需要猜哪条隧道是谁建的。
 ///
 /// 已经连着的那些不再补卡：它们自己那条隧道就在清单里，两张卡说同一件事只会让人以为
@@ -1702,7 +1818,10 @@ impl NetworkPlatform for MacPlatform {
                 for i in vpn_rows {
                     let ip = out[i].ipv4.clone();
                     let wg = wireguard_sock(&out[i].name);
-                    out[i].app = attribute_vpn(&ev, ip.as_deref(), wg);
+                    // 只有套接字真在那儿才去问持有者：这一问要花一次 root，而它对那个
+                    // 路径之外的设备本来就没有答案。
+                    let owner = wg.then(|| tunnel_owner(&out[i].name)).flatten();
+                    out[i].app = attribute_vpn(&ev, ip.as_deref(), wg, owner.as_deref());
                 }
             }
 
@@ -2038,6 +2157,15 @@ mod tests {
             ("is_prefix", "128"),
             ("is_prefix", "129"),
             ("is_prefix", ""),
+            ("is_iface", "utun4"),
+            ("is_iface", "wg0"),
+            ("is_iface", "utun"),
+            ("is_iface", "-x"),
+            ("is_iface", "utun4.sock"),
+            ("is_iface", "../utun4"),
+            ("is_iface", "/var/run/wireguard"),
+            ("is_iface", "utun 4"),
+            ("is_iface", ""),
         ];
         let mut script = String::from(head);
         for (chk, sample) in cases {
@@ -2062,6 +2190,7 @@ mod tests {
                 "is_route_dest" => route_dest_ok(sample),
                 "is_ipv6" => ipv6_loose_ok(sample),
                 "is_prefix" => prefix_ok(sample),
+                "is_iface" => iface_ok(sample),
                 other => panic!("no Rust mirror for {other}"),
             };
             if admitted {
@@ -2093,6 +2222,22 @@ mod tests {
         assert!(dns_ok(&[]));
         assert!(!dns_ok(&["1.1.1.1".into(), "".into()]));
         assert!(dns_ok(&["1.1.1.1".into(), "8.8.8.8".into()]));
+
+        // 接口名会拼进 root 去 stat 的那一个路径：路径分隔、点、空白、超长一律不收。
+        for bad in [
+            "",
+            "-",
+            "utun 4",
+            "utun4.sock",
+            "../utun4",
+            "/etc/passwd",
+            "a/b",
+            "abcdefghijklmnopq", // 17 个字符，超过脚本那个 16 的上限
+        ] {
+            assert!(!iface_ok(bad), "accepted iface {bad:?}");
+        }
+        assert!(iface_ok("utun4"));
+        assert!(iface_ok("wg0"));
 
         // 一整批常见操作都在通道内；掺一条 `default` 路由后整批改走授权框。
         let everyday = vec![
@@ -2408,12 +2553,15 @@ mod tests {
             svc_ip: vec![("ProtonVPN".into(), "10.64.0.2".into())],
         };
         // 隧道自己没有 IPv4（只有 inet6）→ 地址这条线连不上，认不出
-        assert_eq!(attribute_vpn(&ev, None, false), None);
-        assert_eq!(attribute_vpn(&ev, Some(""), false), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), false, None), None);
         // 地址是别人的隧道（本例里那条服务）的，也不算这条的证据
-        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), false), None);
+        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), false, None), None);
         // 连证据清单是空的也一样：认不出就是 None，交给界面退回通用标签
-        assert_eq!(attribute_vpn(&VpnEvidence::default(), None, false), None);
+        assert_eq!(
+            attribute_vpn(&VpnEvidence::default(), None, false, None),
+            None
+        );
     }
 
     /// IPv4 是能把「这条隧道」和「那个服务」连起来的当面证据：报出这条隧道的地址的那个
@@ -2428,34 +2576,62 @@ mod tests {
             ],
         };
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), false).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), false, None).as_deref(),
             Some("Tailscale")
         );
         assert_eq!(
-            attribute_vpn(&ev, Some("192.0.2.9"), false).as_deref(),
+            attribute_vpn(&ev, Some("192.0.2.9"), false, None).as_deref(),
             Some("AnyConnect")
         );
         // 服务名比实现名具体：两条证据同时在场时，报出地址的服务优先
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), true).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), true, None).as_deref(),
             Some("Tailscale")
         );
+        // 报出地址的服务也排在套接字持有者之前：那条不用提权就能问，而且给出的是用户
+        // 自己给服务取的名字
+        assert_eq!(
+            attribute_vpn(&ev, Some("100.84.1.2"), true, Some("example")).as_deref(),
+            Some("Tailscale")
+        );
+    }
+
+    /// 套接字持有者这一条排在「wireguard-go 的实现名」之前：同一个套接字，问得出持有进程
+    /// 就该报出那个软件，问不出才退回实现名 —— 那是这条证据本来就有的下限。
+    #[test]
+    fn the_socket_holder_is_more_specific_than_the_implementation_name() {
+        let ev = VpnEvidence::default();
+        assert_eq!(
+            attribute_vpn(&ev, None, true, Some("someapp")).as_deref(),
+            Some("someapp")
+        );
+        // 空串不算答案（脚本那边要么给路径、要么非 0 退出，这边不给空名字上界面）
+        assert_eq!(
+            attribute_vpn(&ev, None, true, Some("")).as_deref(),
+            Some("WireGuard")
+        );
+        // 反过来不成立：这一格只可能来自那条套接字，没问过就是 None
+        assert_eq!(attribute_vpn(&ev, None, false, None).as_deref(), None);
     }
 
     /// 现场回归：macsys 版 Tailscale 的服务**从不出**地址，旧规则「唯一在用隧道 + 唯一已
     /// 连接会话」里那句反证于是永远不成立 —— 别人家的 wireguard 隧道（utun4）被安上了
     /// 「Tailscale」。规则删掉之后：没有设备绑定的证据就退回通用「VPN」，而 wireguard-go
-    /// 的套接字这类看得见的证据照旧认得出实现名。
+    /// 的套接字这类看得见的证据照旧认得出实现名。要报出具体软件，就得拿得出那条套接字的
+    /// 持有进程（[`tunnel_owner`]），而不是从服务清单里挑一个看起来像的。
     #[test]
     fn a_foreign_tunnel_stays_unnamed_without_device_bound_evidence() {
         let ev = VpnEvidence::default();
-        assert_eq!(attribute_vpn(&ev, Some("10.30.35.2"), false), None);
-        assert_eq!(attribute_vpn(&ev, None, false), None);
+        assert_eq!(attribute_vpn(&ev, Some("10.30.35.2"), false, None), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None), None);
         assert_eq!(
-            attribute_vpn(&ev, Some("10.30.35.2"), true).as_deref(),
+            attribute_vpn(&ev, Some("10.30.35.2"), true, None).as_deref(),
             Some("WireGuard")
         );
-        assert_eq!(attribute_vpn(&ev, None, true).as_deref(), Some("WireGuard"));
+        assert_eq!(
+            attribute_vpn(&ev, None, true, None).as_deref(),
+            Some("WireGuard")
+        );
     }
 
     /// IP 认领必须地址真对上：服务报着另一个地址时，这条隧道仍是无人认领的。
@@ -2464,12 +2640,12 @@ mod tests {
         let ev = VpnEvidence {
             svc_ip: vec![("Tailscale".into(), "100.84.1.2".into())],
         };
-        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), false), None);
-        assert_eq!(attribute_vpn(&ev, None, false), None);
-        assert_eq!(attribute_vpn(&ev, Some(""), false), None);
+        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), false, None), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), false, None), None);
         // 地址对上才认领；套接字在同时也不会把正确的认领盖掉
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), true).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), true, None).as_deref(),
             Some("Tailscale")
         );
     }
@@ -2483,6 +2659,75 @@ mod tests {
         assert!(wireguard_sock_in(&dir, "utun9"));
         assert!(!wireguard_sock_in(&dir, "utun"));
         assert!(!wireguard_sock_in(&dir, "utun4"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 界面那一格要的是「软件」，root 给的是一条可执行路径。三种形状各按各自的写法读：
+    /// 包里的取包名（用户认识的是 `.app`，不是里面的辅助可执行文件）、Apple 那套
+    /// `com.厂商.helper` 去掉约定名、其余原样（`wireguard-go` 就该显示成 `wireguard-go`）。
+    #[test]
+    fn a_holder_path_reads_as_the_software_behind_it() {
+        assert_eq!(
+            app_name_from_path("/Applications/Some VPN.app/Contents/MacOS/some-vpn").as_deref(),
+            Some("Some VPN")
+        );
+        assert_eq!(
+            app_name_from_path("/Applications/Outer.app/Contents/Helpers/Inner.app/Contents/MacOS/x")
+                .as_deref(),
+            // 嵌套包取最里面那一个：可执行文件就在它里面
+            Some("Inner")
+        );
+        assert_eq!(
+            app_name_from_path("/Library/PrivilegedHelperTools/com.example.helper").as_deref(),
+            Some("example")
+        );
+        assert_eq!(
+            app_name_from_path("/usr/local/bin/wireguard-go").as_deref(),
+            Some("wireguard-go")
+        );
+        // 拿不出名字的形状一律 None：宁可少一格信息，也不要在界面上显示一个空标签
+        assert_eq!(app_name_from_path(""), None);
+        assert_eq!(app_name_from_path("///"), None);
+        assert_eq!(app_name_from_path("/Library/PrivilegedHelperTools/com.").as_deref(), None);
+    }
+
+    /// 只读查询那一支：参数不过形状校验就不许往下走，而校验过的名字也只能落到那个约定
+    /// 路径上（那里没套接字就非 0 退出，不会去 `lsof` 一个用户给的路径）。
+    ///
+    /// 在临时目录里跑仓库那份脚本原文，**不提权、不碰系统目录**：这条挡住的是「新加的子命令
+    /// 忘了校验参数」。它**挡不住**：真持有者的解析（那要 root 和一条在用的隧道）。
+    #[test]
+    fn the_socket_holder_query_validates_its_argument_before_anything_else() {
+        let dir = std::env::temp_dir().join(format!("netsense-tunowner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("no temp dir for the wrapper");
+        let script = dir.join("netsense-priv.sh");
+        std::fs::write(&script, PRIV_SCRIPT_SRC).expect("cannot stage the wrapper");
+        let ask = |arg: &str| {
+            Command::new("/bin/sh")
+                .arg(&script)
+                .args(["tunowner", arg])
+                .output()
+                .expect("no /bin/sh to run the wrapper with")
+        };
+        // 形状不对：连那个目录都不该看一眼
+        for bad in ["../etc", "utun 4", "utun4.sock", "-x"] {
+            let out = ask(bad);
+            assert!(!out.status.success(), "accepted iface {bad:?}");
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(err.contains("bad iface"), "{bad:?} → {err}");
+        }
+        // 少一个参数也一样拒掉
+        let short = Command::new("/bin/sh")
+            .arg(&script)
+            .arg("tunowner")
+            .output()
+            .expect("no /bin/sh to run the wrapper with");
+        assert!(!short.status.success(), "no argument accepted");
+        // 名字合法但那个约定路径下没有它：非 0 退出，而不是回一个空答案
+        let out = ask("zznosuch");
+        assert!(!out.status.success(), "a missing socket answered OK");
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(err.contains("no socket"), "zznosuch → {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
