@@ -72,6 +72,7 @@
   "editor.close": "닫기",
   "editor.system_auto": "시스템 자동",
   "editor.confirm_delete": "{name}의 전용 네트워크 정책을 삭제할까요?",
+  "editor.confirm_delete_fallback": "폴백의 네트워크 설정과 두 작업 목록을 지웁니다. 프로필은 그대로입니다.",
   "editor.match_ssid": "SSID",
   "editor.match_gateway_mac": "게이트웨이 MAC",
   "editor.match_bssid": "BSSID",

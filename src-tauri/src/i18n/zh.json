@@ -72,6 +72,7 @@
   "editor.close": "关闭",
   "editor.system_auto": "系统自动获取",
   "editor.confirm_delete": "确定删除 {name} 的专有网络绑定配置吗？",
+  "editor.confirm_delete_fallback": "确定清掉兜底的网络配置和两份动作列表吗？不影响任何 Profile。",
   "editor.match_ssid": "SSID",
   "editor.match_gateway_mac": "网关 MAC",
   "editor.match_bssid": "BSSID",

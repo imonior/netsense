@@ -1425,6 +1425,34 @@ eq("改回一个对不上的名字，那一行的徽标跟着退回未命中",
   findById("pbadge-home").textContent, strings["editor.status_not_matched"]);
 check("规则卡的绿边也一起退掉", !findById("rbox-r1").className.includes("r-match"));
 
+// —————————————————————— 兜底的「删除」——————————————————————
+
+group("兜底的「删除」：先问一句，清完算作未保存的改动");
+click(byAct("sel-fallback"));
+check("删之前两份动作都在（兜底走的是无前缀的绑定路径）",
+  !!byBind("one_shot.0.action.app") && !!byBind("persistent.0.action.path"));
+// 删除按钮挂的是自己的 onclick，不是 data-act 委托 —— click() 只会惊动文档级监听，按不到它。
+// 而这一支在 await 确认遮罩处停住，所以必须攥住它返回的那颗 Promise，亲手点遮罩里的按钮再收线。
+const askDel = () => findById("btn-delete").onclick();
+let del = askDel();
+check("按删除先开确认遮罩，说的是兜底自己那句话，不是「删掉某个 Profile」",
+  findById("del-mask").hidden === false &&
+  findById("del-modal").textContent.includes(strings["editor.confirm_delete_fallback"]),
+  `mask.hidden=${findById("del-mask").hidden} modal=${JSON.stringify(findById("del-modal").textContent).slice(0, 80)}`);
+findById("del-no").onclick();
+await del;
+check("答「取消」：遮罩收掉、动作原样，而且不算改动 —— 没改就不该有未保存的拦截",
+  findById("del-mask").hidden === true &&
+  !!byBind("one_shot.0.action.app") &&
+  !byAct("sel-fallback").className.includes("dirty"));
+del = askDel();
+findById("del-yes").onclick();
+await del;
+check("答「删除」：网络与两份动作一起清掉，兜底那一行亮出未保存的小圆点",
+  byBind("one_shot.0.action.app") === null &&
+  byBind("persistent.0.action.path") === null &&
+  byAct("sel-fallback").className.includes("dirty"));
+
 // —————————————————————— 交给 Rust 那半边的材料 ——————————————————————
 
 const wf = argv.indexOf("--write-fixtures");

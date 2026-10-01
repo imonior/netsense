@@ -72,6 +72,7 @@
   "editor.close": "關閉",
   "editor.system_auto": "系統自動取得",
   "editor.confirm_delete": "確定刪除 {name} 的專屬網路綁定配置嗎？",
+  "editor.confirm_delete_fallback": "確定清掉後備的網路設定和兩份動作清單嗎？不影響任何 Profile。",
   "editor.match_ssid": "SSID",
   "editor.match_gateway_mac": "閘道 MAC",
   "editor.match_bssid": "BSSID",

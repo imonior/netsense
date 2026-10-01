@@ -1998,9 +1998,13 @@
     } else if (globalDraft.fallback) {
       // 兜底的「删除」= 回到「什么都不做」：网络与 3B 一起清掉（单清网络在网卡那一格
       // 有自己的小按钮）。保留下面的启用开关 —— 用户删的是内容，不是兜底本身。
+      // 一次点击清掉的是两份动作列表，所以它和 Profile 那一支同样过确认遮罩；清完必须
+      // 标脏 —— 不标就没有「未保存」的拦截，这一下就成了静默回退。
+      if (!(await askDelete(t("editor.confirm_delete_fallback")))) return;
       delete globalDraft.fallback.network;
       delete globalDraft.fallback.one_shot;
       delete globalDraft.fallback.persistent;
+      dirty = true;
       renderAll();
     }
   };
