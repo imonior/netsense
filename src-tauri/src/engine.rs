@@ -395,6 +395,15 @@ impl Engine {
         self.scheduler.due(&cfg.profiles, now, !self.first_pass_done)
     }
 
+    /// 引擎是否已经采到过至少一份快照。
+    ///
+    /// 条件预览（`ipc::preview_match`）靠它决定要不要作答：一轮都没跑完时 `snapshot`
+    /// 还是全空的默认值，拿它算出来的「什么都不匹配」不是判定、而是没采过样 —— 那种
+    /// 答案发给界面只会把引擎本来正确的徽标擦掉。
+    pub fn sampled(&self) -> bool {
+        self.first_pass_done
+    }
+
     /// 走一轮评估并推进节律。
     pub fn evaluate(&mut self, cfg: &Config, now: Instant) {
         let due = self.due(cfg, now);

@@ -43,7 +43,7 @@
 │   3B1 automation/one_shot: 过滤 disabled → 按排列顺序逐条执行（跑完一条才下一条）
 │   3B2 automation/persistent: 期望状态 worker，随 Active 的 THEN 起停（automation/provider 出语义）
 ├─────────────────────────────────────────────┤
-│ PAL  platform.rs: trait NetworkPlatform（18 方法）+ 编译期选平台
+│ PAL  platform.rs: trait NetworkPlatform（20 方法）+ 编译期选平台
 ├───────────────────┬────────────────┬────────────┤
 │ macOS             │ Windows        │ Linux      │
 │ networksetup      │ PowerShell CIM │ nmcli      │
@@ -79,7 +79,7 @@ netsense/
 │       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
 │       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
 │       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
-│       ├── ipc.rs             # 43 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── ipc.rs             # 46 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -102,7 +102,7 @@ netsense/
 │       ├── platform.rs        # ★ PAL trait contract + shared types + shared utils + compile-time platform selection
 │       ├── platform/
 │       │   ├── macos.rs       # macOS: networksetup / arp / airport / route / osascript + the one-time sudoers channel install
-│       │   ├── windows.rs     # Windows: PowerShell(CIM) read + netsh write + UAC elevation
+│       │   ├── windows.rs     # Windows: PowerShell(CIM) read + netsh read/write + UAC elevation
 │       │   ├── win_helper.rs  # Windows 常驻提权 helper：同一 exe 的 `--netsense-helper` + 命名管道 RPC（一次授权/会话）
 │       │   └── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec
 │       ├── update.rs          # 在线升级：check_update / run_update（下载 + 校验 + 安装）
@@ -115,7 +115,7 @@ netsense/
 │   ├── editor.html            # config editor (window label = main)
 │   ├── settings.html          # 软件设置窗口（窗口 label = settings）：语言 / 开机启动 / 升级代理 / 检查更新 / 配置与日志位置
 │   ├── logs.html              # 日志窗口（窗口 label = logs）：按天文件下拉 / 尾部行 / 级别上色 / 过滤 / 跟随
-│   ├── theme.css              # 四座窗口共用的配色：`--t-*` token 两套（深色在 :root，浅色在 html[data-theme="light"]）
+│   ├── theme.css              # 四座窗口共用的一套：配色 `--t-*` 两档（深色在 :root，浅色在 html[data-theme="light"]）+ 尺度（圆角三档、阴影两档）
 │   ├── README.md              # frontend notes + IPC command table
 │   └── serve.sh               # dev static server on :1420
 ├── scripts/
@@ -163,8 +163,10 @@ pub trait NetworkPlatform: Send + Sync {
     /// 回落保底：切回 DHCP + 清空自定义 DNS —— 这里的清空是故意的，不受上面那条三态约定约束
     fn set_dhcp(&self) -> Result<(), String>;
 
-    /// 枚举当前在用的全部网卡（有线 / 无线 / VPN）。实现必须经 `cached_nics` 包一层
-    /// TTL 缓存：面板刷新调它很频繁，而 macOS 15.6+ 枚举一次要 1–4 秒。
+    /// 枚举当前在用的全部网卡（有线 / 无线 / VPN），外加「装了但此刻没连」的 VPN 条目
+    /// （macOS 的 VPN 会话、Windows 的虚拟适配器、Linux 的未激活连接）—— 它们 `up = false`
+    /// 且不带任何地址，只让面板能说清「这几个客户端装了、现在没连」，进不了条件比对集合。
+    /// 实现必须经 `cached_nics` 包一层 TTL 缓存：面板刷新调它很频繁，而 macOS 15.6+ 枚举一次要 1–4 秒。
     fn list_interfaces(&self) -> Vec<NicInfo>;
     /// 按**设备名**切回 DHCP；默认回落到 `set_dhcp()`（主无线网卡语义），
     /// 能定位适配器/连接的平台应覆盖它，否则改动会落到另一张网卡上。
@@ -195,6 +197,16 @@ pub trait NetworkPlatform: Send + Sync {
     /// 每切一次弹一次授权框不可接受。理由同 `tunnel_connect`。
     fn set_default_printer(&self, printer: &str) -> Result<(), String>;
 
+    /// 本机**登记了启动项**的程序清单（编辑器「启动程序」动作的候选）：macOS 是
+    /// /Applications 一带的 `.app`，Windows 是开始菜单里的 `.lnk`（`Start-Process`
+    /// 直接受理它），Linux 是三个 XDG 目录里 `Type=Application` 的 `.desktop`。
+    /// 只列有启动意图的那些 —— 扫 `Program Files` 的 `.exe` 得到的是一张全是配件的单子。
+    /// 枚举不到返回空表：干净机器是正常状态，界面上仍有手输与「浏览…」两条路。
+    fn list_installed_apps(&self) -> Vec<AppEntry>;
+    /// 系统文件选择器挑一个可启动目标。取消是 `Ok(None)`、选择器起不来才是 `Err` ——
+    /// 两者在界面上是两回事：前者什么都不该发生，后者要把原因说出来（错误原文就是文案）。
+    fn pick_app(&self) -> Result<Option<String>, String>;
+
     /// 系统已保存的无线网络列表（编辑器「尚未配置的网络」用）。不支持则 `None`。
     fn list_known_ssids(&self) -> Option<Vec<String>>;
 }
@@ -210,13 +222,15 @@ Cross-platform implementation notes:
 
 | Capability | macOS | Windows | Linux |
 |------------|-------|---------|-------|
-| Current SSID | `CoreWLAN` (`CWWiFiClient`, needs Location permission) → `networksetup -getairportnetwork` → `ipconfig getsummary` → `system_profiler SPAirPortDataType` (a graded fallback, §9.6) | `Get-NetConnectionProfile` (CIM) | `nmcli -g GENERAL.CONNECTION device show <dev>`, falling back to `con show --active` |
+| Current SSID | `CoreWLAN` (`CWWiFiClient`, needs Location permission) → `networksetup -getairportnetwork` → `ipconfig getsummary` → `system_profiler SPAirPortDataType` (a graded fallback, §9.6) | `netsh wlan show interfaces`'s `SSID` line, claimed per adapter **by MAC** (the live association), then `<SSIDConfig><SSID><name>` in the saved WLAN profile XML, then `Get-NetConnectionProfile` (CIM) — an NLA network name that grows ` 2` when the network object is re-created and is not the air name (§9.6) | `nmcli -g GENERAL.CONNECTION device show <dev>`, falling back to `con show --active` |
 | Gateway MAC | `route -n get default` → `arp -n <gw>` | `arp -a` (whole table, MAC-shaped match) | `ip neigh show <gw>` |
 | BSSID | `airport -I <dev>` (≤ 14.3) → `system_profiler` | `netsh wlan show interfaces` (ASCII fields only) | `nmcli -f IN-USE,BSSID,SIGNAL dev wifi list`, the `*` row |
 | Apply static | `networksetup -setmanual` | `netsh interface ipv4 set address` | `nmcli connection modify` + `con up` |
 | ICMP probe | system `ping -c 1 -t <s>` | system `ping -n 1 -w <ms>` | system `ping -c 1 -W <s>` |
 | Add route | `route -n add -net` | `New-NetRoute` / `Remove-NetRoute` (CIM) | `ip route add` / `ip route del` |
 | Launch app | `open -a` (`--args` after the app) | `Start-Process -FilePath` | exec (a bare name resolves through `PATH`), `xdg-open` for a non-executable or a URL, and a missing path is refused before any spawn |
+| List installed apps (3B1) | `.app` bundles in `/Applications`, `/System/Applications` (incl. `Utilities`) and `~/Applications`, one level of subdirectories; deduped by path, case-insensitive by name | Start Menu `.lnk` under `%ProgramData%` + `%APPDATA%` (recursive) — `Start-Process` opens a `.lnk` directly, so no `.exe` hunting | `Type=Application` entries under the three XDG `applications` dirs; `NoDisplay`/`Hidden`/non-`Application` skipped, `Name[lang]` picked against the session locale (`LANGUAGE`/`LC_ALL`/`LANG` — same chain as `ui_language`) |
+| Pick app (3B1) | `osascript` `choose file of type {"APPL"}`; the user's cancel is exit −128 → `Ok(None)` | WinForms `OpenFileDialog` on a `-Sta` PowerShell; the filter comes from `pal.pick_app_filter` | `zenity --file-selection`, falling back to `kdialog --getopenfilename`; neither installed → `pal.no_file_dialog` |
 | List printers (3B1) | `lpstat -e` + `lpstat -d` (CUPS client) | `Get-CimInstance Win32_Printer` (`Name`, `Default`) | `lpstat -e` + `lpstat -d` (same parser as macOS) |
 | Set default printer (3B1) | `lpoptions -d <name>` → `~/.cups/lpoptions` | `Invoke-CimMethod -MethodName SetDefaultPrinter` | `lpoptions -d <name>` → `~/.cups/lpoptions` |
 | Tunnel state (3B2) | `scutil --nc list` (WireGuard for macOS registers each tunnel as a NEVPN config, so it shows up there too) | `Get-NetAdapter` (CIM; the adapter **description** carries the provider hint) | `nmcli -t connection show` → fall back to `ip link show <dev>` |
@@ -282,6 +296,18 @@ Rule    = (all *enabled* Conditions ANDed)
 - Values are compared against a single [`NetworkSnapshot`] sampled once per pass, so SSID / BSSID /
   gateway-MAC conditions cannot disagree because they were read at different instants. MACs are
   normalized on both sides (`aa:bb:cc:dd:ee:ff` == `AA-BB-CC-DD-EE-FF`).
+- **Two different questions, two different answerers** (`ipc::preview_match`). "Does this condition
+  match the network I'm on?" and "Is this Profile in effect?" are not the same question, and only the
+  second one needs the engine's cadence. `preview_match` takes the editor's **current form content,
+  unsaved draft included**, and runs it through the one and only judge — `conditions::eval_profile` —
+  against the snapshot the engine already holds. So the tri-state badges in the editor's second column
+  follow the keystroke instead of the sampling rhythm + `change_delay_secs` debounce (worst case 8 s and
+  up). What it does **not** get to say: `active` / `conflict` / `error` / `disabled`, and the green row
+  border — those stay engine-only, because a form that matches is not a config that was applied. It also
+  never samples (a sample spawns subprocesses; on macOS the downgrade chain can include a several-second
+  `system_profiler`, which would make "instant preview" the slowest command in the file), and when the
+  engine has not finished its first pass it answers `[]` — an empty snapshot only proves "not sampled
+  yet", and the editor keeps the engine's badges in that case rather than wiping them with a no.
 
 ---
 
@@ -415,11 +441,10 @@ the same Profile active does **not** re-run it (otherwise every poll interval re
 
 - Filter out `enabled: false`; what is left runs **in the order it is listed**, one action at a time:
   the next starts only once the current one has finished, regardless of success.
-- **The editor shows that order two ways**: drag a card's header onto another card, or use the header's ↑/↓
-  buttons. Dropping lands the dragged card *at the target's position* (the item that was there shifts
-  toward the gap). Either way only two cards in the **same branch and the same kind of list** may change
-  places — a one-shot action dragged onto the persistent list, or a THEN card onto an ELSE one, is
-  refused: that would change which executor owns the action, which is not a matter of position.
+- **The editor shows that order with ↑/↓ buttons in each card's header.** Each button carries the branch and
+  the list it belongs to, so a move can only ever swap two cards in the **same branch and the same kind of
+  list** — moving a one-shot action onto the persistent list, or a THEN card onto an ELSE one, would change
+  which executor owns the action rather than where it sits, and the control offers no way to express that.
 - Because the run is sequential, its worst case is the **sum** of the per-action timeouts rather than the
   slowest single one — see the budget table below.
 - A failing action does **not** block the actions after it — the opposite of 3A, on purpose: "VPN didn't
@@ -639,7 +664,11 @@ nothing shows a wall of `—`):
    netmask, gateway, IPv6, DNS. `get_interfaces` guarantees the primary NIC is `nics[0]`
    (the single judge is `automation::primary_nic`), so the frontend never re-implements "which NIC is mine".
    Below it, "Other active interfaces" lists the remaining non-VPN NICs as cards.
-2. **VPN / virtual adapters** — one card per VPN NIC (owning app shown as the tag).
+2. **VPN / virtual adapters** — one card per VPN NIC (owning app shown as the tag; the tag is omitted
+   when the entry's own name already says it). Every card in this section carries a **Status** row
+   (`popup.connected` / `popup.disconnected`, driven by the NIC's `up`), because this list also contains
+   the VPN clients that are installed but not connected — a card with no address at all would otherwise
+   look like a collection failure.
 3. **Quick Switch** — only Profiles whose `quick` flag is set (a per-profile editor checkbox), each row **with a live status badge**
    (`ACTIVE` / `NOT MATCH` / `CONFLICT` / `DISABLED` / `ERROR`) — clicking a row calls `apply_profile({id})`,
    which re-evaluates that Profile's own conditions rather than forcing anything.
@@ -669,6 +698,15 @@ On each focus (when opened) it auto-refreshes via `get_status`, and also passive
 - Whether right-click on the macOS menu-bar icon delivers `TrayIconEvent::Click` at all (without a menu attached it can fall through to the system's own behavior); if it does not, left-click alone opens the panel — acceptable, not a fallback menu.
 - The `rect` field of `TrayIconEvent::Click` exists only in newer versions; if absent, use the same event's `position` (click coordinates) as the anchor — `popup::toggle`'s parameters are unchanged.
 - The tray `rect` is physical pixels under Retina; anchor conversion already handles physical pixels. If the panel is offset by half an icon width, the platform returned logical coordinates — convert by scale factor instead.
+- **Windows: the panel's SSID should now read as the air name — no ` 2` when the taskbar shows one.**
+  The live name comes from `netsh wlan show interfaces`'s `SSID` line, claimed by the wireless adapter's
+  MAC; the saved-network dropdown still reads
+  `%ProgramData%\Microsoft\Wlansvc\Profiles\Interfaces\<guid>\*.xml`. Worth checking on a real machine:
+  for a network the taskbar labels `MyWiFi 3` while `netsh` says `MyWiFi`, both the panel row and a
+  freshly picked condition read `MyWiFi`; a condition authored on macOS matches on Windows (the two
+  platforms must name the same network); and a Chinese-named SSID shows its real characters (the netsh
+  value is OEM code page — when it decodes lossily the field must fall back to the profile XML name,
+  never show `�`).
 
 ## 9.6 Three-Platform Implementation Reference (`platform/{macos,windows,linux}.rs`)
 
@@ -684,7 +722,7 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Capability | macOS | Windows | Linux |
 |------------|-------|---------|-------|
 | Wi-Fi interface discovery | `networksetup -listallhardwareports` (Hardware Port → Device), cached; **never hardcode `en0`** | `Get-NetAdapter` by `MediaType='Native 802.11'` | `nmcli -t -f DEVICE,TYPE dev status` finds `wifi` |
-| Current SSID | gradient: `CoreWLAN` (needs Location permission) → `networksetup` → `ipconfig getsummary` → `system_profiler` (see 9.6.1) | `Get-NetConnectionProfile.Name` | active connection name (`nmcli`) |
+| Current SSID | gradient: `CoreWLAN` (needs Location permission) → `networksetup` → `ipconfig getsummary` → `system_profiler` (see 9.6.1) | `netsh wlan show interfaces`'s `SSID` line, claimed per adapter **by MAC** (the live association; a value that decodes lossily is discarded); then the saved WLAN profile XML's `<SSIDConfig><SSID><name>` — the **air** name on disk; `Get-NetConnectionProfile.Name` only as the last fallback (it is the NLA network name and grows ` 2` when the network object is re-created) | active connection name (`nmcli`) |
 | IP/mask/gateway/DNS | `ipconfig` + `networksetup -getinfo` | one PowerShell JSON pull (`Get-NetIPAddress` / `Get-NetRoute` / `Get-DnsClientServerAddress`) | `nmcli -g IP4.*` |
 | BSSID / signal | `airport -I` (≤ 14.3) → `system_profiler SPAirPortDataType` | `netsh wlan show interfaces` (**ASCII fields only**) | `nmcli -f IN-USE,BSSID,SIGNAL dev wifi list` |
 | Gateway MAC | `arp -n <gw>` | `arp -a` matching gateway line | `ip neigh show <gw>` |
@@ -696,8 +734,8 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Connect tunnel (3B2 write) | `scutil --nc start <label>` | `wireguard.exe /installtunnelservice <conf>` / `rasdial <name>` | `nmcli connection up <name>` → `ip link set <name> up` |
 | Elevate = Direct | sudoers allow-list script (`sudo -n`, no dialog) | process already admin | `sudo -n` available |
 | Elevate = Prompt | `osascript ... with administrator privileges` — the first change on a machine without the channel installs it in that same prompt (§9.1) | config batches: resident helper (`win_helper.rs`, one UAC per GUI session, same `Start-Process -Verb RunAs` to spawn it); fallback / user scripts: UAC per call (`Start-Process -Verb RunAs`) | `pkexec` |
-| Saved SSID list | `networksetup -listpreferredwirelessnetworks` | read WLAN config XML (`[xml]` parse) | `nmcli con show` filtered to `802-11-wireless` |
-| Which app owns a VPN NIC | **evidence only**: the service whose `-getinfo` reports that tunnel's IPv4, else the single `(Connected)` `scutil --nc` session when exactly one tunnel is up; otherwise left blank | adapter **description** through `VPN_APP_TABLE` | connection name through `VPN_APP_TABLE` |
+| Saved SSID list | `networksetup -listpreferredwirelessnetworks` | read WLAN config XML (`[xml]` parse), taking `<SSID><name>` (the air name, same source as the row above; hidden networks come back from `<hex>`), falling back to the profile name when the tree gives nothing | `nmcli con show` filtered to `802-11-wireless` |
+| Which app owns a VPN NIC | **evidence only**: the service whose `-getinfo` reports that tunnel's IPv4, else the single `(Connected)` `scutil --nc` session when exactly one tunnel is up **and that session reports no address of its own that differs from this tunnel's**; otherwise left blank | adapter **description** through `VPN_APP_TABLE` | connection name through `VPN_APP_TABLE` |
 | Open log folder | `open` | `explorer` | `xdg-open` |
 
 > The "Connect tunnel" row deliberately uses **neither** elevate channel below: a worker that elevated
@@ -757,7 +795,8 @@ Rules that follow from it:
 1. **Read via PowerShell CIM, not `netsh` text**.
    On Chinese Windows, `netsh` output is **localized + OEM code page (CP936)**: field names become Chinese, values like "已连接"/"信号" are Chinese too, and decoding as UTF-8 corrupts them.
    CIM cmdlets return objects, language-independent; we uniformly inject `[Console]::OutputEncoding = UTF8` in `ps()` so Chinese-containing return values (SSID, adapter name) decode correctly.
-2. **Exception: BSSID / signal percentage still come from `netsh` text, but only ASCII fields are extracted** (MAC hex, `NN%` digits). ASCII bytes are identical under CP936 and UTF-8, so unaffected by encoding; and these two lines have no CIM equivalent. **Do not** extract SSID the same way (SSID may be Chinese).
+2. **Exception: BSSID / signal / the current SSID come from `netsh` text, under separate acceptance rules.**
+   BSSID (MAC hex) and signal (`NN%` digits) are pure ASCII — identical bytes under CP936 and UTF-8 — and have no CIM equivalent. The `SSID` line is the one value CIM cannot report truthfully: `Get-NetConnectionProfile.Name` is the **NLA network object's** name (the taskbar shows it; Windows appends ` 2`, ` 3` whenever the network signature changes and the object is re-created), so the live name is claimed **by adapter MAC** — never by position in the text, or two Wi-Fi adapters would cross-claim. Field labels `SSID` / `BSSID` are Latin in every locale; only values are localized. The netsh value itself is OEM code page, so when the lossy UTF-8 decode yields `U+FFFD` the block is dropped whole and the caller falls back to the on-disk XML name — a possibly-corrupt name is worse than a stale-but-certain one. **Never** read the `Profile` / `配置文件` line as the SSID; that is exactly the NLA name this design exists to avoid.
 3. **Elevation commands always pass args as `@('a','b')` arrays, never string-concatenated**:
    `& netsh.exe @('interface','ipv4','set','address','name=Wi-Fi','static',...)`.
    Interface names with spaces/special chars are not re-split. The whole batch is rendered into a PowerShell script and handed to `Start-Process -Verb RunAs` via `-EncodedCommand` (UTF-16LE + base64, self-implemented, zero-dependency) for **one UAC covering all operations**.
@@ -789,7 +828,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **506 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **514 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -847,7 +886,17 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
   （PAL 的 `ui_prefers_dark`，macOS 读 `defaults read -g`、Windows 读 `AppsUseLightTheme`、Linux 读
   `gsettings`，问不到时退深色，因为深色是这套界面的设计基准）。把算出来的那一个写回文件就等于养一份缓存，
   而它会在系统自己换档（日落后）的那一刻开始说谎。四座窗口因此不各自实现一遍深浅判定：值随
-  `netsense://status` 的 `theme` 广播（面板、编辑器跟着换），或由 `get_theme` 现问一次（软件设置、日志窗口）。
+  `netsense://status` 的 `theme` 广播换（面板只走这一条；编辑器也走，但它的首帧等不了那一趟），
+  或由 `get_theme` 现问一次（软件设置、日志窗口，以及编辑器的首屏 —— 窗口是按 CSS 默认档建起来的，
+  配色若只跟着快照来，浅色档的用户会先看一眼深色再被闪一下）。
+- **`theme.css` 不只管颜色，也管尺度**：深、浅两档的 `--t-*`（面、字、状态点、徽标、浮层）加上圆角
+  三档（`--t-r-sm` 控件 / `--t-r-md` 容器 / `--t-r-pill` 徽标与 toast）和阴影两档（`--t-shadow` 居中
+  大弹层 / `--t-shadow-pop` 贴在内容上的小浮层）都写在这一份里，四扇窗口的内联 `:root` 只做别名。
+  校验的第 [12] 组把这句话从注释变成检查：界面上真实存在的「字 + 它所在的那块底」成对算对比度，
+  深、浅各算一次取更低的那个，低于 4.5:1 就红（占位符按 3:1 —— 它是提示不是内容）；前端出现的
+  `border-radius` / `box-shadow` 只准引用上面那批 token。它看不见的：半透明底要合成才知道值（toast、
+  选中、遮罩），hover 与选中这些运行时状态，以及一切真实几何 —— 无边框的托盘面板在 macOS 上就是
+  一块直角方窗，那由窗口配置决定，不归这一组管。
 - **开机启动不在文件里**：它的真相在操作系统里 —— macOS 是 `~/Library/LaunchAgents/com.netsense.app.plist`
   （`RunAtLoad`），Linux 是 `$XDG_CONFIG_HOME/autostart/netsense.desktop`（变量未设时即
   `~/.config/autostart/netsense.desktop`，桌面环境只按这个变量找条目），Windows 是
@@ -1002,7 +1051,7 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
 ## 12. Testing
 
 - **Platform-independent, run anytime**: `python3 scripts/validate.py`
-  11 checks: JSON validity of the 5 dictionaries, key parity, `{placeholder}` parity, i18n key references
+  12 checks: JSON validity of the 5 dictionaries, key parity, `{placeholder}` parity, i18n key references
   in **both** directions (a cited key must exist; an existing key must be cited — see §10.1), the PAL
   boundary (no concrete platform type outside `platform*`), trait
   coverage on all three platforms (by method name), `tauri.conf.json` field sanity, version consistency
@@ -1011,10 +1060,16 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   quotes, the command table in `frontend/README.md` against `main.rs`, event names both ways),
   **docs ↔ docs** (every number a doc states — key count, command count, language count, check count —
   equals its source, and the five README / CHANGELOG language copies stay structurally identical with
-  their technical tokens intact) and **UI text** (every string the interface can render comes from the
+  their technical tokens intact), **UI text** (every string the interface can render comes from the
   dictionary: a `data-i18n` reference must resolve, an unbound prose node is a failure, the English
   markup must equal `en.json` byte for byte, backend `log::*` / `win_dialog::*` calls must not carry a
-  literal, and no CJK literal may sit in backend source — both rules accept an `i18n-exempt` marker).
+  literal, and no CJK literal may sit in backend source — both rules accept an `i18n-exempt` marker) and
+  **theme** (each foreground/background `--t-*` pair the windows actually paint is recomputed against
+  WCAG AA — 4.5:1, 3.0:1 for the placeholder — in *both* the dark and the light block, and every
+  `border-radius` / `box-shadow` in `frontend/*.html` must resolve to the three-step radius scale or a
+  shadow token, while a window's inline `:root` may only *alias* `--t-*`, never define a colour of its
+  own; what it cannot see is spelled out in `check_theme`'s docstring — translucent backgrounds, hover
+  and selected states, and all real geometry)
   Each check group is worth 10 points and the run prints a total out of
   100; CI treats anything below full marks as a failure.
 - **Unit**: `cargo test` — all pure std (no tokio, no real system commands); the exact count differs
@@ -1062,13 +1117,17 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
 - **Frontend**: `scripts/editor-smoke.mjs` loads `editor.html`'s script into a `vm` context with a stubbed
   DOM and a fake `window.__TAURI__`, then drives render → input → click and asserts the binding rules that
   are invisible to every other layer (absent ≠ empty for the tri-state `dns`, disabled actions must drop out
-  of the pre-apply plan while the rest keep the order they are listed in, dragging a card header — like its
-  ↑/↓ buttons — rewrites only that array order and refuses to move a card across branches or between the
+  of the pre-apply plan while the rest keep the order they are listed in, a card's ↑/↓ buttons rewrite only
+  that array order and cannot reach across branches or between the
   one-shot and persistent lists, a status broadcast must not rebuild
   the form under the user's cursor, the five external snapshots the editor needs at boot are asked
   for concurrently — the harness times issue vs. resolve, because a serial chain reads identical in
   the command list — and a broadcast refreshes the address rows from its own payload instead of
-  re-invoking `get_interfaces`, which only the identity fingerprint may trigger).
+  re-invoking `get_interfaces`, which only the identity fingerprint may trigger). It also drives the
+  condition preview: typing a condition must move that rule's and that profile's badge without any
+  broadcast, keystrokes must collapse into one `preview_match` call, and the row's green "in effect"
+  border must *not* be among what the preview is allowed to upgrade (what the matcher itself computes
+  is guarded by the Rust tests in `conditions/`, not by the harness's substitute).
   `--write-fixtures <path>` additionally dumps the exact
   `save_profile` / `save_global` payloads it sent; CI runs the assertions in the `validate` job and
   re-runs the script in each build leg to produce that dump, which the config test
@@ -1325,6 +1384,13 @@ What no automated gate can reach, and therefore what needs a real machine per OS
   output and exit codes were captured and checked by hand (`lpstat -e`, `lpstat -d`, `lpoptions -d` on a
   throwaway `HOME`), but the write was never run against real printers, because that would change the
   user's own default as a side effect of a test.
+- **The 3B1 "launch program" field**: the parsers have fixture tests, but the scans and the dialogs
+  cannot run headless. Verified by hand on macOS 15.7.7: `list_installed_apps` against a real machine
+  (229 bundles from the four roots, a nested bundle found one level down, well-formed names/paths,
+  no duplicates) and that `pick_app`'s AppleScript compiles — `osacompile` on the exact string the
+  code builds. Still open: the picker dialogs themselves (macOS cancel = exit −128; zenity/kdialog
+  cancel = non-zero exit with empty stdout) and the Windows/Linux scans (`%ProgramData%`+`%APPDATA%`
+  Start-Menu tree; the three XDG `applications` dirs), which need those machines.
 - **Popup panel**: keyboard focus / the blur-collapse rule and Retina coordinate conversion (§9.5).
 - **Privilege channel**: a first install of `scripts/install-priv-helper.sh`, and the UAC prompt count for
   a non-admin Windows user — with the helper it should be **one per GUI session** (first apply asks; later
@@ -1345,10 +1411,17 @@ What no automated gate can reach, and therefore what needs a real machine per OS
 - **Privilege model uses the system's built-in authorization** (macOS sudoers allow-list / Windows UAC / Linux sudo+pkexec); only Windows adds a resident elevated helper (§9.6 rule 3) — macOS / Linux stay daemon-free per §9.2 (narrower scope, no socket-auth surface).
 - `watch_ssid` is adaptive polling (2s/5s) on all three platforms, **not event-driven**: macOS's CoreWLAN notifications need objc2 FFI and handling `CWInterface` notification object lifetime, Windows's `WlanRegisterNotification` likewise needs FFI; the payoff (skipping a subprocess every 2–5s) doesn't justify the complexity, deferred.
   The polling logic is extracted into shared `poll_ssid_watch`; switching to event-driven later only requires changing each platform's `watch_ssid` in one place.
-- The editor's opening line is **one concurrent batch**, not a chain: `get_config` plus the four
-  system-inventory commands and `get_status` go out together (`Promise.all`). Each of them shells out,
-  so awaiting them in sequence priced the window at their *sum* — which is the multi-second blank the
-  field reported.
+- The editor's opening line is **two concurrent batches, and only the cheap one gates the first paint**:
+  `get_config` + `get_language` + `get_theme` are awaited before the form is drawn, while the four
+  system-inventory commands and `get_status` are issued in the same tick (`Promise.all`) and land later.
+  Each of the latter shells out, so awaiting them in sequence priced the window at their *sum* — which is
+  the multi-second blank the field reported; and since they feed the state strip, the badges and the
+  dropdown candidates rather than the form itself, even one shared batch of them is a wait the first
+  frame cannot afford. `get_language` / `get_theme` moved into the cheap batch because `<html lang>` and
+  `<html data-theme>` have to be right on that same frame: the window is built on the CSS default (dark),
+  so a theme that only arrives with the snapshot shows the light-theme user a flash of dark first.
+  When the second batch lands it repaints — unless the user already typed into the form, in which case it
+  takes the light broadcast path (`refreshLive`) rather than rebuilding the field under their cursor.
   Likewise a broadcast does **not** trigger another `get_interfaces`: one engine pass emits two events
   (`evaluation` then `status`), so refetching per event means a subprocess per second, and the address
   rows it was meant to refresh are already inside the `status` payload. What `get_interfaces` uniquely
@@ -1371,7 +1444,28 @@ What no automated gate can reach, and therefore what needs a real machine per OS
   any unclaimed tunnel to whichever client happens to be installed — a specific-looking wrong answer
   about a device it has nothing to do with. Attribution now requires evidence bound to that interface
   (its IPv4 reported by a service, or a single connected session when a single tunnel is up), and
-  returns `None` otherwise; the UI falls back to the generic VPN label (§9.6).
+  returns `None` otherwise; the UI falls back to the generic VPN label (§9.6). The second route carries
+  a falsifier too: if that session's own service reports an IPv4 and it is *not* this tunnel's address
+  (including the case where this tunnel reports no IPv4 at all), the two are demonstrably different
+  things and the name is withheld. "Uniqueness" only means nothing else was competing; the address is
+  the evidence.
+- **A VPN card always says whether it is connected; the app name only appears on evidence.** That
+  asymmetry is the whole rule for this section: `up` comes straight from `ifconfig`/`scutil`/`Status`,
+  so it is never a guess, while the tag above it is withheld whenever the evidence does not bind to
+  *this* interface. A missing name costs one cell of information; a wrong name is a specific lie the
+  user then aims "keep this VPN connected" at.
+- **Windows takes the air name from the live association, not from any Windows "network name".**
+  `Get-NetConnectionProfile.Name` is the **NLA network object's** name: when the network signature
+  changes (adapter re-init, driver reload, sleep/wake, DHCP or gateway change, VPN interference) Windows
+  re-identifies the network, creates a new object and appends ` 2`, ` 3` for disambiguation — the taskbar
+  shows that name, and it exists on no other device, so a condition authored on macOS could never match
+  it here. The "current SSID" field takes its value from `netsh wlan show interfaces`'s `SSID` line,
+  claimed per adapter **by MAC** (the association itself); when that value is unreadable (lossy decode)
+  it falls back to `<SSIDConfig><SSID><name>` (hidden networks: `<hex>` decoded back to UTF-8) in
+  `%ProgramData%\Microsoft\Wlansvc\Profiles\Interfaces\<guid>\*.xml`, and only then to the NLA name. The
+  saved-network dropdown lists what is on disk, so it stays XML-based. The NLA name is deliberately the
+  end of the chain, never the head: the taskbar's `MyWiFi 3` is a local bookkeeping label, not the
+  network's name.
 - **The updater's PowerShell leg returns raw bytes, not `.Content`.** `.Content` is typed by the response:
   `SHA256SUMS` arrives as `application/octet-stream`, so it is a `byte[]`, and printing a `byte[]` to
   stdout gives one decimal per line — which then parses as "asset not listed". And when it *is* a

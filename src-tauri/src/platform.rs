@@ -56,7 +56,8 @@ pub enum NicKind {
 }
 
 /// 单张网卡的快照。与 [`InterfaceStatus`]（"主无线网卡"视角）互补：
-/// 这里回答的是"这台机器上**同时**连着哪些网"，面板的两段网卡列表与设置窗口的硬件列都基于它。
+/// 这里回答的是"这台机器上**同时**连着哪些网"，面板的两段网卡列表（其他在用网卡、
+/// VPN/虚拟网卡）与编辑器的「当前网络」那一格都基于它。
 ///
 /// 字段取不到一律为 `None` —— 前端按缺省显示「—」，不允许用占位文本造假值。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -66,7 +67,13 @@ pub struct NicInfo {
     /// 人类可读名：macOS 的网络服务名 / Windows 的适配器描述 / Linux 的连接名
     pub label: Option<String>,
     pub kind: NicKind,
-    /// 是否已启用（有 IPv4 或已关联无线即视为在用）
+    /// 这条链路当下**连着没有**：有 IPv4 或已关联无线即视为在用；面板的 VPN 段就靠这一格
+    /// 说「已连接 / 未连接」。
+    ///
+    /// 未连接的条目**也在清单里**（Windows 上没连上的虚拟适配器、macOS 上装了但没连的 VPN
+    /// 会话）：「这个软件装了，现在没连」本身就是信息，托盘面板与 3B2 的「维持连接」都要
+    /// 能找到它。反过来说，`up: false` 不是「采集失败」，而 conditions 层的身份快照不收它
+    /// （没连的链路进不了比对集合）。
     pub up: bool,
     /// 无线网卡当前关联的 SSID
     pub ssid: Option<String>,
@@ -87,6 +94,10 @@ pub struct NicInfo {
     /// 各平台只在拿得准的时候才填：macOS 没有「utun → 进程」的公开映射，猜出来的归属
     /// 会指到**别家软件**头上（那条隧道不是它建的）。认不出来留 `None`，界面退回通用的
     /// 「VPN」标签；认错才是事故。
+    ///
+    /// 「装了但没连」的那几张卡（macOS 的 VPN 会话、Windows 上没连上的虚拟适配器）填的
+    /// 是**这条会话自己的名字**归一出来的产品名 —— 它不认领任何隧道，所以这一格给得出来；
+    /// 而它同时带着 `up: false`，界面据此说「未连接」。
     pub app: Option<String>,
 }
 
@@ -177,7 +188,6 @@ pub(crate) fn is_tunnel_device(dev: &str) -> bool {
 
 /// [`guess_vpn_app`] 的关键字表。**顺序就是优先级**：兜底的 `"vpn"` 必须留在最后，
 /// 否则 `Tailscale Tunnel` 会被认成一台面目模糊的「VPN」。
-#[allow(dead_code)] // 只在 Windows / Linux 两条腿的调用路径上被用到；原因见 [`guess_vpn_app`]
 pub(crate) const VPN_APP_TABLE: &[(&str, &str)] = &[
     ("tailscale", "Tailscale"),
     ("wireguard", "WireGuard"),
@@ -207,16 +217,15 @@ pub(crate) const VPN_APP_TABLE: &[(&str, &str)] = &[
     ("vpn", "VPN"),
 ];
 
-/// 从一段自由文本里猜 VPN 软件名（Windows 适配器描述 / nmcli 连接名）。
+/// 从一段自由文本里猜 VPN 软件名（Windows 适配器描述 / macOS 的 VPN 会话标签 / nmcli 连接名）。
 ///
 /// 命中即返回**产品名**（统一大小写，便于展示），未命中返回 `None`，由调用方退回
 /// 更泛的兜底名（如设备名）。
 ///
-/// 用的前提是「这段文本描述的就是这块网卡」：两条腿传进来的都是设备自带的描述/连接名。
-/// macOS 那一腿以前也拿它兜底（扫一遍 `-listallnetworkservices`，命中即返回），现在去掉了
-/// —— 那边的服务清单里，装过但没连的客户端**一直**在列，于是无人认领的隧道会被说成是
-/// 别人建的，认不出比认错糟得多（见 macos 腿的归属判定）。所以它在 macOS 编译单元里未使用。
-#[allow(dead_code)] // macOS 那一腿不再按名字猜归属（见下方说明），故那边没人调它
+/// 用的前提是「这段文本描述的就是这块网卡／这条会话」：三条腿传进来的都是设备自带的描述、
+/// 会话标签或连接名。macOS 那一腿**只**拿它做这一步（给一条 VPN 会话归一个产品名），
+/// 从不拿它去猜「这条 utun 是谁建的」—— 那边的服务清单里，装过但没连的客户端**一直**在列，
+/// 于是无人认领的隧道会被说成是别人建的，认不出比认错糟得多（见 macos 腿的归属判定）。
 pub(crate) fn guess_vpn_app(text: &str) -> Option<&'static str> {
     let s = text.to_ascii_lowercase();
     for (needle, name) in VPN_APP_TABLE {
@@ -225,6 +234,34 @@ pub(crate) fn guess_vpn_app(text: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// 给一条 VPN 会话／连接归一个**值得单独显示**的产品名；不值得就返回 `None`。
+///
+/// 「装了但没连」的那几张卡（macOS 的 VPN 会话、Linux 上未激活的 NM 连接）在界面上的标题
+/// 就是会话标签／连接名本身，产品名只是旁边那一枚标签。所以只在两者**说的不是同一件事**时
+/// 才挂：`Nord` 旁边那枚「NordVPN」是信息，`Office WireGuard` 旁边再来一枚「WireGuard」是
+/// 把同一句话写两遍。认不出产品名同样返回 `None`，界面退回通用的「VPN」。
+///
+/// `#[allow(dead_code)]`：调用方是 macOS 与 Linux 两条腿（它们都有「装了但没连」的会话要
+/// 显示）；Windows 那一侧的虚拟适配器在 `list_interfaces` 里直接给出了归属，不经过这里。
+#[allow(dead_code)]
+pub(crate) fn vpn_app_for(label: &str) -> Option<String> {
+    let product = guess_vpn_app(label)?;
+    let hay = app_letters(label);
+    (!hay.contains(app_letters(product).as_str())).then(|| product.to_string())
+}
+
+/// 产品名比对用的写法：只留字母数字并转小写。
+///
+/// 会话标签往往是用户从客户端窗口里抄来的写法（`ProtonVPN`、`Tailscale Tunnel`），产品名是
+/// 表里那一个（`Proton VPN`）。两者指的是同一个软件，差别却只在大小写、空格和连字符上，
+/// 所以比对前先把这些抹掉 —— 否则「同一个名字写两遍」这一关会漏掉大半。
+fn app_letters(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 /// 一条「要维持连接」的隧道（3B2 常驻动作的目标）。
@@ -398,6 +435,23 @@ pub struct PrinterInfo {
     pub is_default: bool,
 }
 
+/// 一个**可启动的**本机程序：给人看的名字，和 [`NetworkPlatform::launch_app`]
+/// 真正要的那个目标。
+///
+/// `path` 是平台自己受理的形状，不是「某个统一的文件路径」：macOS 是 `.app` 包路径
+/// （`open -a` 之外最稳的 `open <路径>`），Windows 是 `.lnk` / `.exe` 的完整路径
+/// （`Start-Process` 两种都收），Linux 是 `.desktop` 里 `Exec=` 的可执行文件路径
+/// （桌面环境之外 `xdg-open` 也能把 `.desktop` 起起来，但直接 spawn 可执行文件更干净）。
+/// 界面**只负责原样带回**：它不该、也无法把这里的路径翻译成另一种形状。
+///
+/// `name` 只给人看 —— macOS 是去掉 `.app` 后缀的包名、Windows 是快捷方式名、
+/// Linux 是 `.desktop` 的 `Name`（已按当前语言挑过的那个）。
+#[derive(Debug, Clone, Serialize)]
+pub struct AppEntry {
+    pub name: String,
+    pub path: String,
+}
+
 /// PAL 契约：Core Engine 只依赖此 trait，不直接碰系统命令。
 pub trait NetworkPlatform: Send + Sync {
     fn watch_ssid(&self, cb: Box<dyn Fn(Option<String>) + Send + Sync>) -> WatcherHandle;
@@ -510,6 +564,32 @@ pub trait NetworkPlatform: Send + Sync {
     /// [`NetworkPlatform::tunnel_connect`] 那条是同一个理由。名字在本机不存在时照实 `Err`。
     fn set_default_printer(&self, printer: &str) -> Result<(), String>;
 
+    /// 本机**装着的可启动程序**清单（编辑器里启动程序动作的候选）。
+    ///
+    /// 只服务一件事：3B 里那个应用路径输入框的下拉候选。取不到、这台机器没装任何
+    /// 能枚举的东西，都返回空列表 —— 空不是错误，输入框本来就允许手输，界面据此
+    /// 显示「没有候选，请手输」；**不要**为它弹框，也不要把它伪装成加载失败。
+    ///
+    /// 枚举的只是**有启动意图登记**的程序：macOS 的 `.app` 包、Windows 开始菜单里的
+    /// 快捷方式（`.lnk`）、Linux 的 `.desktop`。不扫 `Program Files` 的裸 `.exe` ——
+    /// 那里面有大量不是给人启动的东西（卸载器、辅助进程、运行时），拉一份进去等于
+    /// 把下拉变成垃圾场。找不到的程序照样可以手输路径，这条路不受枚举范围约束。
+    ///
+    /// 结果按名字排序、`path` 去重；`async` 调用方（见 `ipc::get_installed_apps`）
+    /// 负责别把它放进主线程 —— 三套实现都要拉子进程或遍历目录。
+    fn list_installed_apps(&self) -> Vec<AppEntry>;
+
+    /// 弹**系统自己的**文件选择器，让用户挑一个程序，返回其路径；用户取消 → `Ok(None)`。
+    ///
+    /// 与 [`list_installed_apps`](NetworkPlatform::list_installed_apps) 的分工：那个
+    /// 回答「菜单里有哪些」，这个回答「磁盘上任意一个我都指得出来」—— 绿色免安装的
+    /// 单文件程序不会出现在任何开始菜单里，只能靠这里找。
+    ///
+    /// 返回的路径同样只要求是 `launch_app` 受理的形状（见 [`AppEntry`] 的 `path`）；
+    /// 取消返回 `Ok(None)` 而不是 `Err` —— 「用户想了想又关掉」不是错误，界面不该弹
+    /// 报错。选择器起不来（headless、没装对话框工具）才是 `Err`。
+    fn pick_app(&self) -> Result<Option<String>, String>;
+
     /// 已保存的无线网络列表（编辑器下拉填充）。平台不支持时返回 `None`。
     fn list_known_ssids(&self) -> Option<Vec<String>>;
 
@@ -608,6 +688,21 @@ pub(crate) fn run_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Res
 pub(crate) fn run_owned(program: &str, args: &[String]) -> Result<String, String> {
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run(program, &refs)
+}
+
+/// 已装程序清单的收口（三平台共用）：按 `path` 去重（同一份程序可能在两个目录各有一份，
+/// 例如系统目录与用户目录），名字按不区分大小写排、同名再按路径 —— 下拉要的是稳定顺序，
+/// 别让文件系统的枚举顺序决定列表长什么样。
+pub(crate) fn dedupe_sort_apps(mut apps: Vec<AppEntry>) -> Vec<AppEntry> {
+    let mut seen = std::collections::HashSet::new();
+    apps.retain(|a| seen.insert(a.path.clone()));
+    apps.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    apps
 }
 
 /// 通用 SSID 轮询监视（三平台共用）：未连接 2s / 已连接 5s 自适应，
@@ -1074,8 +1169,9 @@ pub use linux::{priv_channel, LinuxPlatform as Platform};
 #[cfg(test)]
 mod tests {
     use super::{
-        prefers_dark_from_defaults, prefers_dark_from_gsettings, prefers_dark_from_reg,
-        printer_label, printers_from_lpstat, provider_in, sh_q, tunnel_name_eq, TunnelTarget,
+        app_letters, prefers_dark_from_defaults, prefers_dark_from_gsettings,
+        prefers_dark_from_reg, printer_label, printers_from_lpstat, provider_in, sh_q,
+        tunnel_name_eq, vpn_app_for, TunnelTarget,
     };
 
     #[test]
@@ -1413,5 +1509,31 @@ printer CanonG3860 is disabled.
         // 两条都问不到 → 承认不知道
         assert_eq!(prefers_dark_from_gsettings(None, None), None);
         assert_eq!(prefers_dark_from_gsettings(Some("'gtk'"), None), None);
+    }
+
+    /// 「装了但没连」的那几张卡：标题已经是会话标签／连接名，产品名只在**标题没说清**时挂。
+    #[test]
+    fn a_product_name_is_only_shown_when_the_label_does_not_already_say_it() {
+        // 标签只写了厂商名前缀 → 补全，这一格是真信息
+        assert_eq!(vpn_app_for("Forti").as_deref(), Some("FortiClient"));
+        assert_eq!(vpn_app_for("Palo Alto").as_deref(), Some("GlobalProtect"));
+        // 标签本身就是这个软件的名字（差别只在空格、连字符、大小写）→ 不写第二遍
+        assert_eq!(vpn_app_for("ProtonVPN"), None);
+        assert_eq!(vpn_app_for("Tailscale Tunnel"), None);
+        assert_eq!(vpn_app_for("tailscale"), None);
+        // 认不出产品名 → None，界面退回通用的「VPN」；这里不存在「猜一家」的余地
+        assert_eq!(vpn_app_for("我的那条隧道"), None);
+        assert_eq!(vpn_app_for(""), None);
+    }
+
+    /// 抹分隔符这一步是上一条判据的全部权重：漏掉空格或大小写就会把「同一个软件写两遍」
+    /// 当成两个不同的名字，界面上多出一枚重复的标签。
+    #[test]
+    fn separators_and_case_are_not_differences_when_comparing_names() {
+        assert_eq!(app_letters("Proton VPN"), app_letters("protonvpn"));
+        assert_eq!(app_letters("NordLynx-Home"), "nordlynxhome");
+        // 非拉丁文字按「字母数字」保留，不能整段抹成空串
+        assert_eq!(app_letters("办公室 Wi-Fi"), "办公室wifi");
+        assert_eq!(app_letters("!!"), "");
     }
 }

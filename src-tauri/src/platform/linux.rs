@@ -9,8 +9,9 @@
 //! 打印机走 CUPS 客户端命令（`lpstat` / `lpoptions`），与 macOS 共用同一套解析。
 
 use super::{
-    extract_mac, poll_ssid_watch, prefers_dark_from_gsettings, printers_from_lpstat, run, run_env,
-    timeout_secs, C_LOCALE,
+    dedupe_sort_apps, extract_mac, poll_ssid_watch, prefers_dark_from_gsettings, printers_from_lpstat,
+    run, run_env,
+    timeout_secs, AppEntry, C_LOCALE,
     Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
     WatcherHandle,
 };
@@ -101,6 +102,174 @@ fn spawn_detached(program: &str, args: &[String]) -> Result<(), String> {
     });
     Ok(())
 }
+
+// —————————————————————————— 启动程序（3B launch_app 的候选） ——————————————————————————
+
+/// `.desktop` 的 `Exec=` 行 → 第一个可执行的 token（程序本体）。
+///
+/// 规则按 desktop 入口规范：引号里整段算一个 token，`\\` 转义下一个字符；`%U` 一族
+/// 字段码（`%f`/`%u`/`%F`/`%U`/`%d`/`%D`/`%n`/`%N`/`%i`/`%c`/`%k`/`%v`/`%m`）整个消失，
+/// `%%` 是字面百分号；`env VAR=1 prog`（少见的合法写法）里的赋值前缀不是程序名。
+fn exec_first_token(exec: &str) -> Option<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = exec.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            ' ' | '\t' if !quoted => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+            }
+            '%' => {
+                if chars.next() == Some('%') {
+                    cur.push('%');
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    let mut it = toks.into_iter();
+    let mut head = it.next()?;
+    if head == "env" {
+        loop {
+            head = it.next()?;
+            if !head.contains('=') {
+                break;
+            }
+        }
+    }
+    Some(head)
+}
+
+/// 一份 `.desktop` 文件的内容 → 一条可启动程序。
+///
+/// 只认 `[Desktop Entry]` 这一段：后面的 `[Desktop Action …]` 是右键菜单项，名字与
+/// Exec 都不是「程序本身」。`NoDisplay=true`（不想在菜单里露脸）与 `Hidden=true`
+/// （已被同名文件遮蔽）是文件自己说别显示，两者都不进下拉；`Type` 不是 `Application`
+/// 的（`Link` 是网址）也不要。
+///
+/// 名字按 `Name[zh_CN]` → `Name[zh]` → `Name` 的顺序挑（GLib 同一套匹配规则），
+/// `lang` 为空时只会落到最后那一条。
+fn app_from_desktop(text: &str, lang: &str) -> Option<AppEntry> {
+    let norm = |s: &str| {
+        s.split('.')
+            .next()
+            .unwrap_or("")
+            .replace('-', "_")
+            .to_lowercase()
+    };
+    let want = norm(lang);
+    let mut in_entry = false;
+    let mut hidden = false;
+    let mut is_app = true;
+    let mut exec: Option<String> = None;
+    let mut name: Option<(u8, String)> = None; // (匹配强度, 名字)
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (k, v) = (k.trim(), v.trim());
+        let rank = if k == "Name" {
+            0
+        } else if let Some(tag) = k.strip_prefix("Name[").and_then(|r| r.strip_suffix(']')) {
+            let t = norm(tag);
+            if !want.is_empty() && t == want {
+                2
+            } else if want.contains('_') && t == want.split('_').next().unwrap_or("") {
+                1
+            } else {
+                continue;
+            }
+        } else {
+            match k {
+                "NoDisplay" | "Hidden" => hidden |= v.eq_ignore_ascii_case("true"),
+                "Type" => is_app = v == "Application",
+                "Exec" => exec = Some(v.to_string()),
+                _ => {}
+            }
+            continue;
+        };
+        if !v.is_empty() && name.as_ref().map_or(true, |(r, _)| rank > *r) {
+            name = Some((rank, v.to_string()));
+        }
+    }
+    if hidden || !is_app {
+        return None;
+    }
+    let path = exec_first_token(exec.as_deref()?)?;
+    let (_, name) = name?;
+    Some(AppEntry { name, path })
+}
+
+/// 三个 XDG 位置的 `.desktop` 清单目录：系统装的两处 + 用户自己放的
+/// （`~/.local/share/applications`，AppImage 安装器与 `desktop-file-install` 都写这里）。
+fn desktop_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        std::path::PathBuf::from("/usr/share/applications"),
+        std::path::PathBuf::from("/usr/local/share/applications"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join(".local/share/applications"));
+    }
+    dirs
+}
+
+/// `Name[xx]` 要对的标签，与 [`LinuxPlatform::ui_language`] 取同一层环境变量
+/// （`LANGUAGE` → `LC_ALL` → `LANG`，多级取第一项）。取不到返回空串：
+/// 这时只认无标签的 `Name`，不猜。
+fn desktop_lang() -> String {
+    for name in ["LANGUAGE", "LC_ALL", "LANG"] {
+        let v = std::env::var(name).unwrap_or_default();
+        let v = v.split(':').next().unwrap_or("").trim().to_string();
+        if !v.is_empty() && v != "C" && v != "POSIX" {
+            return v;
+        }
+    }
+    String::new()
+}
+
+/// 跑一条「取消也算一种正常结局」的对话框命令：返回 `(是否成功退出, stdout)`。
+///
+/// 不能用 `run`：它把非 0 一律折进 `Err`（stderr 空时退化成一个模板化报错），而
+/// zenity/kdialog 取消时正是「退非 0 且什么都不说」—— 用 `run` 就分不出「用户取消」
+/// 与「对话框起不来」。spawn 本身失败（没装）才是 `Err`。
+fn run_dialog(program: &str, args: &[&str]) -> Result<(bool, String), String> {
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            i18n::tf(
+                "pal.spawn_failed",
+                &[("program", program), ("error", &e.to_string())],
+            )
+        })?;
+    Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()))
+}
+
+/// `PATH` 里有没有这个命令（`zenity` / `kdialog` 二选一时用）。
+fn in_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|p| p.join(program).is_file())
+    })
+}
+
 
 /// `nmcli -t` 用反斜杠转义分隔符（`\:` / `\\`），取值后需要还原。
 fn unescape_t(s: &str) -> String {
@@ -282,6 +451,8 @@ pub struct LinuxPlatform;
 /// NetworkManager 清单里的一条连接。
 struct NmConn {
     name: String,
+    /// `TYPE` 列（`vpn` / `wireguard` / `802-11-wireless` / …）。
+    ty: String,
     /// `true` = 当前挂着活动设备。
     active: bool,
     /// 供厂商提示匹配的文本（连接类型 + 设备名）。
@@ -306,7 +477,58 @@ fn nm_connections() -> Vec<NmConn> {
                 // `con show` 对未激活的连接把 DEVICE 留空，所以「有没有设备」就是活动判据
                 active: !device.is_empty(),
                 hay: format!("{} {}", f[1].trim(), device),
+                ty: f[1].trim().to_string(),
             }
+        })
+        .collect()
+}
+
+/// NM 的连接类型是否属于 VPN。
+///
+/// 与 [`LinuxPlatform::list_interfaces`] 里给在用设备分类型用的是同一组取值：`vpn` 是 NM
+/// 的第三方 VPN 大类，另外三种是隧道设备类。
+fn is_vpn_conn_type(ty: &str) -> bool {
+    matches!(ty, "vpn" | "wireguard" | "tun" | "tap")
+}
+
+/// 「装了、此刻没连」的 VPN 连接：给界面一张不带地址、状态写着没连的卡。
+///
+/// 在用的那些来自 `dev status`，而未激活的连接**根本没有设备**，那条路走不到它们 —— 可用户
+/// 问的正是「我装的那些 VPN 现在连着没有」，这份答案只在 `con show` 里有。
+/// 只收 VPN 类型：没连的 Wi-Fi／有线连接列进来只会把面板挤成一堆用不上的名字。
+///
+/// 名字用连接名：Linux 上那就是用户在桌面网络里看到的那个大名，与在用的那条同源，所以
+/// 归属判定在这里给得出来（不像 macOS 要等证据，那边只能确认会话叫什么、不能确认隧道是谁建的）。
+fn idle_vpn_conns(conns: &[NmConn], live: &[super::NicInfo]) -> Vec<super::NicInfo> {
+    let mut seen: Vec<&str> = Vec::new();
+    conns
+        .iter()
+        .filter(|c| !c.active && is_vpn_conn_type(&c.ty))
+        .map(|c| c.name.as_str())
+        .filter(|&name| {
+            !live.iter().any(|n| {
+                n.kind == super::NicKind::Vpn
+                    && (n.name == name
+                        || n.label.as_deref() == Some(name)
+                        || n.app.as_deref() == Some(name))
+            })
+        })
+        .filter(|&name| {
+            if seen.contains(&name) {
+                return false;
+            }
+            seen.push(name);
+            true
+        })
+        .map(|name| super::NicInfo {
+            name: name.to_string(),
+            // 未激活的连接没有设备名，标题能用的只有连接名；`label` 同时填上，面板的标题
+            // 才是这个名字本身，而不是在后面再缀一遍「(VPN)」—— 类型由旁边那枚标签说。
+            label: Some(name.to_string()),
+            kind: super::NicKind::Vpn,
+            up: false,
+            app: super::vpn_app_for(name),
+            ..Default::default()
         })
         .collect()
 }
@@ -573,7 +795,7 @@ impl NetworkPlatform for LinuxPlatform {
         run_priv("nmcli", &["con", "up", &conn])
     }
 
-    /// 枚举当前在用的全部网卡。
+    /// 枚举当前在用的全部网卡，外加「装了但没连」的 VPN 连接。
     ///
     /// 先取 `dev status`（设备 + 类型 + 状态 + 连接名），再对 `connected` 的设备逐个
     /// 取地址细节。VPN 的「软件名」在 Linux 上就是连接名（Tailscale / WireGuard / 自建
@@ -665,6 +887,12 @@ impl NetworkPlatform for LinuxPlatform {
                     },
                 });
             }
+
+            // 「装了、没连」的那几个 VPN 客户端补在最后：它们没有设备，上面那条按设备枚举的
+            // 路走不到它们。多一次 `nmcli con show`，整体在 TTL 缓存里，摊到每次面板开合上
+            // 就是几秒一次。
+            let idle = idle_vpn_conns(&nm_connections(), &out);
+            out.extend(idle);
 
             let rank = |k: super::NicKind| match k {
                 super::NicKind::Wireless => 0,
@@ -799,6 +1027,47 @@ impl NetworkPlatform for LinuxPlatform {
         let target = classify_target(app, meta.is_some(), has_exec_bit);
         let (program, argv) = launch_plan(app, args, target)?;
         spawn_detached(&program, &argv)
+    }
+
+    fn list_installed_apps(&self) -> Vec<AppEntry> {
+        // 只列 `.desktop` 登记过的程序（系统两处 + 用户一处）：那既是「安装器替用户登记过
+        // 的入口」，也正好是 `Name`/`Exec` 都有据可查的形状。PATH 里的裸命令不列 ——
+        // 那是几百个开发工具与系统组件，不是「这台机器装了什么程序」的答案。
+        let lang = desktop_lang();
+        let mut out = Vec::new();
+        for d in desktop_dirs() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for ent in rd.flatten() {
+                if ent.path().extension().and_then(|e| e.to_str()) != Some("desktop") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
+                if let Some(e) = app_from_desktop(&text, &lang) {
+                    out.push(e);
+                }
+            }
+        }
+        dedupe_sort_apps(out)
+    }
+
+    fn pick_app(&self) -> Result<Option<String>, String> {
+        // zenity（GNOME 世界）→ kdialog（KDE）：两个桌面世界各用各的通用对话框。
+        // 取消：zenity 退 1、kdialog 退 1，都**没有输出** —— `run_dialog` 把「退非 0」
+        // 与「起不来」分开，取消因此是 `Ok(None)` 而不是一条错误。
+        let title = i18n::t("pal.pick_app_title");
+        if in_path("zenity") {
+            let (ok, out) = run_dialog("zenity", &["--file-selection", &format!("--title={title}")])?;
+            let p = out.trim();
+            return Ok((ok && !p.is_empty()).then(|| p.to_string()));
+        }
+        if in_path("kdialog") {
+            let (ok, out) = run_dialog("kdialog", &["--getopenfilename", ".", &title])?;
+            let p = out.trim();
+            return Ok((ok && !p.is_empty()).then(|| p.to_string()));
+        }
+        // 两个都没有：这台机器没有能用的文件对话框（非桌面会话），照实报错。
+        // 手输路径那条路不受影响。
+        Err(i18n::t("pal.no_file_dialog"))
     }
 
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String> {
@@ -994,6 +1263,57 @@ mod tests {
         assert_eq!(classify_target("/usr/bin/firefox", false, false), Target::NotFound);
     }
 
+    /// `Exec=` 到「程序本体」的几种真实写法：字段码消失、引号里的空格留住、
+    /// `env` 赋值前缀剥掉、只有字段码的行没有可指的程序。
+    #[test]
+    fn exec_line_yields_the_program_itself() {
+        assert_eq!(
+            exec_first_token("/usr/bin/firefox %u").as_deref(),
+            Some("/usr/bin/firefox")
+        );
+        assert_eq!(
+            exec_first_token("env BAMF_DESKTOP_FILE_HINT=x /usr/bin/gedit --new-window %F").as_deref(),
+            Some("/usr/bin/gedit")
+        );
+        assert_eq!(
+            exec_first_token("\"/opt/My App/run.sh\" --flag %U").as_deref(),
+            Some("/opt/My App/run.sh")
+        );
+        // `%%` 是字面百分号，不是字段码
+        assert_eq!(
+            exec_first_token("sh -c \"echo 100%% ok\"").as_deref(),
+            Some("sh")
+        );
+        assert_eq!(exec_first_token("%U"), None);
+        assert_eq!(exec_first_token("  "), None);
+    }
+
+    /// `.desktop` 的取舍：只认 `[Desktop Entry]` 段、`NoDisplay`/`Hidden` 不列、
+    /// `Name[zh_CN]` → `Name[zh]` → `Name` 的挑选顺序、缺 `Exec` 就没有程序可指。
+    #[test]
+    fn desktop_entries_yield_apps_with_localized_names() {
+        let firefox = "[Desktop Entry]\nType=Application\nName=Firefox\nName[zh_CN]=火狐浏览器\nName[ja]=Firefox JP\nExec=/usr/lib/firefox/firefox %u\nIcon=firefox\n\n[Desktop Action new-window]\nName=New Window\nExec=/usr/lib/firefox/firefox --new-window\n";
+        let e = app_from_desktop(firefox, "zh_CN.UTF-8").unwrap();
+        assert_eq!(
+            (e.name.as_str(), e.path.as_str()),
+            ("火狐浏览器", "/usr/lib/firefox/firefox")
+        );
+        // 完整标签没命中：zh_TW 落回无标签 Name（`Name[zh]` 不存在），ja 命中 `Name[ja]`
+        assert_eq!(app_from_desktop(firefox, "zh_TW").unwrap().name, "Firefox");
+        assert_eq!(app_from_desktop(firefox, "ja").unwrap().name, "Firefox JP");
+        assert_eq!(app_from_desktop(firefox, "").unwrap().name, "Firefox");
+        // 右键菜单项（[Desktop Action …]）的 Name/Exec 不是程序本身
+        assert_eq!(app_from_desktop(firefox, "zh_CN").unwrap().path, "/usr/lib/firefox/firefox");
+        // NoDisplay / Hidden 是文件自己说别露脸；Type=Link 是网址
+        for flag in ["NoDisplay=true", "Hidden=True"] {
+            let t = format!("[Desktop Entry]\nType=Application\nName=X\nExec=/x\n{flag}\n");
+            assert!(app_from_desktop(&t, "").is_none(), "{flag}");
+        }
+        assert!(app_from_desktop("[Desktop Entry]\nType=Link\nName=Doc\nURL=https://example.com\n", "").is_none());
+        // 缺 Exec：没有程序可指
+        assert!(app_from_desktop("[Desktop Entry]\nType=Application\nName=X\n", "").is_none());
+    }
+
     /// 真实形态：WireGuard 接口连上后 `state` 是 `UNKNOWN`，就绪信息只在标志位里。
     /// 所以「只看 state」会把正常工作的隧道判成没连上，worker 于是每 N 秒重连一次。
     const WG_UP: &str = "5: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\n    link/none";
@@ -1023,6 +1343,81 @@ mod tests {
         let idle = split_t("Cafe:wireguard:");
         assert_eq!(idle.len(), 3);
         assert!(idle[2].trim().is_empty());
+    }
+
+    fn conn(name: &str, ty: &str, active: bool) -> NmConn {
+        NmConn {
+            name: name.to_string(),
+            ty: ty.to_string(),
+            active,
+            hay: format!("{ty}{}", if active { " wg0" } else { "" }),
+        }
+    }
+
+    fn nic(name: &str, label: Option<&str>, app: Option<&str>) -> super::super::NicInfo {
+        super::super::NicInfo {
+            name: name.to_string(),
+            label: label.map(str::to_string),
+            kind: super::super::NicKind::Vpn,
+            up: true,
+            app: app.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// 面板要说「这几个 VPN 现在没连」，靠的正是 `con show` 里那些**没有设备**的连接：
+    /// 上面那条按 `dev status` 枚举设备的路永远走不到它们，也就是说不论有几条隧道在用，
+    /// 没连的那几个客户端都得由这份清单补出来。
+    #[test]
+    fn an_idle_vpn_connection_still_gets_a_card() {
+        let live = [nic("wg0", Some("Office WG"), Some("WireGuard"))];
+        let conns = [
+            conn("Office WG", "wireguard", true),
+            conn("Forti", "vpn", false),
+            conn("Café", "802-11-wireless", false),
+        ];
+        let idle = idle_vpn_conns(&conns, &live);
+        assert_eq!(
+            idle.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            v(&["Forti"]),
+            "在用的那条不补第二张卡；没连的 Wi-Fi 连接不收"
+        );
+        assert!(!idle[0].up, "未连的连接要能被界面判成「没连」");
+        assert!(idle[0].ipv4.is_none(), "没连的链路不该编出任何地址");
+        // 连接名只写了厂商名前缀，产品名那一格才是信息
+        assert_eq!(idle[0].app.as_deref(), Some("FortiClient"));
+    }
+
+    /// 在用的那条连接可能因为设备名写法不同而留在清单里（连接名在 `label` 上），
+    /// 去重要比对名称、标签、归属三样；漏了就是一张在用的卡和一张「没连」的卡同时说同一个 VPN。
+    #[test]
+    fn an_idle_connection_is_dropped_when_a_live_row_already_says_it() {
+        for live in [
+            nic("NordVPN Home", None, None),
+            nic("tun0", Some("NordVPN Home"), None),
+            nic("tun0", None, Some("NordVPN Home")),
+        ] {
+            assert!(
+                idle_vpn_conns(&[conn("NordVPN Home", "vpn", false)], &[live]).is_empty(),
+                "在用清单里已经有这一条，却还是补了第二张卡"
+            );
+        }
+        // 名字不相干的照旧补
+        assert_eq!(
+            idle_vpn_conns(
+                &[conn("Home Forti", "vpn", false)],
+                &[nic("wg0", Some("Office WG"), None)]
+            )
+            .len(),
+            1
+        );
+    }
+
+    /// 同一个连接名的重复条目（NM 里可能有同名配置）只给一张卡。
+    #[test]
+    fn duplicate_idle_names_are_collapsed() {
+        let conns = [conn("Forti", "vpn", false), conn("Forti", "vpn", false)];
+        assert_eq!(idle_vpn_conns(&conns, &[]).len(), 1);
     }
 
     fn cfg(mode: Mode, dns: Option<&str>) -> NetworkConfig {

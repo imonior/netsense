@@ -4,6 +4,80 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.5] - 2026-10-01
+
+### Added
+
+- **The launch-program target is a combo box: installed programs, a file picker, or typing.** The
+  caret at the field's right edge opens the programs installed on this machine — macOS scans its four
+  standard application locations for `.app` bundles, Windows reads the Start menu's shortcuts, Linux
+  takes `Type=Application` `.desktop` entries with the name picked for the interface language.
+  Picking one writes its path; next to it, **Browse…** opens the system's own file dialog for the
+  portable single-file programs no menu knows about (on Linux the picker needs zenity or kdialog —
+  when neither is installed the error says so and typing stays available). All three entries write
+  the same field, and typing stays primary: when the list is empty (a clean machine, a failed
+  enumeration), the input and Browse are still there. Only programs with a registered launch intent
+  are listed — not a sweep of bare executables.
+
+### Changed
+
+- **Windows: every SSID shown is the one that is on the air.** The current-network SSID now comes
+  from `netsh wlan show interfaces`' association state, attributed per adapter MAC so several Wi-Fi
+  adapters never cross names; when that read fails it falls back to the WLAN profile file on disk and
+  then to the profile name. The saved-network candidates carry the real name too, from the profile
+  XML that stores what the network calls itself. The old source was the NLA network name: whenever
+  the network signature changes (driver reload, gateway change, a VPN), Windows mints a new object
+  and disambiguates it with ` 2`, ` 3` — a profile name on *this* machine, not the network's name,
+  while three machines have to be looking at the same network. **This changes what a stored
+  condition means**: one saved on Windows earlier against a name with ` 2` no longer matches — pick
+  it again from the dropdown.
+- **The tray panel's VPN section answers "installed, and connected?"** Clients that are installed but
+  not connected get a card with a Status row (Connected / Not connected): macOS lists them from
+  `scutil --nc list`'s VPN sessions, Linux from NetworkManager connections that are not active (on
+  Windows the disconnected virtual adapters were already listed). A card with no address is a fact,
+  not a failed collection. Live tunnels keep their attributed app, and macOS's attribution is one
+  notch stricter: the lone-connected-session shortcut now needs a counter-proof — if that session's
+  own service reports an address, and it is not this tunnel's, the tunnel is not credited to it. An
+  unnamed VPN keeps the generic label; a specific wrong name would be adopted by the persistent
+  "keep connected" action as its target.
+- **The editor's condition badges follow your typing.** Every form edit re-evaluates the three-state
+  badges against the engine's existing snapshot, without waiting for the engine's sampling beat and
+  the per-Profile `change_delay_secs` debounce (5 seconds by default, eight and up worst case). It
+  calls the same backend evaluation function, so no second matching rule exists; what is engine-only
+  stays engine-only — ACTIVE / CONFLICT / ERROR badges and the green ring still arrive by broadcast,
+  and the preview only fills in "this is actually matching right now".
+- **The editor paints its form first, waiting on three cheap reads only.** Config, language and
+  palette — none of which spawns a subprocess — land together for the first frame; the six external
+  reads (saved networks, interfaces, adapters, printers, installed apps, status) go out concurrently
+  and fill the status strip, badges and candidates as they arrive. They used to sit on the
+  first-paint path, and the price was their *sum* — the multi-second blank seen on Windows.
+- **Reordering is the ↑ / ↓ buttons only.** Dragging did not work in practice, so the drag code is
+  gone and a card's header is a title again. The arrows still move the same array, and the
+  THEN/ELSE, one-shot/persistent boundaries stay enforced by the controls themselves.
+- **The SSID condition's input and its candidates are one combo box**: the candidates open under a
+  caret at the input's right edge and fold away after a pick. The input remains the only control
+  that writes config.
+- **All four windows share one scale and one palette — and this time it is computed.** Radii collapse
+  to three steps (control / container / badge and toast) and shadows to two (modal / popover); the
+  windows had measured seven distinct radii, the same role rounding differently per window. Five
+  dark-mode pairs sat below 4.5:1 and were fixed — white on the primary and on the warning button,
+  the neutral badge, the "off" badge, and the off tone on a raised row — and `scripts/validate.py`
+  now computes every listed text/background pair in both themes, so the rule is a check instead of a
+  comment. Among the edges fixed along the way: the popup's toast sits above the confirm dialog, long
+  errors truncate instead of being cut off on both sides, narrow rows in the log and settings windows
+  wrap instead of squeezing buttons out of view, disabled buttons look disabled, a profile the
+  engine has not reported on yet shows no empty pill, and a candidate popover near the bottom edge
+  flips upward.
+
+### Fixed
+
+- **Linux: `launch_app` on a missing target reports an error instead of a fake success.** Every path
+  used to be handed to `xdg-open` and the child's exit code was never read, so a mistyped path was
+  recorded as a success and the badge went green for a program that never started. Executables and
+  bare program names are spawned directly now (PATH resolves the name, a miss is an error);
+  `.desktop` entries, documents and URLs still go to `xdg-open`; a path that is not on this machine
+  is an error naming that path.
+
 ## [1.0.4] - 2026-09-29
 
 ### Changed

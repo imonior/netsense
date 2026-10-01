@@ -21,6 +21,9 @@
   11. 界面文案没有被写死：前端静态标记里的文案必须挂 `data-i18n`、兜底文本必须逐字等于
      en.json、`<script>` 里的多词字面量必须出现在 `t()`/`tf()` 实参位置；后端每条
      `log::*` / `win_dialog::*` 必须取字典，源码里也不得出现没标 `i18n-exempt` 的中文字面量
+  12. 主题的两条口径：theme.css 里成对的 `--t-*`（字 + 它所在的那块底）在深、浅两档都算得出
+     WCAG AA 的比值，前端四座窗口的 `border-radius` / `box-shadow` 只能用那一套尺度 token，
+     窗口内联 `:root` 只能别名、不能自己定义颜色
 
 输出：每组一行「分数 [n] 名称: 通过项/检查项 = x/10」，最后一行把各组折算成百分制总分
 （GROUPS 决定组数，与总分无关 —— 加一组不会把满分变成 110）。
@@ -51,7 +54,7 @@ _failed = 0
 _groups = 0
 # 检查组数：每组 10 分 ⇒ 总分 100。新增检查组要同时改这里，并同步 DEVELOPMENT.md §12 的
 # 「N checks」—— 那行由本脚本自己检查（第 [10] 项），写漏了会直接报出来。
-GROUPS = 11
+GROUPS = 12
 _mark: tuple[int, int] = (0, 0)
 _label = ""
 _group_scores: list[tuple[str, float]] = []
@@ -908,6 +911,190 @@ def check_ui_text(dicts: dict[str, dict]) -> None:
         ok("后端源码没有中文字面量（匹配系统输出那些都标了 i18n-exempt）")
 
 
+# —————————————————————————— [12] 主题：对比度与尺度 ——————————————————————————
+# WCAG 的相对亮度。线性化那一步不能省：#8e8e97 与 #2f3640 的「看起来差多少」和
+# 实际差多少不是一回事，省掉这一步算出来的比值会普遍虚高 1 左右。
+def _srgb_lin(v: int) -> float:
+    c = v / 255.0
+    return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _lum(hex_str: str) -> float:
+    s = hex_str.lstrip("#")
+    if len(s) == 3:
+        s = "".join(ch * 2 for ch in s)
+    r, g, b = (int(s[i:i + 2], 16) for i in (0, 2, 4))
+    return 0.2126 * _srgb_lin(r) + 0.7152 * _srgb_lin(g) + 0.0722 * _srgb_lin(b)
+
+
+def _ratio(fg: str, bg: str) -> float:
+    a, b = _lum(fg), _lum(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+# 成对列出的是界面上真实存在的「字 + 它所在的那块底」（左边那批 token 当字色，右边那块当底）。
+# min 取 WCAG AA 正文 4.5:1；只有占位符放低到 3.0:1 —— 它是提示不是内容，标准本身也只要 3:1。
+# 这张表只覆盖十六进制 token，够不着的四类见 check_theme 末尾的说明。
+_TEXT_PAIRS: list[tuple[str, str, float]] = [
+    ("--t-fg", "--t-bg", 4.5),
+    ("--t-fg", "--t-card", 4.5),
+    ("--t-fg", "--t-sunken", 4.5),
+    ("--t-fg", "--t-hover", 4.5),
+    ("--t-fg", "--t-raised", 4.5),
+    ("--t-fg", "--t-raised-hi", 4.5),
+    ("--t-fg", "--t-hit", 4.5),
+    ("--t-fg-dim", "--t-bg", 4.5),
+    ("--t-fg-dim", "--t-card", 4.5),      # 次要字：说明、标签、tiny 按钮
+    ("--t-fg-dim", "--t-sunken", 4.5),    # 禁用态的字
+    ("--t-fg-faint", "--t-sunken", 3.0),  # 占位符
+    ("--t-fg-accent", "--t-card", 4.5),
+    ("--t-fg-accent", "--t-sunken", 4.5),   # 路径块
+    ("--t-fg-accent", "--t-raised", 4.5),   # 编辑器里的分支小标题
+    ("--t-on-raised", "--t-raised", 4.5),
+    ("--t-on-raised", "--t-raised-hi", 4.5),
+    ("--t-off", "--t-raised", 4.5),        # 「未激活」徽标
+    ("--t-on-accent", "--t-accent", 4.5),
+    ("--t-on-accent", "--t-danger", 4.5),
+    ("--t-on-accent", "--t-warning", 4.5),
+    ("--t-ok", "--t-bg", 4.5),
+    ("--t-ok", "--t-card", 4.5),
+    ("--t-warn", "--t-card", 4.5),
+    ("--t-err", "--t-bg", 4.5),
+    ("--t-err", "--t-card", 4.5),
+    ("--t-tint-neutral-fg", "--t-tint-neutral", 4.5),
+    ("--t-tint-ok-fg", "--t-tint-ok", 4.5),
+    ("--t-tint-live-fg", "--t-tint-live", 4.5),
+    ("--t-tint-warn-fg", "--t-tint-warn", 4.5),
+    ("--t-tint-bad-fg", "--t-tint-bad", 4.5),
+    ("--t-tint-off-fg", "--t-tint-off", 4.5),
+    ("--t-tint-info-fg", "--t-tint-info", 4.5),
+    ("--t-tint-vpn-fg", "--t-tint-vpn", 4.5),
+    ("--t-note-fg", "--t-note-bg", 4.5),
+]
+
+# 全站只有这三档圆角，值就钉在这里：改一档等于改一次设计口径，不该是一次顺手的手滑。
+_SCALE_EXPECT = {"--t-r-sm": "4px", "--t-r-md": "8px", "--t-r-pill": "999px"}
+# 窗口内允许出现的圆角写法：三档 token、编辑器那对历史别名（markup 与冒烟测试绑着它们），
+# 以及状态点那种真正的圆。
+_ALLOWED_RADIUS = {"var(--t-r-sm)", "var(--t-r-md)", "var(--t-r-pill)",
+                   "var(--radius-sm)", "var(--radius-md)", "50%"}
+
+
+def _theme_block_bodies() -> dict[str, str] | None:
+    """返回 theme.css 里深、浅两档各自的声明文本（注释已去掉）。"""
+    css = _read_trim(os.path.join(ROOT, "frontend", "theme.css"))
+    if css is None:
+        return None
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    out: dict[str, str] = {}
+    for key, anchor in (("dark", ":root {"), ("light", 'html[data-theme="light"] {')):
+        i = css.find(anchor)
+        if i < 0:
+            return None
+        out[key] = css[i:css.find("}", i)]
+    return out
+
+
+def check_theme() -> None:
+    """[12] 主题：成对 token 的对比度 + 全站圆角只有三档。
+
+    为什么要有这一组：theme.css 的头注释早就写着「文字与它所在的那块底至少要差 4.5:1」，
+    但那是一句话而不是检查 —— 深色档里因此有五处掉到 3.7~4.4 而没人发现。四扇窗口的圆角
+    也是同一回事：曾经实测有 7 种值（2/4/5/6/8/10/999），同一个角色在不同窗口圆得不一样。
+    这一组把两条口径都变成红的或绿的。
+
+    够不着的东西（别把这一组当视觉验收）：
+      1. 半透明的底 —— `--t-toast-bg`、`--t-selection`、`--t-mask` 与浅色的
+         `--t-tint-on-accent` 要先和背后的底合成才知道是什么值，表里没有它们的对；
+      2. hover / focus / 选中这些运行时才出现的状态色，以及 gradient、图标本身；
+      3. 真正的几何：窗口有没有圆角、浮层有没有被 overflow 裁掉、文字有没有溢出，
+         这些 CSS 里查不到 —— 无边框窗口（`decorations: false`）在 macOS 上是直角方窗，
+         这件事只有装出来的 app 能看出来。
+    """
+    group("[12] 主题：成对 token 的对比度 + 全站圆角只有三档")
+    bodies = _theme_block_bodies()
+    if bodies is None:
+        bad("frontend/theme.css 缺失，或两档选择器（:root / html[data-theme=\"light\"]）被改写")
+        return
+    ok("theme.css 两档都在，声明可解析")
+
+    hexes = {k: dict(re.findall(r"(--t-[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})", b))
+             for k, b in bodies.items()}
+    ok(f"深色档有 {len(hexes['dark'])} 个十六进制 token，浅色档有 {len(hexes['light'])} 个")
+
+    # 两档必须定义同一批 token（少一个就是浅色下有一处落回深色值）。尺度 token 只在 :root
+    # 定义一次，浅色靠层叠继承，所以它们不在这条检查的范围内。
+    names = {k: set(re.findall(r"(--t-[a-z0-9-]+)\s*:", b)) for k, b in bodies.items()}
+    only_dark = sorted(n for n in names["dark"] - names["light"] if not n.startswith("--t-r-"))
+    only_light = sorted(n for n in names["light"] - names["dark"] if not n.startswith("--t-r-"))
+    if only_dark or only_light:
+        bad(f"两档 token 不对齐：只在深色 {only_dark[:4]}，只在浅色 {only_light[:4]}")
+    else:
+        ok(f"两档 token 名对齐（{len(names['dark'])} 个，尺度档除外）")
+
+    for fg, bg, need in _TEXT_PAIRS:
+        worst, why = 99.0, ""
+        for label, hx in (("深", hexes["dark"]), ("浅", hexes["light"])):
+            if fg not in hx or bg not in hx:
+                why = (f"{label}档取不到 {fg} 或 {bg} 的十六进制值"
+                       f"（改了名，或换成了 rgba —— 这一对就实算不了了）")
+                break
+            got = _ratio(hx[fg], hx[bg])
+            if got < worst:
+                worst, worst_label = got, label
+        if why:
+            bad(f"{fg} / {bg}: {why}")
+        elif worst < need:
+            bad(f"{fg} 落在 {bg} 上只有 {worst:.2f}:1（{worst_label}档），低于要求的 {need}:1")
+        else:
+            ok(f"{fg} / {bg}: 最低 {worst:.2f}:1（要求 ≥{need}）")
+
+    got_scale = dict(re.findall(r"(--t-r-[a-z-]+)\s*:\s*([^;]+);", bodies["dark"]))
+    drift = {k: (got_scale.get(k, "缺失"), v) for k, v in _SCALE_EXPECT.items()
+             if got_scale.get(k, "").strip() != v}
+    if drift:
+        bad(f"圆角刻度被改动: {drift}")
+    else:
+        ok("圆角刻度就是三档：4px / 8px / 999px")
+
+    for path in sorted(glob.glob(os.path.join(ROOT, "frontend", "*.html"))):
+        rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+        text = _read(path) or ""
+        style = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
+        radii = [v.strip() for v in re.findall(r"border-radius\s*:\s*([^;}]+)", style)]
+        off_scale = sorted({v for v in radii if v not in _ALLOWED_RADIUS})
+        if off_scale:
+            bad(f"{rel}: {len(radii)} 处圆角里有 {len(off_scale)} 种不在三档里: {off_scale[:4]}")
+        else:
+            ok(f"{rel}: {len(radii)} 处圆角全在刻度里")
+
+        shadows = [v.strip() for v in re.findall(r"box-shadow\s*:\s*([^;}]+)", style)]
+        off_shadow = [v for v in shadows if "var(--t-shadow" not in v]
+        if off_shadow:
+            bad(f"{rel}: 阴影没走 token（深色值写死会在浅色档变成灰边）: {off_shadow[:3]}")
+        else:
+            ok(f"{rel}: {len(shadows)} 处阴影都用 var(--t-shadow*)")
+
+        # 颜色的真相只有一份：窗口内联 :root 只做别名，不自己定义颜色，否则改 theme.css
+        # 改不动它。布局尺寸（非颜色）的自定义属性不在这条的限制里。
+        root_i = style.find(":root {")
+        defs: list[str] = []
+        if root_i >= 0:
+            body = style[root_i:style.find("}", root_i)]
+            for name, value in re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+)", body):
+                if re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", value):
+                    defs.append(f"{name}: {value.strip()}")
+            if "radius" in body:
+                radius_alias = re.findall(r"(--[a-z0-9-]*radius[a-z0-9-]*)\s*:\s*([^;]+)", body)
+                defs += [f"{n}: {v.strip()}" for n, v in radius_alias
+                         if "--t-r-" not in v]
+        if defs:
+            bad(f"{rel}: 内联 :root 里定义了颜色或不走刻度的圆角，应收回 theme.css: {defs[:4]}")
+        else:
+            ok(f"{rel}: 内联 :root 只别名，不另起颜色")
+
+
 def main() -> int:
     print("=" * 62)
     print("NetSense 静态校验")
@@ -928,6 +1115,8 @@ def main() -> int:
     score()
     check_docs(dicts)
     check_ui_text(dicts)
+    score()
+    check_theme()
     score()
     print("=" * 62)
     if _groups != GROUPS:

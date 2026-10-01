@@ -33,7 +33,7 @@
     main { flex: 1; overflow-y: auto; padding: 0 16px 16px; }
     .card {
       background: var(--bg-card); border: 1px solid var(--line);
-      border-radius: 10px; margin-top: 12px; padding: 12px 14px;
+      border-radius: var(--t-r-md); margin-top: 12px; padding: 12px 14px;
     }
     .card > h3 {
       margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--muted);
@@ -44,19 +44,26 @@
     .row .k { flex: 1; min-width: 0; }
     select, input[type=text], input[type=number] {
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-      border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px;
+      border-radius: var(--t-r-sm); padding: 5px 8px; font: inherit; font-size: 12px;
+      /* 下拉里装的是这台机器上的事实（备份文件名、代理地址），名字长过行宽时要把这一格压下来
+         让 `select` 自己截断，而不是把整行顶出窗口 —— flex 子项默认 `min-width: auto`，
+         不写这一条它就不肯收缩。 */
+      min-width: 0; max-width: 100%;
     }
     input[type=text] { flex: 1; min-width: 0; }
     input[type=text]:disabled { color: var(--muted); }
+    /* 禁用态要有形状上的区别：还原备份的确认、导出中这些时刻，按钮能不能点只能从文字猜。 */
+    button:disabled { color: var(--muted); background: var(--t-sunken); border-color: var(--line);
+      cursor: default; }
     textarea {
       display: block; width: 100%; margin-top: 8px; resize: vertical;
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-      border-radius: 6px; padding: 6px 8px;
+      border-radius: var(--t-r-sm); padding: 6px 8px;
       font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     input[type=number] { width: 78px; }
     button {
-      padding: 5px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+      padding: 5px 12px; font-size: 12px; border-radius: var(--t-r-sm); cursor: pointer;
       border: 1px solid var(--line); background: var(--bg); color: var(--fg);
       font-family: inherit;
     }
@@ -67,7 +74,7 @@
     /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 —— 允许换行、允许选中复制 */
     .path {
       margin-top: 6px; padding: 6px 8px; background: var(--t-sunken); border: 1px solid var(--line);
-      border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      border-radius: var(--t-r-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text;
     }
     .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
@@ -76,11 +83,13 @@
     .err { margin-top: 6px; color: var(--t-err); font-size: 11px; word-break: break-word; }
     .err[hidden], .hint[hidden] { display: none; }
     .val { color: var(--muted); }
+    /* 报错回执（代理地址不合法、还原失败）比窗口还长时，`nowrap` 会把两头切到窗口外：限宽截断。 */
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
       background: var(--t-toast-bg); border: 1px solid var(--line); color: var(--t-on-accent);
-      padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
+      padding: 6px 14px; border-radius: var(--t-r-pill); font-size: 11px; opacity: 0;
       transition: opacity .18s; pointer-events: none; white-space: nowrap;
+      max-width: 92%; overflow: hidden; text-overflow: ellipsis;
     }
     .toast.show { opacity: 1; }
     ::-webkit-scrollbar { width: 8px; }

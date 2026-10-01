@@ -12,10 +12,21 @@
    浅色不是深色的反相。徽标、状态条、路径块这些「底色 + 底上的字」成对出现的东西，在亮底上
    必须换成另一档：深底用的是压暗的色相（`#1d3a22` 上放 `#6ee08a`），亮底反过来用淡底配深字
    （`#dcefdc` 上放 `#14672f`）。文字与它所在的那块底至少要差 4.5:1，这一条两套都按同一句话
-   核对过 —— 只有占位符是例外（它是提示不是内容，3:1 一级就够）。 */
+   核对过 —— 只有占位符是例外（它是提示不是内容，3:1 一级就够）。`scripts/validate.py` 按
+   成对 token 实算比值，不达标就红：这一句从前只是注释，所以深色档里有五处悄悄掉到 3.7~4.4。
+
+   尺度也在这份里：圆角只有三档 —— `--t-r-sm`（控件）、`--t-r-md`（容器）、`--t-r-pill`（徽标与
+   toast）。四扇窗口从前各写各的（实测 7 种值：2/4/5/6/8/10/999），同一个角色在不同窗口圆得不
+   一样，看着就是没对齐。阴影分两档：居中弹层用 `--t-shadow`，贴在内容上的小浮层用
+   `--t-shadow-pop` —— 后者从前在编辑器里硬写成黑色，切到浅色档就变成一块灰边。 */
 
 :root {
   color-scheme: dark;
+
+  /* — 尺度：全站只有这三档圆角 — */
+  --t-r-sm: 4px;              /* 控件：输入框、按钮、小卡片 */
+  --t-r-md: 8px;              /* 容器：卡片、面板、弹层 */
+  --t-r-pill: 999px;          /* 徽标与 toast：只有一粒字的高度 */
 
   /* — 面 — */
   --t-bg: #1c1c1e;            /* 窗口底 */
@@ -31,7 +42,7 @@
 
   /* — 字 — */
   --t-fg: #ededf0;
-  --t-fg-dim: #8e8e97;        /* 次要：标签、说明 */
+  --t-fg-dim: #8e8e97;        /* 次要：标签、说明（4.6:1，落在 `--t-card` 上） */
   --t-fg-faint: #85858e;      /* 占位符 */
   --t-fg-accent: #9ecbff;     /* 路径块、列标题这种「用主色说一句话」的地方 */
   --t-on-accent: #ffffff;
@@ -41,20 +52,20 @@
   --t-ok: #34c759;
   --t-warn: #ff9f0a;
   --t-err: #ff6b6b;
-  --t-off: #9a9aa4;
+  --t-off: #a8a8b1;           /* 也当「未激活」徽标的字色用：#9a9aa4 在 `--t-raised` 上差一点到 4.5 */
 
-  /* — 实心按钮 — */
-  --t-accent: #2f81f7;
+  /* — 实心按钮：字是白，所以底必须压到 4.5:1 以下那一侧 — */
+  --t-accent: #1f6feb;        /* #2f81f7 上白字只有 3.75:1 */
   --t-danger: #cf3038;
-  --t-warning: #cc6a00;
+  --t-warning: #a15c00;       /* #cc6a00 上白字只有 3.73:1 */
 
   /* — 徽标：底色 + 底上的字，成对取用 — */
-  --t-tint-neutral: #2f3640;  --t-tint-neutral-fg: #8e8e97;
+  --t-tint-neutral: #2f3640;  --t-tint-neutral-fg: #a2a8b4;   /* #8e8e97 在这块底上只有 3.75:1 */
   --t-tint-ok: #1d3a22;       --t-tint-ok-fg: #6ee08a;
   --t-tint-live: #14562b;     --t-tint-live-fg: #b7f5cb;
   --t-tint-warn: #3f3116;     --t-tint-warn-fg: #ffcf7a;   --t-tint-warn-line: #6b4c14;
   --t-tint-bad: #3f1f1f;      --t-tint-bad-fg: #ffa3a3;
-  --t-tint-off: #2b2b30;      --t-tint-off-fg: #8e8e97;
+  --t-tint-off: #2b2b30;      --t-tint-off-fg: #9b9ba5;
   --t-tint-info: #2f3640;     --t-tint-info-fg: #9ecbff;
   --t-tint-vpn: #3a2a4a;      --t-tint-vpn-fg: #d7b3ff;
   --t-tint-on-accent: #0d3d1a; /* 选中行（实心主色）里面的那枚徽标要另走一档 */
@@ -62,10 +73,11 @@
 
   /* — 浮起来的东西 — */
   --t-hit: #3a2f00;           /* 日志里的命中高亮 */
-  --t-selection: rgba(47, 129, 247, .3);
+  --t-selection: rgba(31, 111, 235, .32);   /* 跟着 `--t-accent` 走，别留在旧的主色上 */
   --t-toast-bg: rgba(0, 0, 0, .82);
   --t-mask: rgba(0, 0, 0, .5);
-  --t-shadow: 0 10px 30px rgba(0, 0, 0, .4);
+  --t-shadow: 0 10px 30px rgba(0, 0, 0, .4);        /* 居中大弹层 */
+  --t-shadow-pop: 0 3px 10px rgba(0, 0, 0, .28);    /* 贴在内容上的小浮层（候选清单） */
 }
 
 html[data-theme="light"] {
@@ -114,6 +126,7 @@ html[data-theme="light"] {
   --t-toast-bg: rgba(35, 38, 47, .94);
   --t-mask: rgba(28, 32, 46, .34);
   --t-shadow: 0 10px 30px rgba(28, 34, 58, .18);
+  --t-shadow-pop: 0 3px 10px rgba(28, 34, 58, .16);
 }
 
 /* 选中的字要看得清：默认的蓝色高亮在深底上会把字吃掉，浅底上又和主色撞车。
@@ -138,5 +151,5 @@ html[data-theme="light"] {
 
 ::-webkit-scrollbar-thumb {
   background: var(--t-line-hi);
-  border-radius: 4px;
+  border-radius: var(--t-r-sm);
 }

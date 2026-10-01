@@ -21,6 +21,9 @@ frontend/node_modules/
 # editor-smoke 的 --write-fixtures 落盘处（本地跑闸门用；CI 写 target/）
 out/
 
+# 本地图标工作稿（正式图标是 src-tauri/icons/ 里已入库的那份，发布不带这里的草稿）
+/icons/
+
 # Python
 __pycache__/
 *.pyc

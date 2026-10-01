@@ -40,12 +40,12 @@
     header .ver { font-size: 11px; color: var(--muted); margin-left: 5px; }
     .head-right { display: flex; align-items: center; gap: 6px; }
     button.tiny {
-      flex: none; padding: 2px 7px; font-size: 10px; border-radius: 5px;
+      flex: none; padding: 2px 7px; font-size: 10px; border-radius: var(--t-r-sm);
       border: 1px solid var(--line); background: var(--bg-card); color: var(--muted);
     }
     .card {
       background: var(--bg-card); border: 1px solid var(--line);
-      border-radius: 8px; margin: 10px 12px 0; padding: 9px 10px;
+      border-radius: var(--t-r-md); margin: 10px 12px 0; padding: 9px 10px;
     }
     .row { display: flex; justify-content: space-between; gap: 10px; }
     .row + .row { margin-top: 4px; }
@@ -57,29 +57,32 @@
     .dot.on { background: var(--ok); }
     /* Profile 状态徽标：ACTIVE / CONFLICT / ERROR 三种必须一眼分得开
        （CONFLICT 是条件层，ERROR 是执行层，混在一起就没法排障） */
-    .sw .st { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); }
+    .sw .st { font-size: 10px; padding: 1px 6px; border-radius: var(--t-r-pill); background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); }
     .sw .st.active { background: var(--t-tint-ok); color: var(--t-tint-ok-fg); }
     .sw .st.conflict { background: var(--t-tint-warn); color: var(--t-tint-warn-fg); }
     .sw .st.error { background: var(--t-tint-bad); color: var(--t-tint-bad-fg); }
     .sw .st.off { background: var(--t-tint-off); color: var(--t-tint-off-fg); }
+    /* 引擎还没给出这一条的状态时，别画一枚空药丸：那一块底看起来像一个坏掉的指示灯。
+       （编辑器那边 `.achip:empty` 早就是这条规矩。） */
+    .sw .st:empty { display: none; }
     .sw.disabled { color: var(--muted); }
     .v.warn { color: var(--warn); }
     .v.bad { color: var(--t-err); }
     .cards { margin: 8px 12px 0; }
     .nic-card {
       background: var(--bg-card); border: 1px solid var(--line);
-      border-radius: 8px; padding: 7px 9px; margin-bottom: 6px;
+      border-radius: var(--t-r-md); padding: 7px 9px; margin-bottom: 6px;
     }
     .nic-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 3px; }
     .nic-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .nic-tag { font-size: 9px; padding: 1px 5px; border-radius: 999px; background: var(--t-tint-info); color: var(--t-tint-info-fg); white-space: nowrap; }
+    .nic-tag { font-size: 9px; padding: 1px 5px; border-radius: var(--t-r-pill); background: var(--t-tint-info); color: var(--t-tint-info-fg); white-space: nowrap; }
     .nic-tag.vpn { background: var(--t-tint-vpn); color: var(--t-tint-vpn-fg); }
     .nic-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
     .nic-row .k { color: var(--muted); }
     .nic-row .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 66%; }
     .section { padding: 10px 12px 0; color: var(--muted); font-size: 10px;
                text-transform: uppercase; letter-spacing: .8px; }
-    .switches { margin: 6px 12px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .switches { margin: 6px 12px 0; border: 1px solid var(--line); border-radius: var(--t-r-md); overflow: hidden; }
     .sw {
       display: flex; justify-content: space-between; align-items: center;
       padding: 7px 10px; cursor: pointer; font-size: 12px;
@@ -95,7 +98,7 @@
       display: flex; flex-wrap: wrap; gap: 8px;
     }
     button {
-      flex: 1; padding: 7px 0; font-size: 12px; border-radius: 6px; cursor: pointer;
+      flex: 1; padding: 7px 0; font-size: 12px; border-radius: var(--t-r-sm); cursor: pointer;
       border: 1px solid var(--line); background: var(--bg-card); color: var(--fg);
     }
     /* 六个入口塞在一行里，每个只剩 50px 宽，「Check for Updates」会被挤到换行或截断；
@@ -105,11 +108,14 @@
     button:active { transform: translateY(1px); }
     /* 托盘面板只有按钮，但键盘 Tab 也得看得出焦点在哪一条上。 */
     :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    /* 面板只有 360px 宽：报错信息往往比这还长，不限宽的话 `nowrap` 会把两头都切到窗口外面。
+       z-index 要高于确认弹层（`.modal-mask` 是 50），否则「应用失败」那条回执被压在罩子底下。 */
     .toast {
-      position: fixed; left: 50%; bottom: 54px; transform: translateX(-50%);
+      position: fixed; left: 50%; bottom: 54px; transform: translateX(-50%); z-index: 60;
       background: var(--t-toast-bg); border: 1px solid var(--line); color: var(--t-on-accent);
-      padding: 5px 12px; border-radius: 999px; font-size: 11px; opacity: 0;
+      padding: 5px 12px; border-radius: var(--t-r-pill); font-size: 11px; opacity: 0;
       transition: opacity .18s; pointer-events: none; white-space: nowrap;
+      max-width: 92%; overflow: hidden; text-overflow: ellipsis;
     }
     .toast.show { opacity: 1; }
     ::-webkit-scrollbar { width: 5px; }
@@ -117,24 +123,24 @@
       display: flex; align-items: center; justify-content: center; z-index: 50; }
     .modal-mask[hidden] { display: none; }
     .modal { width: 304px; max-width: 92%; background: var(--bg-card);
-      border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+      border: 1px solid var(--line); border-radius: var(--t-r-md); padding: 14px;
       box-shadow: var(--t-shadow); }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 12px; color: var(--muted); margin: 3px 0; }
     .modal .mv b { color: var(--fg); }
-    .modal pre { background: var(--t-sunken); border: 1px solid var(--line); border-radius: 6px;
+    .modal pre { background: var(--t-sunken); border: 1px solid var(--line); border-radius: var(--t-r-sm);
       padding: 6px 8px; font-size: 11px; overflow-x: auto; margin: 6px 0;
       white-space: pre-wrap; word-break: break-all; }
     .modal .row-btns { display: flex; gap: 8px; margin-top: 10px; }
-    .modal .row-btns button { flex: 1; padding: 7px 0; font-size: 12px; border-radius: 6px;
+    .modal .row-btns button { flex: 1; padding: 7px 0; font-size: 12px; border-radius: var(--t-r-sm);
       cursor: pointer; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
     .modal .row-btns button:first-child { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     .modal .notes { max-height: 130px; overflow-y: auto; font-size: 11px; color: var(--muted);
       white-space: pre-wrap; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
     .modal .err { color: var(--t-err); font-size: 11px; word-break: break-word; margin: 6px 0; }
     .progress { height: 6px; background: var(--t-sunken); border: 1px solid var(--line);
-      border-radius: 999px; overflow: hidden; margin: 8px 0 4px; }
-    .progress .bar { height: 100%; width: 0%; background: var(--accent); border-radius: 999px;
+      border-radius: var(--t-r-pill); overflow: hidden; margin: 8px 0 4px; }
+    .progress .bar { height: 100%; width: 0%; background: var(--accent); border-radius: var(--t-r-pill);
       transition: width .2s ease; }
     .progress .bar.indeterminate { width: 35% !important; animation: indet 1s ease-in-out infinite; }
     @keyframes indet { 0% { margin-left: 0; } 100% { margin-left: 65%; } }
@@ -258,6 +264,12 @@
     /// VPN 归属软件已经写在标签上，就不再重复成一行。
     function nicCard(n) {
       const rows = [];
+      // VPN 这一段现在也列「装了但没连」的条目，所以「连着没有」必须写在卡上：一张不带地址的
+      // 卡看着像采集失败，而它其实是准的。非 VPN 的卡本来就只在连着时才进这份清单。
+      if (n.kind === "vpn") {
+        rows.push([t("popup.status", "Status"),
+          n.up ? t("popup.connected", "Connected") : t("popup.disconnected", "Not connected")]);
+      }
       if (n.ssid) rows.push([t("status.ssid", "SSID"), n.ssid]);
       if (n.mac) rows.push([t("popup.mac", "MAC"), n.mac]);
       if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);

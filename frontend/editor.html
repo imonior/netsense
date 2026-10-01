@@ -12,7 +12,7 @@
       --bg-main: var(--t-bg); --bg-panel: var(--t-card); --bg-input: var(--t-sunken);
       --border-color: var(--t-line); --text-main: var(--t-fg); --text-label: var(--t-fg-dim);
       --text-accent: var(--t-fg-accent); --btn-primary: var(--t-accent); --btn-danger: var(--t-danger);
-      --btn-warning: var(--t-warning); --radius-md: 8px; --radius-sm: 4px;
+      --btn-warning: var(--t-warning); --radius-md: var(--t-r-md); --radius-sm: var(--t-r-sm);
       --ok: var(--t-ok); --warn: var(--t-warn); --err: var(--t-err); --off: var(--t-off);
     }
     body {
@@ -58,6 +58,9 @@
       display: flex; align-items: center; gap: 6px;
     }
     .prow:hover { background: var(--t-hover); }
+    /* 最后一行（兜底那条）不再画下边线：它下面就是面板自己的 1px 描边和 8px 圆角，
+       两条线挨在一起，圆角里看着像多了一截。 */
+    #col-profiles > .prow:last-child { border-bottom: none; }
     .prow.active { background: var(--btn-primary); color: var(--t-on-accent); }
     .prow.active .badge-slot .b-active { background: var(--t-tint-on-accent); }
     /* 生效中的那一条：绿色描边。它和「选中」是两件事，可以同时出现。 */
@@ -90,7 +93,41 @@
       font-family: inherit;
     }
     input[type=checkbox] { width: auto; }
-    input:focus, select:focus, textarea:focus { border-color: var(--btn-primary); outline: none; }
+    /* 组合框（SSID 条件值、启动程序路径）：输入框和候选箭头在同一个 flex 盒里（一条控件），
+       候选清单是**浮层**。浮层锚在整行（`.crow` 或 `.app-row`）上，而不是锚在输入框那一格上：
+       那一格在 1180 px 窗口下实测只有 87 px（308 px 的列宽减去勾选框、106 px 的类型下拉、
+       状态徽标与删除按钮），把清单压到那个宽度等于把人要挑的名字切掉一半。箭头收进输入框
+       那一行是为了不再多占一块控件，不是为了连可读性一起收掉。absolute 的浮层不进布局，
+       所以它不改列高、不把下面的卡片顶走。 */
+    .combo-box { display: flex; align-items: center; gap: 2px; }
+    .combo-box input { flex: 1 1 auto; min-width: 0; }
+    .combo-caret { flex: none; position: relative; width: 18px; height: 22px; padding: 0;
+                  background: var(--bg-input); border: 1px solid var(--border-color);
+                  border-radius: var(--radius-sm); cursor: pointer; }
+    /* 箭头是画出来的，不是字符：界面里不该有没挂 key 的文案，连一个 ▾ 也不该。 */
+    .combo-caret::after { content: ""; position: absolute; left: 5px; top: 9px;
+                  border-left: 4px solid transparent; border-right: 4px solid transparent;
+                  border-top: 4px solid var(--text-label); }
+    .combo-list { position: absolute; left: 0; right: 0; top: 100%; z-index: 30;
+                  background: var(--bg-panel); border: 1px solid var(--border-color);
+                  border-radius: var(--radius-sm); box-shadow: var(--t-shadow-pop);
+                  max-height: 168px; overflow-y: auto; display: none; }
+    /* 浮层锚在行上，而行在 `.panel-content{overflow-y:auto}` 里面：那一列滚到底时
+       下方空间不足，清单的下半截就落在裁剪边外面（看着像「下拉只出来三行」）。空间不够时
+       由脚本挂 `.up`，让它朝上长。 */
+    .combo-list.up { top: auto; bottom: 100%; }
+    .combo-list.open { display: block; }
+    .combo-opt { display: block; padding: 3px 6px; font-size: 11px; cursor: pointer;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .combo-opt:hover { background: var(--t-tint-live); }
+    /* 启动程序那一行：组合框占满余下宽度，「浏览…」按钮不自缩。position: relative 是浮层的
+       锚点（卡片里没有 `.crow` 那样的定位祖先）。 */
+    .app-row { display: flex; align-items: center; gap: 4px; position: relative; }
+    .app-row .combo-box { flex: 1 1 auto; min-width: 0; }
+    .app-row .mini-btn { flex: none; }
+    input:focus, select:focus, textarea:focus { border-color: var(--btn-primary); }
+    /* 这里从前写着 `outline: none`：它比 theme.css 的 `:focus-visible` 更具体，于是把键盘
+       焦点环一起吃掉了 —— 同一件事在另外三扇窗口里是一圈描边，只有编辑器剩一条边框变色。 */
     textarea { resize: vertical; min-height: 90px; font-family: ui-monospace, Menlo, monospace; }
     .hint { color: var(--text-label); font-size: 10px; line-height: 1.35; margin: 2px 0 6px; }
     .card {
@@ -98,19 +135,14 @@
       padding: 5px 6px; margin-bottom: 5px; background: var(--t-inset);
     }
     .card-head { display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-bottom: 4px; }
-    /* 拖动手柄就是卡头那一条横带，而且**只有挂了 draggable 的那些**（3B 的动作卡）：
-       路由那类卡片共用同一个卡头，顺序对它们没有意义，光标不该骗人。
-       dragging = 正在被拖走的那张；drag-over = 松手后会落到它所在的位置。 */
-    .card-head[draggable="true"] { cursor: grab; }
-    .card-head[draggable="true"]:active { cursor: grabbing; }
-    .card-head.dragging { opacity: .4; }
-    .card-head.drag-over { box-shadow: 0 -2px 0 0 var(--btn-primary); }
     .card-title { font-size: 10px; color: var(--t-tint-warn-fg); font-weight: bold; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
     .kv { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; line-height: 1.7; }
     .kv .k { color: var(--text-label); flex: none; }
-    .kv .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex;
-             align-items: center; gap: 4px; }
+    /* 省略号挂在真正装文字的那一层：`.v` 是 flex 容器，它自己的 `text-overflow` 管不到匿名
+       文本项，长路径 / 打印机名从前是被硬裁成两截，不出「…」。 */
+    .kv .v { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .kv .v .vt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
     .grid2 > .full { grid-column: 1 / -1; }
     .mini-btn {
@@ -118,18 +150,23 @@
       border-radius: var(--radius-sm); font-size: 9px; padding: 1px 5px; cursor: pointer; flex: none;
     }
     .mini-btn:hover { background: var(--t-raised-hi); }
-    .mini-btn:disabled { opacity: .35; cursor: default; background: var(--t-raised); }
+    /* 禁用不用整块 opacity：那连字一起擦到 2.4:1，↑/↓ 到边界就成了「看不见但还在」的控件。
+       禁用只改字色、描边，并把底沉到 `--t-sunken` 那一档（字在上面对比度 5.4:1）；
+       形状和位置都留着。 */
+    .mini-btn:disabled { color: var(--t-fg-dim); border-color: var(--t-line);
+      cursor: default; background: var(--t-sunken); }
     .empty { color: var(--text-label); font-size: 10px; padding: 4px 0; }
     .switch { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
     .switch.inline { margin: 0; }
     .switch label, .switch span { text-align: left; color: var(--text-main); }
-    /* 条件行：勾选框、类型、值、状态、删除，全部一行 */
-    .crow { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+    /* 条件行：勾选框、类型、值、状态、删除，全部一行。
+       `position: relative` 是给行内组合框的候选浮层当锚点的（见 `.combo-list`）。 */
+    .crow { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; position: relative; }
     .crow .ct { flex: 0 0 106px; min-width: 0; }
     .crow .cv { flex: 1 1 auto; min-width: 0; }
     /* 三态徽标：条件 / 规则 / Profile 共用一套 */
     .badge {
-      font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 999px;
+      font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: var(--t-r-pill);
       background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); letter-spacing: .3px; flex: none;
     }
     .b-match { background: var(--t-tint-ok); color: var(--t-tint-ok-fg); }
@@ -141,7 +178,7 @@
     .b-dim { background: var(--t-tint-off); color: var(--t-tint-off-fg); }
     /* 动作级实时状态：一条 3B1 动作跑完（或超时）就换一个色，
        用户据此知道是哪一条卡住了，而不是整批一个「失败」 */
-    .achip { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 999px;
+    .achip { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: var(--t-r-pill);
       background: var(--t-tint-neutral); color: var(--t-tint-neutral-fg); letter-spacing: .3px; flex: none; }
     .achip:empty { display: none; }
     .achip.ok { background: var(--t-tint-ok); color: var(--t-tint-ok-fg); }
@@ -155,7 +192,7 @@
     .rule-box.r-nomatch { border-left-color: var(--err); }
     .rule-box.r-inactive { border-left-color: var(--t-line); }
     .btn-group {
-      padding: 8px 10px; border-top: 1px solid var(--border-color);
+      padding: 8px 10px;
       display: flex; justify-content: flex-end; gap: 8px; flex: none;
       background: var(--bg-panel); border-radius: var(--radius-md);
       border: 1px solid var(--border-color);
@@ -175,10 +212,13 @@
     }
     .banner.info { background: var(--t-note-bg); color: var(--t-note-fg); border-color: var(--t-note-line); }
     .banner[hidden] { display: none; }
+    /* toast 从前贴在 bottom:14px，正好压在按钮条上（那条实测 ~44px 高）—— 而它报的往往就是
+       「保存成了/失败了」，压在 Save 上是自己挡自己。z-index 也要高过确认弹层，否则
+       「清单里点了应用」那条回执在弹层后面看不见。 */
     #toast {
-      position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+      position: fixed; left: 50%; bottom: 58px; transform: translateX(-50%); z-index: 60;
       background: var(--t-toast-bg); border: 1px solid var(--border-color); color: var(--t-on-accent);
-      padding: 6px 14px; border-radius: 999px; font-size: 11px; opacity: 0;
+      padding: 6px 14px; border-radius: var(--t-r-pill); font-size: 11px; opacity: 0;
       transition: opacity .2s; pointer-events: none; max-width: 92vw; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap;
     }
@@ -187,7 +227,7 @@
       display: flex; align-items: center; justify-content: center; z-index: 50; }
     .modal-mask[hidden] { display: none; }
     .modal { width: 400px; max-width: 92%; background: var(--bg-panel);
-      border: 1px solid var(--border-color); border-radius: 10px; padding: 14px; }
+      border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; }
     .modal.wide { width: 520px; max-height: 86vh; overflow-y: auto; }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 11px; color: var(--text-label); line-height: 1.5; }
@@ -277,13 +317,15 @@
     return s;
   };
   const clone = (o) => JSON.parse(JSON.stringify(o ?? null));
-  // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。这里不单独问
-  // `get_language` —— 它的返回值就是启动那份状态里的 `language`、以及每一次语言广播里
-  // 的那个 `code`，两处都已经在手上（其余三扇窗口没有这条状态可读，才各自去问一次）。
+  // `<html lang>` 跟着后端走：读屏软件和 CJK 字形选择都看这个属性。
+  // 这一扇窗口本来两处能白拿：启动那份状态里带 `language`，每一次语言广播里带 `code`。
+  // 但它还是要单独问一次 `get_language` —— 那两份都要等系统子进程，而表单不能等它们：
+  // 界面文字必须在这一帧画出来之前就已经是对的语言。（其余三扇窗口没有状态可读，本来就只能问。）
   const setLang = (code) => { if (code) document.documentElement.lang = code; };
   // 配色那一档由后端定：问操作系统的是它一处，四座窗口看到的才是同一份答案。
-  // 编辑器不单独去问 —— 启动读的那一份状态里就带着它，`theme.css` 只认
-  // `<html data-theme>` 这一个属性。
+  // 问法与语言同一条：首屏那一批里问一次，状态快照回来时再对一次。
+  // 不能等快照 —— 窗口是按 CSS 默认档（深色）建起来的，浅色档的用户会先看一眼深色再被闪一下。
+  // `theme.css` 只认 `<html data-theme>` 这一个属性。
   const applyTheme = (k) => { if (k) document.documentElement.dataset.theme = k; };
   let _seq = 0;
   const uid = (p) => p + Date.now().toString(36).slice(-5) + (_seq++).toString(36);
@@ -308,12 +350,14 @@
   let cfg = { schema: 1, profiles: [], fallback: null, allowed_scripts: [] };
   let globalDraft = { fallback: null, allowed_scripts: [] };
   let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings, last_run, workers}
+  let preview = null;   // 表单即时预览（preview_match）：和 EngineView.profiles 同形状，但算的是草稿
   let wifiList = [];    // 系统已保存的 SSID —— SSID 条件值的候选
   let nicList = [];     // 在用的网卡（get_interfaces）—— 接口名/标签/网卡 MAC
   let nicsKey = "";     // 上面那份清单是跟着哪个身份快照取的，见 [`refreshNics`]
   let statusSnap = null; // 最近一次广播里的 `status`：IPv4/掩码/网关/DNS/信号的唯一来源
   let adapterList = []; // 本机装着的网卡（get_adapters，含没插线的口）—— 接口条件值的候选
   let printerList = []; // 系统打印机（[{name, is_default}]）—— 默认打印机动作的候选
+  let appList = [];     // 本机已装程序（[{name, path}]）—— 启动程序动作的候选
   let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
   let dirty = false;
@@ -368,10 +412,26 @@
 
   /* —————————————————————— 引擎视图查询 —————————————————————— */
   const profileView = (id) => (view && view.profiles || []).find(p => p.id === id) || null;
-  function ruleView(pid, rid) {
-    const p = profileView(pid);
+  /// 预览那份（[`pvOf`]）优先：它算的是**表单此刻的内容**对**引擎此刻的快照**，
+  /// 连没保存的编辑都算进去了，而引擎那一轮要等自己的采样节律与 `change_delay_secs`
+  /// 去抖。两边跑的是同一个 Rust 求值函数（`conditions::eval_profile`），所以这里比的
+  /// 只是「哪一份更新鲜」，不是界面上存在两套匹配判据。
+  const pvOf = (pid) => (preview || []).find(p => p.id === pid) || null;
+  function ruleState(pid, rid) {
+    const p = pvOf(pid) || profileView(pid);
     return p && (p.rules || []).find(r => r.id === rid) || null;
   }
+  /// 第 1 列那一行的徽标。**生效与否只有引擎说得算**：active / conflict / error 是
+  /// 「已经对网卡动过手」的事实，预览再快也不能替它回答，所以这些状态原样保留。
+  /// 预览只补一件引擎必然慢的事：引擎还写着未命中、而当前条件其实已经对得上这台网络时，
+  /// 这一行按命中显示。列表里那条绿描边（`.live`）仍然只跟着生效走。
+  const rowBadge = (pid) => {
+    const pr = pvOf(pid);
+    const pv = profileView(pid);
+    if (!pv) return pr ? (pr.enabled ? (pr.matched ? "match" : "no_match") : "disabled") : null;
+    if (pr && pv.status === "not_matched" && pr.matched) return "match";
+    return pv.status;
+  };
   const BADGE = {
     match: ["b-match", "editor.status_match"],
     no_match: ["b-nomatch", "editor.status_nomatch"],
@@ -386,6 +446,9 @@
     const m = BADGE[key];
     return m ? `<span class="badge ${m[0]}">${esc(t(m[1]))}</span>` : "";
   };
+  /// 规则卡的外框颜色（命中=绿）。重绘与就地更新共用这一句，两处才不会各说一套。
+  const ruleCls = (st) =>
+    (st ? (st.status === "match" ? " r-match" : st.status === "no_match" ? " r-nomatch" : " r-inactive") : "");
   /// 引擎当前的判定指向哪个 Profile（Active 才有）。
   function activeId() {
     const st = view && view.state;
@@ -443,7 +506,8 @@
         if (!rv || rv.status !== "match") continue;
         for (const c of (r.conditions || [])) {
           if (c.enabled === false) continue;
-          p2 += `<div class="kv"><span class="k">${esc(t(condLabel(c.type)))}</span><span class="v">${esc(c.value || "—")}</span></div>`;
+          p2 += `<div class="kv"><span class="k">${esc(t(condLabel(c.type)))}</span>` +
+            `<span class="v"><span class="vt">${esc(c.value || "—")}</span></span></div>`;
         }
       }
     }
@@ -498,7 +562,8 @@
     let p3 = rows.map(([k, v, type, canUse]) => {
       const hasValue = v !== undefined && v !== null && v !== "";
       if (!hasValue && k !== t("status.ssid")) return "";
-      return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v || "—")}` +
+      return `<div class="kv"><span class="k">${esc(k)}</span>` +
+        `<span class="v"><span class="vt">${esc(v || "—")}</span>` +
         (canUse ? `<button class="mini-btn" data-act="use-cond" data-type="${type}" data-val="${esc(canUse)}">${esc(t("editor.use_value"))}</button>` : "") +
         `</span></div>`;
     }).filter(Boolean).join("");
@@ -519,12 +584,14 @@
       const cls = o ? (o.ok ? "ok" : "bad") : (shown && shown.running && a.enabled !== false ? "run" : "");
       const txtv = o ? (o.ok ? t("editor.action_ok") : t("editor.action_failed"))
         : (cls === "run" ? t("editor.action_running") : "");
-      p4 += `<div class="kv"><span class="k">${esc(actionWord(a))}</span><span class="v">${esc(actionTarget(a))}` +
+      p4 += `<div class="kv"><span class="k">${esc(actionWord(a))}</span>` +
+        `<span class="v"><span class="vt">${esc(actionTarget(a))}</span>` +
         `<span class="achip ${cls}">${esc(txtv)}</span></span></div>`;
     }
     for (const w of (view && view.workers) || []) {
       const [key, cls] = WORKER_STATE[w.state] || WORKER_STATE.pending;
-      p4 += `<div class="kv"><span class="k">${esc(t("popup.workers"))}</span><span class="v">${esc(w.label || "")}` +
+      p4 += `<div class="kv"><span class="k">${esc(t("popup.workers"))}</span>` +
+        `<span class="v"><span class="vt">${esc(w.label || "")}</span>` +
         `<span class="achip ${cls}">${esc(t(key))}</span></span></div>`;
     }
     $("st-act").innerHTML = p4 || `<span class="empty">${esc(t("editor.state_none"))}</span>`;
@@ -552,7 +619,7 @@
         ? `<input type="text" class="li-name in" data-bind="name" value="${esc(src.name || "")}">`
         : `<span class="li-name ${src.enabled === false ? "li-off" : ""}">${esc(p.name || p.id)}</span>`;
       html += `<div class="prow ${on ? "active" : ""} ${pv && pv.status === "active" ? "live" : ""} ${on && dirty ? "dirty" : ""}" id="prow-${esc(p.id)}" data-act="sel-profile" data-id="${esc(p.id)}">
-        ${en}${name}<span class="badge-slot" id="pbadge-${esc(p.id)}">${pv ? badge(pv.status) : ""}</span>${quick}</div>`;
+        ${en}${name}<span class="badge-slot" id="pbadge-${esc(p.id)}">${badge(rowBadge(p.id))}</span>${quick}</div>`;
     }
     // 兜底：一条「特殊的 Profile」。它没有条件 —— 条件区为空就是「任意条件」，
     // 也就是零命中时才走它，所以它永远不参与匹配与冲突判定。
@@ -566,21 +633,79 @@
       <span class="badge-slot"></span><span style="width:13px"></span></div>`;
     $("col-profiles").innerHTML = html;
     $("obj-badge").innerHTML = sel && sel.kind === "profile"
-      ? badge((profileView(draft.id) || {}).status) : "";
+      ? badge(rowBadge(draft.id)) : "";
   }
 
   function refreshBadges() {
     for (const p of cfg.profiles) {
       const slot = $("pbadge-" + p.id);
       const pv = profileView(p.id);
-      if (slot) slot.innerHTML = pv ? badge(pv.status) : "";
-      // 绿框和徽标是同一份事实，所以也必须一起跟着广播走：只换徽标的话，
-      // 列表里「谁正在生效」要到下次整列重绘才对得上。
+      if (slot) slot.innerHTML = badge(rowBadge(p.id));
+      // 绿框标的是「这一套已经生效」，只有引擎说得算，所以它只跟着广播走，和上面那枚
+      // 徽标刻意不是一回事（徽标可能先说命中）。只换徽标不换绿框时，列表里「谁正在生效」
+      // 要到下次整列重绘才对得上 —— 两处都在这里换。
       const row = $("prow-" + p.id);
       if (row) row.classList.toggle("live", !!pv && pv.status === "active");
     }
     $("obj-badge").innerHTML = sel && sel.kind === "profile"
-      ? badge((profileView(draft.id) || {}).status) : "";
+      ? badge(rowBadge(draft.id)) : "";
+  }
+
+  /// 预览回来以后只换第 2 列的徽标与规则卡描边：重建整列会把焦点从用户正在填的那一格拿走
+  /// （第 2 列里全是输入框，比第 1 列更碰不得）。
+  function refreshCondBadges() {
+    if (!sel || sel.kind !== "profile" || !draft) return;
+    for (const r of draft.rules || []) {
+      const st = ruleState(draft.id, r.id);
+      const box = $("rbox-" + r.id);
+      if (box) box.className = "card rule-box" + ruleCls(st);
+      const head = $("rbs-" + r.id);
+      if (head) head.innerHTML = st ? badge(st.status) : "";
+      (r.conditions || []).forEach((c, j) => {
+        const cv = st && (st.conditions || []).find(x => x.id === c.id);
+        const slot = $("cbs-" + r.id + "-" + j);
+        if (slot) slot.innerHTML = cv ? badge(cv.status) : "";
+      });
+    }
+  }
+
+  /* —————————————————————— 条件即时预览 ——————————————————————
+     「我填的这些条件，对不对得上我现在连的这个网络」不该等引擎那一轮：引擎要按自己的
+     采样节律走，还要等 `change_delay_secs` 去抖（默认 5 秒），加起来是现场那句「标记出来
+     太慢」。这里每改一下表单就把**当前内容**发给 `preview_match`，由 Rust 用引擎已经采到的
+     那份快照跑同一个求值函数算回来。
+     它只回答条件层面「对不对得上」；「哪一套已经生效」仍然只有引擎说得算。 */
+  /// 发出去的是表单当前内容：选中的那一条用草稿，其余用磁盘上那一份。投影走的是保存
+  /// 那条路同一个 `cleanProfile`，所以预览里算的 id/类型/值和真正会落盘的那份不会是两回事。
+  const previewProfiles = () => cfg.profiles.map(p =>
+    cleanProfile(sel && sel.kind === "profile" && draft && p.id === sel.id ? draft : p));
+
+  let previewTimer = null;
+  let previewFetching = false;
+  let previewAgain = false;
+  /// 合并连续改动：停顿之后再问，正在路上时只补一次，不让每个按键都变成一趟 IPC。
+  function schedulePreview(delay) {
+    if (!(sel && sel.kind === "profile")) return;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, delay === undefined ? 200 : delay);
+  }
+  async function runPreview() {
+    previewTimer = null;
+    if (previewFetching) { previewAgain = true; return; }
+    previewFetching = true;
+    const payload = JSON.stringify(previewProfiles());
+    try {
+      const rows = asArray(await invoke("preview_match", { payload }));
+      preview = rows.length ? rows : null;
+    } catch (e) {
+      // 引擎还没跑完第一轮（那时后端答的是空），或窗口已经关了：继续用引擎那份徽标。
+      // 预览是加出来的即时性，不是新的事实来源，不值得为它报错打扰用户。
+      preview = null;
+    }
+    previewFetching = false;
+    refreshBadges();
+    refreshCondBadges();
+    if (previewAgain) { previewAgain = false; schedulePreview(0); }
   }
 
   /* —————————————————————— 第 2 列：条件 —————————————————————— */
@@ -603,14 +728,13 @@
     const rules = p.rules || [];
     if (!rules.length) html += `<div class="empty">${esc(t("editor.no_rules"))}</div>`;
     rules.forEach((r, i) => {
-      const st = ruleView(p.id, r.id);
-      const cls = st ? (st.status === "match" ? "r-match" : st.status === "no_match" ? "r-nomatch" : "r-inactive") : "";
-      html += `<div class="card rule-box ${cls}">
+      const st = ruleState(p.id, r.id);
+      html += `<div class="card rule-box${ruleCls(st)}" id="rbox-${esc(r.id)}">
         <div class="card-head">
           <span class="card-title">${esc(t("editor.rule_word"))} ${i + 1}</span>
           <span style="display:flex;align-items:center;gap:4px;">
             <input type="checkbox" data-bind="rules.${i}.enabled" data-cast="bool" ${r.enabled !== false ? "checked" : ""}>
-            ${st ? badge(st.status) : ""}
+            <span id="rbs-${esc(r.id)}">${st ? badge(st.status) : ""}</span>
             <button class="mini-btn" data-act="del-rule" data-i="${i}">&times;</button>
           </span>
         </div>
@@ -622,7 +746,7 @@
             <input type="checkbox" data-bind="${b}.enabled" data-cast="bool" ${c.enabled !== false ? "checked" : ""}>
             <span class="ct">${sel_(`${b}.type`, c.type || "wifi_ssid", COND_TYPES())}</span>
             <span class="cv">${condValue(b, c)}</span>
-            ${cv ? badge(cv.status) : ""}
+            <span id="cbs-${esc(r.id)}-${j}">${cv ? badge(cv.status) : ""}</span>
             <button class="mini-btn" data-act="del-cond" data-i="${i}" data-j="${j}">&times;</button>
           </div>`;
         }).join("") +
@@ -642,22 +766,27 @@
 
   /// SSID 是**直接可输入**的：隐藏网络、以及「这台环境还没连过第二次」的场合都要能提前配好，
   /// 所以绑定的一直是输入框，而不是一个只能从别人给好的清单里挑的控制。
-  /// 系统里现成的 SSID 挂在旁边那个下拉上当候选 —— WKWebView 的 `<datalist>` 没有弹出 UI
-  /// （实测：选项在、点不开），所以候选只能自己拼一个 `<select>`。
-  /// 那个下拉**不绑定字段**：它唯一的工作是把选中的名字抄进输入框，于是任何时刻都不可能
+  /// 系统里现成的 SSID 挂在输入框右端那个箭头下面（`.combo-box`）：点开才出现，选完就收起。
+  /// WKWebView 的 `<datalist>` 没有弹出 UI（实测：选项在、点不开），所以这层浮层只能自己拼。
+  /// 候选**不绑定字段**：它唯一的工作是把选中的名字抄进输入框，于是任何时刻都不可能
   /// 把「候选控件自己的状态」当成配置值写出去。
   function condValue(b, c) {
     const type = c.type || "wifi_ssid";
     if (type === "wifi_ssid") {
       const cur = String(c.value ?? "");
       const ssids = wifiList.filter(Boolean);
-      return `<span style="display:inline-flex;gap:4px;align-items:center">` +
+      // 一个都不现成时不留箭头：点开一个空浮层比没有这个控件更像坏了。
+      const drop = ssids.length ?
+        `<button type="button" class="combo-caret" data-act="combo-toggle" data-path="${b}.value" ` +
+        `title="${esc(t("editor.ssid_placeholder"))}"></button>` +
+        `<span class="combo-list" data-combo-list="${b}.value">` +
+        ssids.map(s => `<span class="combo-opt" data-act="combo-pick" data-path="${b}.value" ` +
+          `data-v="${esc(s)}">${esc(s)}</span>`).join("") +
+        `</span>` : "";
+      return `<span class="combo-box">` +
         `<input type="text" value="${esc(cur)}" placeholder="${esc(t("status.ssid"))}" ` +
-        `data-bind="${b}.value" data-ssid-input="${b}.value" style="max-width:150px">` +
-        `<select data-ssid-pick="${b}.value" style="max-width:120px">` +
-        `<option value="">${esc(t("editor.ssid_placeholder"))}</option>` +
-        ssids.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join("") +
-        `</select></span>`;
+        `data-bind="${b}.value" data-combo-input="${b}.value">` +
+        drop + `</span>`;
     }
     if (type === "network_interface") {
       const cur = String(c.value || "").trim();
@@ -680,15 +809,54 @@
     return txt(`${b}.value`, c.value, COND_PH[type] || "");
   }
 
-  /// 候选下拉选中一个 SSID：把名字交给同一条件的输入框，由输入框写配置。
-  /// 认人靠 `data-ssid-input`（值就是那条条件的绑定路径），不靠拼 CSS 选择器 ——
+  /// 候选浮层选中一项：把值交给同一行的输入框，由输入框写配置。
+  /// 认人靠 `data-combo-input`（值就是那条绑定路径），不靠拼 CSS 选择器 ——
   /// 路径里满是点，拼出来的选择器要么得转义要么直接选错。
   function pickIntoInput(path, value) {
-    const inp = Array.from(document.querySelectorAll("[data-ssid-input]"))
-      .find(el => el.dataset.ssidInput === path);
+    const inp = Array.from(document.querySelectorAll("[data-combo-input]"))
+      .find(el => el.dataset.comboInput === path);
     if (!inp) return;
     inp.value = value;
     onField(inp);
+  }
+
+  /// 启动程序那格：组合框（候选 = 本机已装程序，按名字列、选中的是路径）+「浏览…」按钮。
+  /// 三个入口写的是同一个东西（`launch_app` 的目标）：候选挑一个、浏览按钮打开系统文件
+  /// 选择器（绿色免安装的单文件程序不会出现在任何菜单里，只能这样找）、键盘直接手输。
+  /// 候选一条都没有时（枚举失败 / 干净机器）也留着手输与浏览两条路。
+  function appField(path, value) {
+    const cur = String(value ?? "");
+    const apps = appList.filter(a => a && a.path);
+    const drop = apps.length ?
+      `<button type="button" class="combo-caret" data-act="combo-toggle" data-path="${path}" ` +
+      `title="${esc(t("editor.app_placeholder"))}"></button>` +
+      `<span class="combo-list" data-combo-list="${path}">` +
+      apps.map(a => `<span class="combo-opt" data-act="combo-pick" data-path="${path}" ` +
+        `data-v="${esc(a.path)}" title="${esc(a.path)}">${esc(a.name)}</span>`).join("") +
+      `</span>` : "";
+    return `<div class="full app-row">` +
+      `<span class="combo-box">` +
+      `<input type="text" value="${esc(cur)}" placeholder="${esc(t("editor.app_placeholder"))}" ` +
+      `data-bind="${path}" data-combo-input="${path}">` +
+      drop + `</span>` +
+      `<button type="button" class="mini-btn" data-act="browse-app" data-path="${path}">` +
+      `${esc(t("editor.browse"))}</button></div>`;
+  }
+
+  /// 全部候选浮层。展开与否记在 class 上，而不是一个「现在开着哪一条」的变量里：
+  /// 表单随时会被重画整块换掉 DOM，变量记的那一层状态活不过一次重画。
+  const comboLists = () => Array.from(document.querySelectorAll("[data-combo-list]"));
+  const comboCloseAll = () => comboLists().forEach(l => l.classList.remove("open"));
+  const comboListFor = (path) => comboLists().find(l => l.dataset.comboList === path) || null;
+  /// 展开之后：下方空间不够一整列（`.combo-list` 的 max-height 是 168px，两处一起改）就朝上长，
+  /// 否则那一列滚到底的条件行只能看见清单的前三行 —— 浮层在它自己的滚动容器外面被裁掉了。
+  /// 假 DOM 里没有几何，这里逐层判空放过：这一条只有真窗口能验，冒烟测试覆盖不到。
+  function comboFlip(list) {
+    if (typeof list.getBoundingClientRect !== "function") return;
+    const r = list.getBoundingClientRect();
+    const host = list.parentElement;
+    const hr = host && typeof host.getBoundingClientRect === "function" ? host.getBoundingClientRect() : null;
+    list.classList.toggle("up", (hr ? hr.bottom : window.innerHeight) - r.bottom < 168);
   }
 
   /* —————————————————————— 第 3 列：3A 网络（先 THEN 后 ELSE） —————————————————————— */
@@ -868,10 +1036,8 @@
     list[j] = t;
   };
 
-  // 卡头既是标题也是拖动手柄（cursor: grab 那条样式）。data-i 是**渲染时**的下标快照，
-  // 松手之后整列重绘，所以它只在「这一次拖动的生命周期」内有效。
-  const headOpen = (kind, pre, i) =>
-    `<div class="card-head" draggable="true" data-act="drag-card" data-kind="${kind}" data-pre="${pre}" data-i="${i}">`;
+  // 卡头只是标题。排序只有一个入口：↑/↓ 那对按钮（见 moveButtons）。
+  const headOpen = () => `<div class="card-head">`;
 
   function oneShotCard(p, pre, a, i, n) {
     const act = a.action || {};
@@ -893,10 +1059,11 @@
         `</select>` +
         `</div>`;
     } else {
-      body += `<div class="full">${txt(`${p}.action.app`, act.app, "/Applications/Slack.app")}</div>` +
+      // 启动目标是「可输入 + 候选 + 浏览」的组合（见 appField）：三个入口写同一个字段。
+      body += appField(`${p}.action.app`, act.app) +
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>`;
     }
-    return `<div class="card">${headOpen("one", pre, i)}
+    return `<div class="card">${headOpen()}
         <span class="card-title">${esc(actionWord(a))}</span>
         <span style="display:flex;gap:4px;align-items:center;">
           <span class="achip" id="achip-${p}"></span>
@@ -930,7 +1097,7 @@
         `<div class="full">${lst(`${p}.action.args`, act.args, "")}</div>`;
     }
     body += row2("editor.health_interval", int(`${p}.action.interval_secs`, act.interval_secs ?? 30, "30"));
-    return `<div class="card">${headOpen("persist", pre, i)}
+    return `<div class="card">${headOpen()}
         <span class="card-title">${esc(t(persistWord(a)))}</span>
         <span style="display:flex;gap:4px;align-items:center;">
           <span class="achip" id="wchip-${p}"></span>
@@ -969,6 +1136,8 @@
     $("btn-delete").style.display = sel ? "block" : "none";
     refreshRun();
     refreshBanner();
+    // 重绘以后要按当前表单内容再算一遍条件徽标（含刚建出来、还没保存的那一条）
+    schedulePreview();
   }
 
   /* —————————————————————— 冲突与零命中提示 —————————————————————— */
@@ -1182,54 +1351,13 @@
     return v || [];
   };
 
-  async function loadAll(keepSelection = true) {
-    const prevSel = sel && { ...sel };
-    try {
-      const rawCfg = await invoke("get_config");
-      cfg = typeof rawCfg === "string" ? JSON.parse(rawCfg) : rawCfg;
-      cfg.profiles ||= [];
-      // 配置里可能留着 `__manual__`：那是某个版本的下拉把「手动输入」这个控件状态当成
-      // 值写进去的结果，从来不是任何人的网络名 —— 读进来时清掉。
-      for (const r of cfg.profiles.flatMap(p => p.rules || []))
-        for (const c of r.conditions || []) if (c.value === "__manual__") delete c.value;
-      globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
-      // 这四份清单每一项都要拉起系统子进程，`get_status` 还要真的采样一次网络（macOS 的
-      // 降级链里那一趟可以走到几秒）。它们之间没有先后依赖 —— 配置喂表单，这几份喂状态条
-      // 和下拉 —— 所以一次全发出去。串行 await 的代价是**它们的和**：那正是
-      // 「编辑器点开以后空白好几秒」。只有 `get_status` 的失败会落到下面的 catch：
-      // 它带着语言、配色和「当前网络」那几项地址，取不到就等于窗口没起来，不该装作没事。
-      let nicsFailed = false;
-      const [nets, nics, adapters, printers, rawSt] = await Promise.all([
-        invoke("get_networks").catch(() => []),
-        invoke("get_interfaces").catch(() => { nicsFailed = true; return []; }),
-        invoke("get_adapters").catch(() => []),
-        invoke("get_printers").catch(() => []),
-        invoke("get_status"),
-      ]);
-      wifiList = asArray(nets);
-      nicList = asArray(nics);
-      adapterList = asArray(adapters);
-      printerList = asArray(printers);
-      const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
-      statusSnap = st.status || null;
-      view = st.engine || null;
-      // 记下这份网卡清单是跟着哪个身份快照取来的（见 [`refreshNics`]）。取失败就当没有：
-      // 留空键，下一次广播会再试一遍，而不是把这个窗口的接口信息永远冻在空上。
-      nicsKey = nicsFailed ? "" : nicsFp();
-      langShown = st.language || langShown;
-      setLang(langShown);
-      // 配色跟着同一份快照走：首绘之前它就落地，用户看不到换色的一闪
-      // （四扇窗口都是 `visible: false` 创建的，被点开时属性早已写好）。
-      applyTheme(st.theme);
-    } catch (e) {
-      $("col-cond").innerHTML = `<div class="empty">invoke failed (run via cargo tauri dev): ${esc(String(e))}</div>`;
-      return;
-    }
-    dirty = false;
+  /// 选中态：保存、删除、事件之后的重载要留住用户正在编辑的那一条；那条不见了（被删了）
+  /// 就回第一条，一条都没有时落到兜底。
+  function chooseSelection(prevSel, keep) {
     const stillThere = prevSel && prevSel.kind === "profile" && cfg.profiles.some(p => p.id === prevSel.id);
-    if (keepSelection && stillThere) {
+    if (keep && stillThere) {
       sel = prevSel; draft = clone(cfg.profiles.find(p => p.id === prevSel.id));
-    } else if (keepSelection && prevSel && prevSel.kind === "fallback") {
+    } else if (keep && prevSel && prevSel.kind === "fallback") {
       sel = prevSel; draft = null;
       globalDraft.fallback ||= { enabled: true };
     } else if (cfg.profiles.length) {
@@ -1237,7 +1365,80 @@
     } else {
       sel = { kind: "fallback" }; draft = null; globalDraft.fallback ||= { enabled: true };
     }
-    renderAll();
+  }
+
+  const loadFailed = (e) => {
+    $("col-cond").innerHTML = `<div class="empty">invoke failed (run via cargo tauri dev): ${esc(String(e))}</div>`;
+  };
+
+  async function loadAll(keepSelection = true) {
+    const prevSel = sel && { ...sel };
+    // 这六份**先一起发出去**，但第一帧不等它们（原因见下面第二处注释）。
+    let nicsFailed = false;
+    const external = Promise.all([
+      invoke("get_networks").catch(() => []),
+      invoke("get_interfaces").catch(() => { nicsFailed = true; return []; }),
+      invoke("get_adapters").catch(() => []),
+      invoke("get_printers").catch(() => []),
+      invoke("get_installed_apps").catch(() => []),
+      invoke("get_status"),
+    ]);
+    try {
+      // 第一帧只等这三份：配置喂整个表单，语言与配色决定它长什么样。它们背后都不拉子进程
+      // （配色那一档读的是平台层里带 TTL 的缓存），并发送出去再一起等，代价只是三者最慢的那个。
+      // 配色必须在首绘之前落地：窗口是按默认档（深色）建起来的，等状态快照回来再换色，
+      // 浅色档的用户就会先看一眼深色再被闪一下。
+      const [rawCfg, rawLang, rawTheme] = await Promise.all([
+        invoke("get_config"), invoke("get_language"), invoke("get_theme"),
+      ]);
+      cfg = typeof rawCfg === "string" ? JSON.parse(rawCfg) : rawCfg;
+      cfg.profiles ||= [];
+      // 配置里可能留着 `__manual__`：那是某个版本的下拉把「手动输入」这个控件状态当成
+      // 值写进去的结果，从来不是任何人的网络名 —— 读进来时清掉。
+      for (const r of cfg.profiles.flatMap(p => p.rules || []))
+        for (const c of r.conditions || []) if (c.value === "__manual__") delete c.value;
+      globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
+      langShown = rawLang || langShown;
+      setLang(langShown);
+      applyTheme(rawTheme);
+      chooseSelection(prevSel, keepSelection);
+      dirty = false;
+      renderAll();
+    } catch (e) {
+      external.catch(() => {}); // 这一趟不等了，别让它的失败变成没人接的 rejection
+      loadFailed(e);
+      return;
+    }
+    // 剩下这六份每一项都要拉起一个系统子进程：Windows 上每一趟是一整条 PowerShell 启动链，
+    // macOS 的降级链里 `get_status` 那一趟可以走到几秒。它们喂的是状态条、徽标与下拉候选，
+    // 不是表单本身 —— 让它们排进首绘的关键路径，就是现场那句「自动化配置点开以后空白好几秒」。
+    // 只有 `get_status` 的失败会落到下面的 catch：它带着「当前网络」那几项地址和引擎视图，
+    // 取不到就等于窗口没起来，不该装作没事。
+    try {
+      const [nets, nics, adapters, printers, apps, rawSt] = await external;
+      wifiList = asArray(nets);
+      nicList = asArray(nics);
+      adapterList = asArray(adapters);
+      printerList = asArray(printers);
+      appList = asArray(apps);
+      const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
+      statusSnap = st.status || null;
+      view = st.engine || null;
+      // 记下这份网卡清单是跟着哪个身份快照取来的（见 [`refreshNics`]）。取失败就当没有：
+      // 留空键，下一次广播会再试一遍，而不是把这个窗口的接口信息永远冻在空上。
+      nicsKey = nicsFailed ? "" : nicsFp();
+      // 语言与配色再以这一份快照对一次：两处来源本是同一句 `i18n::current()` / `theme_now()`，
+      // 但首绘那一瞬正好有人换了档时，快照里的是新的。
+      langShown = st.language || langShown;
+      setLang(langShown);
+      applyTheme(st.theme);
+      // 状态徽标和下拉候选都出自上面这几份，所以要重画一次才出现。用户在这不到一秒里
+      // 已经动过表单时不重画 —— 那会把焦点从他正在填的那一格拿走；候选晚一步（跟着下一次
+      // 自然重画）出现，不影响他手上这一条。广播那条路径同理，见 [`refreshLive`]。
+      if (dirty) refreshLive(); else renderAll();
+    } catch (e) {
+      loadFailed(e);
+    }
   }
 
   /* —————————————————————— 输入事件 —————————————————————— */
@@ -1267,6 +1468,9 @@
     if (/\.conditions\.\d+\.type$/.test(path)) setPath(root, path.replace(/\.type$/, ".value"), undefined);
     // 会改变表单结构的字段必须重画；其余保持 DOM 不动，免得输入中途丢焦点
     if (/(^|\.)mode$|\.v6mode$|\.type$/.test(path)) renderAll();
+    // 不动 DOM 的那些（往条件里打字）也要让徽标跟上来 —— 重绘不发生的路上，
+    // 预览是唯一还会再算一次的机会。
+    else schedulePreview();
   }
 
   document.addEventListener("input", (e) => {
@@ -1278,13 +1482,6 @@
   document.addEventListener("change", (e) => {
     const el = e.target;
     if (!el.dataset) return;
-    // SSID 候选下拉：把选中的名字交给输入框，自己退回占位 —— 它不是第二个值，
-    // 停在选中项上会让人以为配置里存的是「下拉的状态」。
-    if (el.dataset.ssidPick) {
-      if (el.value) pickIntoInput(el.dataset.ssidPick, el.value);
-      el.selectedIndex = 0;
-      return;
-    }
     if (el.dataset.act === "dns-tri") { setDnsMode(el.dataset.pre || "", el.value); return; }
     if (el.dataset.rowEn) { patchFlag(el.dataset.rowEn, "enabled", el.checked); return; }
     if (el.dataset.rowQuick) { patchFlag(el.dataset.rowQuick, "quick", el.checked); return; }
@@ -1354,17 +1551,48 @@
 
   document.addEventListener("click", (e) => {
     const el = e.target.closest("[data-act]");
+    // 候选浮层只由下面 combo-toggle / combo-pick 两个分支说了算；其余任何一次点击 —— 包括
+    // 点空白、点另一张卡片、点别的输入框 —— 都先把它整体收起。这样「点别处就收」和
+    // 「同时只开一个」都不用额外记账。
+    const act = el && el.dataset.act;
+    if (act !== "combo-toggle" && act !== "combo-pick") comboCloseAll();
     if (!el) return;
     // 行里嵌着控件：点在控件上是控件的事，不能顺带把这一行选成当前编辑对象
     const hit = e.target.closest("input,select,textarea,button,label");
     if (hit && hit !== el) return;
-    const act = el.dataset.act;
     const pre = el.dataset.pre || "";
     switch (act) {
       case "sel-profile": pick("profile", el.dataset.id); return;
       case "sel-fallback": globalDraft.fallback ||= { enabled: true }; pick("fallback"); return;
       case "open-verify": verifyOpen = true; renderVerifyModal(); return;
       case "close-verify": verifyOpen = false; renderVerifyModal(); return;
+      case "combo-toggle": {
+        // 先收掉所有已展开的，再决定被点的这个要不要重新打开 —— 于是同一个箭头
+        // 点两下就是开、关，两个组合框不会同时挂着浮层。
+        const list = comboListFor(el.dataset.path);
+        if (!list) return;
+        const wasOpen = list.classList.contains("open");
+        comboCloseAll();
+        if (!wasOpen) { list.classList.add("open"); comboFlip(list); }
+        return;
+      }
+      case "combo-pick": {
+        // 选完就收：清单是挑值用的，不是常驻的第二块显示区。
+        comboCloseAll();
+        pickIntoInput(el.dataset.path, el.dataset.v);
+        return;
+      }
+      case "browse-app": {
+        // 系统文件选择器挑一个程序，把路径抄进同一格的输入框（由输入框写配置）。
+        // 取消 → null：什么都不发生；起不来 → 把错误原样说给用户（仍可手输）。
+        // 用 promise 而不是把整只 click 处理函数改成 async：这里只需要在 await 之后
+        // 用到那次点击的路径，先取出来就够了。
+        const path = el.dataset.path;
+        invoke("pick_app")
+          .then(picked => { if (picked) pickIntoInput(path, picked); })
+          .catch(err => toast(String(err)));
+        return;
+      }
       case "use-cond": addCondition(el.dataset.type, el.dataset.val); return;
       case "add-rule": (draft.rules ||= []).push({ id: uid("r"), enabled: true, conditions: [] }); renderAll(); return;
       case "del-rule": draft.rules.splice(Number(el.dataset.i), 1); renderAll(); return;
@@ -1417,71 +1645,6 @@
       }
       default: return;
     }
-  });
-
-  /* —————————————— 拖动排序：与 ↑/↓ 是同一件事的两种手感 ——————————————
-     只允许「同一支、同一类」的两张卡互换：把 THEN 的一次性动作拖进常驻那一段、或者拖到
-     ELSE 那一支去，改变的不只是顺序，而是这条动作归谁执行 —— 那不该是顺手一拖做到的事。
-     顺序仍然只有一个来源（数组本身），这里没有任何新的配置字段。 */
-  let dragFrom = null;
-  let dragEl = null;
-  let overEl = null;
-  const dragCard = (e) => {
-    const el = e.target.closest("[data-act]");
-    return el && el.dataset.act === "drag-card" ? el : null;
-  };
-  const cardAt = (el) => ({ kind: el.dataset.kind, pre: el.dataset.pre || "", i: Number(el.dataset.i) });
-  const sameColumn = (a, b) => !!a && !!b && a.kind === b.kind && a.pre === b.pre;
-  const dropCls = "drag-over";
-  const markOver = (el) => {
-    if (overEl && overEl !== el) overEl.className = overEl.className.replace(dropCls, "");
-    overEl = el;
-    if (el && !el.className.split(/\s+/).includes(dropCls)) el.className += ` ${dropCls}`;
-  };
-
-  document.addEventListener("dragstart", (e) => {
-    const el = dragCard(e);
-    if (!el) return;
-    dragFrom = cardAt(el);
-    dragEl = el;
-    // 对浏览器声明「这是一次移动」：不说的时候各平台给的光标不一样（有的画个加号，
-    // 有的直接拒绝落点），用户的鼠标就成了猜测。
-    e.dataTransfer.effectAllowed = "move";
-    el.className += " dragging";
-  });
-  document.addEventListener("dragover", (e) => {
-    if (!dragFrom) return;
-    const el = dragCard(e);
-    if (!el) return;
-    const to = cardAt(el);
-    if (!sameColumn(dragFrom, to) || to.i === dragFrom.i) { markOver(null); return; }
-    // 接住这一次 dragover，浏览器才认为这条落点合法、后面才会发出 drop；
-    // 不接住就是「拖到那儿松手，什么也没发生」。
-    e.dataTransfer.dropEffect = "move";
-    e.preventDefault();
-    markOver(el);
-  });
-  document.addEventListener("drop", (e) => {
-    const el = dragCard(e);
-    if (!el || !dragFrom) return;
-    const to = cardAt(el);
-    e.preventDefault();
-    markOver(null);
-    const from = dragFrom;
-    dragFrom = null;
-    if (!sameColumn(from, to)) return;
-    const list = scope(to.pre)[to.kind === "one" ? "one_shot" : "persistent"] || [];
-    const [moved] = list.splice(from.i, 1);
-    // 落点说的是「它现在排第几」：拖到第 3 张卡上，松手后它自己就是第 3 张，
-    // 原来那张往它腾出的位置挪一格。
-    if (moved) list.splice(to.i, 0, moved);
-    renderActColumn(); refreshRun();
-  });
-  document.addEventListener("dragend", () => {
-    // 没落到有效目标（拖到列子外面、按 Esc 取消）时 DOM 不会被重绘，样式得自己擦掉。
-    if (dragEl) dragEl.className = dragEl.className.replace("dragging", "");
-    if (overEl) overEl.className = overEl.className.replace(dropCls, "");
-    dragEl = null; overEl = null; dragFrom = null;
   });
 
   $("btn-new").onclick = () => newProfile(`${t("editor.untitled")} ${cfg.profiles.length + 1}`);

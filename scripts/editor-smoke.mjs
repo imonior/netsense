@@ -286,15 +286,7 @@ const document = {
     return findAll((e) => names.some((n) => e.attributes[n] !== undefined));
   },
   dispatch(type, target) {
-    // 拖动这一类事件得带上 dataTransfer，界面代码要用它把「这是一次 move」告诉浏览器；
-    // defaultPrevented 则是断言用的：dragover 没接住（preventDefault）的落点，真实浏览器
-    // 根本不会发出 drop —— 这一位在 stub 里必须留痕，否则测不出「界面拒绝得对不对」。
-    const ev = {
-      type, target, defaultPrevented: false,
-      dataTransfer: { effectAllowed: "", dropEffect: "", setData() {}, getData: () => "" },
-      preventDefault() { ev.defaultPrevented = true; },
-    };
-    this.lastEvent = ev;
+    const ev = { type, target };
     for (const fn of handlers[type] || []) fn(ev);
   },
 };
@@ -323,6 +315,9 @@ const strings = JSON.parse(readFileSync(join(ROOT, "src-tauri/src/i18n/en.json")
 const zhStrings = JSON.parse(readFileSync(join(ROOT, "src-tauri/src/i18n/zh.json"), "utf8"));
 /** 假后端「当前」的语言：编辑器跟着它走，测试用它来模拟软件设置里换了语言。 */
 let langCode = "en";
+/** 系统文件选择器这一次回什么：正常是一条路径，null 是取消，错误是「它起不来」。 */
+let pickAppResult = "/Users/me/Desktop/GreenThing.app";
+let pickAppError = null;
 
 const engineView = (profiles, state, lastRun, workers) => ({
   state,
@@ -353,8 +348,45 @@ let viewFixture = engineView(
   { state: "active", id: "office" },
 );
 
-const invokeLog = [];
-/// 「当前网络」那一格的网卡明细来源。可变：最后那一组会改它，验证广播之后界面跟着变新。
+/** `preview_match` 的替身。真的那一份在 Rust（`conditions::eval_profile` 对引擎已采到的
+    快照），这里照同一份 `viewFixture.snapshot` 把三态算回来 —— 为的是检查**接线**：
+    编辑器发的是不是表单当前内容、徽标是不是就地换掉了、有没有把引擎说的「已生效」盖掉。
+    匹配判据本身由 Rust 的单元测试守，不靠这里。 */
+function previewFixture(profiles) {
+  const snap = viewFixture.snapshot;
+  const condStatus = (c) => {
+    if (!c.enabled) return "disabled";
+    const want = String(c.value || "").toLowerCase();
+    const hit = c.type === "wifi_ssid"
+      ? c.value === snap.ssid
+      : c.type === "network_interface"
+        ? (c.value === "*" ? snap.interfaces.length > 0 : snap.interfaces.includes(want))
+        : c.type === "bssid" || c.type === "gateway_mac"
+          ? snap[c.type] === want
+          : false;
+    return hit ? "match" : "no_match";
+  };
+  return profiles.map((p) => {
+    const rules = (p.rules || []).map((r) => {
+      const conditions = (r.conditions || []).map((c) => ({
+        id: c.id, kind: c.type, value: c.value, status: condStatus(c),
+      }));
+      const live = conditions.filter((c) => c.status !== "disabled");
+      return {
+        id: r.id,
+        status: !r.enabled || !live.length ? "inactive"
+          : live.every((c) => c.status === "match") ? "match" : "no_match",
+        conditions,
+      };
+    });
+    return {
+      id: p.id, name: p.name, enabled: p.enabled,
+      matched: p.enabled && rules.some((r) => r.status === "match"), rules,
+    };
+  });
+}
+
+const invokeLog = [];/// 「当前网络」那一格的网卡明细来源。可变：最后那一组会改它，验证广播之后界面跟着变新。
 let nicFixture = [
   { name: "en0", kind: "wireless", ipv4: "192.168.1.100/24", netmask: "255.255.255.0", dns: "192.168.1.1" },
   { name: "en5", kind: "wired" },
@@ -377,12 +409,40 @@ function fakeInvoke(cmd, args) {
     (e) => { ipcTime.push({ cmd, issued, resolved: (ipcClock += 1) }); throw e; },
   );
 }
+/** 按住某一条命令：让它停在半路，直到测试放行。用来把「首屏等不等外部数据」变成
+    看得见的断言 —— 一个永远不回头的 `get_status` 就是现场那几秒空白的替身。
+    两位记：`holdArmed` 是「下一趟打算按住谁」，`holdLive` 是「此刻真停在哪一路上」。
+    只记一位的话，发出时就把这一路从手上擦掉了，`releaseHeld` 再也找不到要放行的那一个。 */
+let holdArmed = null;
+let holdLive = null;
+const holdCmd = (cmd) => { holdArmed = cmd; };
+const releaseHeld = async () => {
+  const g = holdLive;
+  // 按住却没咬住，就是首屏那一组断言在查一个不存在的过程：宁可在这里炸，
+  // 也不要让「编辑器不再问 get_status」读成「首屏很快」。
+  if (!g) throw new Error(`holdCmd(${holdArmed ?? "?"}) 没有拦住任何调用`);
+  holdLive = null;
+  g.release();
+  await settle();
+};
 function answer(cmd, args) {
+  const value = answerValue(cmd, args);
+  if (holdArmed === cmd) {
+    holdArmed = null;
+    return new Promise((resolve) => { holdLive = { cmd, release: () => resolve(value) }; });
+  }
+  return value;
+}
+function answerValue(cmd, args) {
   switch (cmd) {
     case "get_strings":
       return Promise.resolve({ ...(langCode === "zh" ? zhStrings : strings) });
     case "get_language":
       return Promise.resolve(langCode);
+    case "get_theme":
+      // 编辑器首绘前只问这三份便宜的（配置 / 语言 / 配色）。配色给 light 的理由同
+      // `get_status` 里那一份：深色是 CSS 默认档，给 dark 分不清「写了属性」还是「没人写」。
+      return Promise.resolve("light");
     case "get_config":
       return Promise.resolve(JSON.stringify(configFixture));
     case "get_networks":
@@ -406,6 +466,20 @@ function answer(cmd, args) {
         { name: "Office LaserJet", info: "LaserJet 476 · 3F", is_default: true },
         { name: "Home Inkjet", is_default: false },
       ]));
+    case "get_installed_apps":
+      // 「启动程序」的候选（macOS 上是 /Applications 里带启动项的那些 .app）。返回 JSON
+      // 字符串的理由同上一档。故意夹带一条没有路径的记录：后端本不该给，但界面也不该把它
+      // 渲染成一条点了没反应的候选。
+      return Promise.resolve(JSON.stringify([
+        { name: "Broken", path: "" },
+        { name: "Firefox", path: "/Applications/Firefox.app" },
+        { name: "Keka", path: "/Applications/Keka.app" },
+        { name: "Slack", path: "/Applications/Slack.app" },
+      ]));
+    case "pick_app":
+      return pickAppError
+        ? Promise.reject(new Error(pickAppError))
+        : Promise.resolve(pickAppResult);
 
     case "get_status":
       return Promise.resolve(
@@ -428,6 +502,8 @@ function answer(cmd, args) {
       emitted.push(rec);
       return Promise.resolve();
     }
+    case "preview_match":
+      return Promise.resolve(JSON.stringify(previewFixture(JSON.parse(args.payload))));
     case "apply_profile":
     case "delete_profile":
     case "close_editor":
@@ -484,14 +560,21 @@ const code =
   " get wifiList() { return wifiList }, get nicList() { return nicList }," +
   " get adapterList() { return adapterList }," +
   " get printerList() { return printerList }," +
+  " get appList() { return appList }, set appList(v) { appList = v }," +
   " get langShown() { return langShown }, get dirty() { return dirty }," +
   " get globalDraft() { return globalDraft } };";
+// 按住最慢的那一份外部数据。现场那句「自动化配置点开以后空白好几秒」在真机上就是这几趟子进程
+// （Windows 上每趟是一整条 PowerShell 启动链），替身只有让它停在半路，才看得出来首绘等不等它。
+holdCmd("get_status");
 vm.runInContext(code, ctx, { filename: "frontend/editor.html" });
 const h = ctx.__h;
 
 const settle = async (n = 6) => {
   for (let i = 0; i < n; i += 1) await new Promise((r) => setImmediate(r));
 };
+/** 真等一会儿。条件预览是合并过的（改一下表单等 200 ms 才问后端），而 `settle` 只转微任务、
+    等不到定时器 —— 这一位是「徽标跟不跟表单走」唯一看得见的窗口。 */
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const lastSave = () => saves[saves.length - 1];
 const saveOf = (cmd) => saves.filter((s) => s.cmd === cmd).pop();
 const resetSaves = () => {
@@ -502,26 +585,45 @@ const resetSaves = () => {
 
 group("装载");
 await settle();
+// 首屏那一帧：外部六份里最慢的一份还停在半路。这一段断言的是「表单先画、系统清单后到」这条
+// 分工 —— 它挡得住的回归是「把外部数据又请回首绘的关键路径」（用户看到的正是那一句空白），
+// 以及第一帧漏掉语言/配色这两份便宜数据。它挡不住的是「第一帧画错了内容」：那时 view 同样是
+// null，界面却已经不该长这样 —— 那一条由下面「四格与徽标来自快照」那几组负责。
+check("引擎快照还没回来时，Profile 列表与表单已经画好",
+  h.view === null &&
+  findAll((e) => e.dataset?.act === "sel-profile").length === 3 && !!byBind("name"),
+  `view=${JSON.stringify(h.view)}，行数 ${findAll((e) => e.dataset?.act === "sel-profile").length}`);
+eq("语言与配色由首屏那一批便宜取数写上，不等状态快照",
+  [documentElement.lang, documentElement.dataset.theme], ["en", "light"]);
+await releaseHeld();
 check("启动脚本无异常地跑完（顶层 IIFE 已读到配置）", h.cfg.profiles.length === 3);
 eq(
-  "启动时按顺序读了后端：文案 / 配置 / 已存网络 / 在用网卡 / 本机网卡 / 系统打印机 / 状态",
-  invokeLog.map((c) => c.cmd).slice(0, 7),
-  ["get_strings", "get_config", "get_networks", "get_interfaces", "get_adapters", "get_printers", "get_status"],
+  "启动时按顺序读了后端：文案 → 六份外部数据一起发 → 首屏那三份（配置 / 语言 / 配色）",
+  invokeLog.map((c) => c.cmd).slice(0, 10),
+  ["get_strings", "get_networks", "get_interfaces", "get_adapters", "get_printers", "get_installed_apps",
+   "get_status", "get_config", "get_language", "get_theme"],
 );
-eq("已存 SSID、在用网卡、本机网卡与打印机快照各取一份（条件值与动作目标的候选）",
-  [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name)],
-  [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"]]);
+eq("已存 SSID、在用网卡、本机网卡、打印机与已装程序各取一份（条件值与动作目标的候选）",
+  [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name),
+   h.appList.map((a) => a.name)],
+  [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"],
+   ["Broken", "Firefox", "Keka", "Slack"]]);
 // 上面那条只说得出「读了哪几项」，说不出「是不是排队读的」，而排队读的代价就是现场那句
-// 「自动化管理打开要好几秒空白」：五项各要拉一次子进程，串起来就是它们之和。
-const bootIpc = ["get_networks", "get_interfaces", "get_adapters", "get_printers", "get_status"];
-const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 5);
-eq("开机那五份外部数据各发一次（没有哪一项被读了两遍）", bootBatch.length, 5);
+// 「自动化管理打开要好几秒空白」：六项各要拉一次子进程，串起来就是它们之和。
+// 判据是并发与否唯一看得见的痕迹：最后发出的那一项，早于最早落回的那一项 —— 被按住的那份
+// 落回得最晚，取 min 时自然不会算进最早的那一个，所以它按住的是首绘、压不垮这条判据。
+const bootIpc = ["get_networks", "get_interfaces", "get_adapters", "get_printers", "get_installed_apps",
+                 "get_status", "get_config", "get_language", "get_theme"];
+const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 9);
+eq("开机那九份各发一次（外部六份 + 首屏三份，没有哪一项被读了两遍）", bootBatch.length, 9);
 check("它们是并发发出的：最后发出的那一项，早于最早落回的那一项",
   Math.min(...bootBatch.map((t) => t.resolved)) > Math.max(...bootBatch.map((t) => t.issued)),
   `发出 ${bootBatch.map((t) => t.issued)}，落回 ${bootBatch.map((t) => t.resolved)}`);
 check("第 1 列渲染出 Profile 列表", findAll((e) => e.dataset?.act === "sel-profile").length === 3);
 // 配色：`theme.css` 只认 `<html data-theme>`，所以这一条断言的是「后端给的那一档真的落地了」，
 // 而不是样式表里写了什么 —— 属性没写上时窗口会安静地停在深色档，谁也不会报错。
+// 首屏那一帧已经查过同一个属性；这里查的是**快照回来以后又对了一次**（两处来源本是同一句
+// `theme_now()`，但首绘那一瞬正好有人换档时，快照里的那一份才是新的）。
 eq("状态快照里的配色档写进了 <html data-theme>", documentElement.dataset.theme, "light");
 check("兜底排在列表末尾，作为一条特殊的 Profile 行", !!byAct("sel-fallback"));
 eq("按钮文案取自后端字典（不是 key 本身）", findById("btn-apply").textContent, strings["editor.force_apply"]);
@@ -593,21 +695,34 @@ group("第 2 列：条件行 = 勾选框 + 类型 + 值 + 徽标 + 删除，同�
 const crows = findAll((e) => e.className?.includes("crow"));
 eq("office 的两条规则里一共 4 个条件，一行一个", crows.length, 4);
 const crow0 = inside(crows[0]);
-eq("同一行里：启用勾选 + SSID 输入框 + 类型下拉 + 候选下拉 + 徽标 + 删除按钮",
+eq("同一行里：启用勾选 + SSID 输入框（候选是它的浮层，不占第二格）+ 类型下拉 + 徽标 + 删除按钮",
   [crow0.filter((e) => e.tagName === "INPUT").length,
    crow0.filter((e) => e.tagName === "SELECT").length,
    crow0.filter((e) => e.className?.includes("badge")).length,
    crow0.filter((e) => e.dataset?.act === "del-cond").length],
-  [2, 2, 1, 1]);
+  [2, 1, 1, 1]);
 const ssidInp = byBind("rules.0.conditions.0.value");
-const ssidPick = findAll((e) => e.dataset?.ssidPick === "rules.0.conditions.0.value")[0];
+const ssidList = findAll((e) => e.dataset?.comboList === "rules.0.conditions.0.value")[0];
+const ssidOpts = (ssidList?.children || []).filter((e) => e.dataset?.act === "combo-pick");
 eq("SSID 是能直接打字的输入框，不再是一个只能挑的下拉", ssidInp?.tagName, "INPUT");
 eq("输入框显示的就是配置里的值", [ssidInp?.value, ssidInp?.placeholder],
   [h.draft.rules[0].conditions[0].value, strings["status.ssid"]]);
-eq("候选下拉只列系统已保存的 SSID，不掺任何哨兵项",
-  ssidPick?.children.map((o) => o.value), ["", "Office_5G", "Café"]);
-eq("候选下拉第一项是占位文案", ssidPick?.children[0].textContent, strings["editor.ssid_placeholder"]);
-eq("候选下拉自己不绑定字段：它写不进配置", ssidPick?.dataset?.bind, undefined);
+// 这一条是「候选和输入框在一起」的结构判据：同一个 `.combo-box` 之下，而不是行里的两块。
+check("候选浮层挂在输入框同一个盒子里：它就是这一条条件的附属控件",
+  !!ssidList && ssidList.parent === ssidInp.parent);
+eq("候选只列系统已保存的 SSID，不掺任何哨兵项", ssidOpts.map((o) => o.dataset.v), ["Office_5G", "Café"]);
+eq("候选显示的文本就是它要填进去的那个名字", ssidOpts.map((o) => o.textContent), ["Office_5G", "Café"]);
+check("默认收起：没点开之前浮层不占位（.open 不在）", ssidList?.classList?.contains("open") === false);
+eq("候选自己不绑定字段：它写不进配置", ssidList?.dataset?.bind, undefined);
+const caret0 = findAll((e) => e.dataset?.act === "combo-toggle" &&
+  e.dataset?.path === "rules.0.conditions.0.value")[0];
+click(caret0);
+check("点右端箭头：这一条的浮层展开", ssidList.classList.contains("open"));
+click(caret0);
+check("同一个箭头再点一次：收起", !ssidList.classList.contains("open"));
+click(caret0);
+click(findById("col-net"));
+check("点别处（这里是第三列的空白处）：浮层收起，不会一直挂着", !ssidList.classList.contains("open"));
 const ifaceSelect = byBind("rules.0.conditions.2.value");
 eq("接口值只能是选出来的", ifaceSelect?.tagName, "SELECT");
 eq("候选来自本机网卡：没插线的口（en7）也在，VPN 隧道（utun3）不在",
@@ -627,18 +742,21 @@ eq("已存但本机已经没有的网卡：原样列出并选中，不会被悄�
 // 换类型 = 换值的语义。旧值不跟着清，就会被新类型的输入框当成「已存的值」显示出来
 // —— SSID 与接口互相串台就是这么来的。
 choose(byBind("rules.0.conditions.2.type"), "wifi_ssid");
-const ssids = findAll((e) => e.dataset?.ssidPick === "rules.0.conditions.2.value")[0];
+const ssids = findAll((e) => e.dataset?.comboList === "rules.0.conditions.2.value")[0];
+const ssidOpts2 = (ssids?.children || []).filter((e) => e.dataset?.act === "combo-pick");
 eq("接口条件切成 SSID 类型后：en9 不混进候选，值也被清空",
-  [ssids?.children.map((o) => o.value), byBind("rules.0.conditions.2.value")?.value,
+  [ssidOpts2.map((o) => o.dataset.v), byBind("rules.0.conditions.2.value")?.value,
    h.draft.rules[0].conditions[2].value],
-  [["", "Office_5G", "Café"], "", undefined]);
-// 候选下拉只是选取器：选中把名字交给输入框，自己退回占位；直接打字则完全不经过它。
-choose(ssids, "Café");
+  [["Office_5G", "Café"], "", undefined]);
+// 浮层只是选取器：点开、选中，名字交给输入框，浮层自己收起；直接打字则完全不经过它。
+const ssidInp2 = byBind("rules.0.conditions.2.value");
+click(findAll((e) => e.dataset?.act === "combo-toggle" &&
+  e.dataset?.path === "rules.0.conditions.2.value")[0]);
+click(ssidOpts2[1]);
 eq("从候选里选一个：输入框与配置收到的都是那个 SSID",
-  [byBind("rules.0.conditions.2.value")?.value, h.draft.rules[0].conditions[2].value],
-  ["Café", "Café"]);
-eq("选完候选下拉退回占位，不把「自己的选中状态」留在界面上冒充配置",
-  ssids?.selectedIndex, 0);
+  [ssidInp2?.value, h.draft.rules[0].conditions[2].value], ["Café", "Café"]);
+check("选完浮层收起：它不留下「自己选中了什么」这份状态冒充配置",
+  !ssids.classList.contains("open"));
 type(byBind("rules.0.conditions.2.value"), "");
 eq("清空输入框是不写 value，而不是留下一个能和「空名字网络」Match 上的空串",
   h.draft.rules[0].conditions[2].value, undefined);
@@ -730,6 +848,81 @@ await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 eq("提权标记只贴在 run_script 上", p?.then?.one_shot?.[1]?.action, { type: "run_script", path: "scripts/office-vpn.sh", elevated: true });
 check("其他动作没有被连带标上提权", p?.then?.one_shot?.[0]?.action?.elevated === undefined);
+
+group("3B 动作：启动程序 = 已装程序候选 + 浏览… + 手输，三路写同一个字段");
+// 「启动程序」这一格有三个入口：候选里挑一个、系统文件选择器挑一个、键盘直接打。它们写的
+// 都是 `action.app` 这一个字段 —— 这一组查的就是三个入口没有各写各的，以及取消/起不来
+// 这两条失败路不会把输入框或配置改坏。
+const appInp = byBind("then.one_shot.0.action.app");
+eq("启动目标是能直接打字的输入框（绿色免安装程序不在任何菜单里）", appInp?.tagName, "INPUT");
+eq("输入框显示的就是配置里的值（launch_app 要的是平台受理的那个形状）",
+  [appInp?.value, appInp?.placeholder], ["/Applications/Slack.app", strings["editor.app_placeholder"]]);
+const appDrop = findAll((e) => e.dataset?.comboList === "then.one_shot.0.action.app")[0];
+const appOpts = (appDrop?.children || []).filter((e) => e.dataset?.act === "combo-pick");
+eq("候选给人看的是名字", appOpts.map((o) => o.textContent), ["Firefox", "Keka", "Slack"]);
+eq("写回去的是路径（名字只是这一格的显示面）",
+  appOpts.map((o) => o.dataset.v),
+  ["/Applications/Firefox.app", "/Applications/Keka.app", "/Applications/Slack.app"]);
+check("悬停说明露出完整路径：同名程序不少，选错一条就起错程序",
+  appOpts.every((o) => o.title === o.dataset.v));
+eq("没有路径的记录不渲染成一条点了没反应的候选", appOpts.some((o) => !o.dataset.v), false);
+const appCaret = findAll((e) => e.dataset?.act === "combo-toggle" &&
+  e.dataset?.path === "then.one_shot.0.action.app")[0];
+check("同一个组合框机制：箭头在输入框右端，打开前浮层收起",
+  !!appCaret && appDrop?.classList?.contains("open") === false);
+click(appCaret);
+check("点箭头展开", appDrop.classList.contains("open"));
+click(appOpts[0]);
+eq("从候选里选一个：输入框与配置收到的都是那条路径",
+  [appInp?.value, h.draft.then.one_shot[0].action.app], ["/Applications/Firefox.app", "/Applications/Firefox.app"]);
+check("选完收起", !appDrop.classList.contains("open"));
+const browseBtn = findAll((e) => e.dataset?.act === "browse-app" &&
+  e.dataset?.path === "then.one_shot.0.action.app")[0];
+check("「浏览…」与输入框同一行（它是这一格的第三个入口，不是另一处控件）",
+  !!browseBtn && browseBtn.parent === appInp.parent.parent);
+eq("按钮文案取自字典", browseBtn?.textContent, strings["editor.browse"]);
+const picksBefore = invokeLog.filter((c) => c.cmd === "pick_app").length;
+click(browseBtn);
+await settle();
+eq("点浏览问的是 pick_app", invokeLog.filter((c) => c.cmd === "pick_app").length, picksBefore + 1);
+eq("选择器给回来的路径抄进同一个输入框，配置跟着改",
+  [appInp?.value, h.draft.then.one_shot[0].action.app],
+  ["/Users/me/Desktop/GreenThing.app", "/Users/me/Desktop/GreenThing.app"]);
+pickAppResult = null;
+click(browseBtn);
+await settle();
+eq("取消（null）什么都不写：输入框保持原样",
+  [appInp?.value, h.draft.then.one_shot[0].action.app],
+  ["/Users/me/Desktop/GreenThing.app", "/Users/me/Desktop/GreenThing.app"]);
+pickAppError = "zenity: command not found";
+click(browseBtn);
+await settle();
+check("选择器起不来：错误原文说给用户，不是静默无反应",
+  findById("toast").textContent.includes("zenity"));
+pickAppError = null;
+type(appInp, "/opt/tools/foo");
+eq("手输仍然直接写配置（下拉与浏览都只是加速器）",
+  h.draft.then.one_shot[0].action.app, "/opt/tools/foo");
+resetSaves();
+await h.$("btn-save").onclick();
+p = saveOf("save_profile")?.payload;
+eq("手输的路径原样送达", p?.then?.one_shot?.[0]?.action, { type: "launch_app", app: "/opt/tools/foo" });
+// 一台候选都没有（干净机器 / 枚举失败）：下拉整个不出现，但手输与浏览必须还在 ——
+// 少了候选只是少一条捷径，不是把这一格关掉。对照值现取草稿：上面那次保存会把表单
+// 从磁盘回填一遍（替身里的 get_config 不跟着 save 变），写死的路径会被它冲掉。
+const allApps = h.appList;
+h.appList = [];
+h.renderAll();
+const curApp = h.draft.then.one_shot[0].action.app;
+check("零候选时：输入框与「浏览…」都还在，只有箭头消失",
+  byBind("then.one_shot.0.action.app")?.value === curApp &&
+  !findAll((e) => e.dataset?.act === "combo-toggle" && e.dataset?.path === "then.one_shot.0.action.app")[0] &&
+  !!findAll((e) => e.dataset?.act === "browse-app" && e.dataset?.path === "then.one_shot.0.action.app")[0],
+  `value=${JSON.stringify(byBind("then.one_shot.0.action.app")?.value)} 期望=${JSON.stringify(curApp)} ` +
+  `caret=${!!findAll((e) => e.dataset?.act === "combo-toggle" && e.dataset?.path === "then.one_shot.0.action.app")[0]} ` +
+  `browse=${!!findAll((e) => e.dataset?.act === "browse-app" && e.dataset?.path === "then.one_shot.0.action.app")[0]}`);
+h.appList = allApps;
+h.renderAll();
 
 group("3B 动作：默认打印机的候选来自系统，不是让用户手抄名字");
 const prInput = byBind("then.one_shot.3.action.printer");
@@ -975,53 +1168,6 @@ click(mv("persist", "then.", 1, -1));
 eq("新加的那条被移到前面，先起的就是它", plIds()[1], "p1");
 h.pick("profile", "office");   // 丢掉这条还没填路径的临时动作，别把它送进 fixture
 
-group("拖动卡头排序：落点说的是「它现在排第几」");
-click(officeRow);
-const head = (kind, pre, i) =>
-  findAll((e) => e.dataset?.act === "drag-card" && e.dataset?.kind === kind &&
-    e.dataset?.pre === pre && Number(e.dataset?.i) === i)[0] || null;
-// 一次完整的手势。真浏览器里 drop 之前必然先落住 dragover（不 preventDefault 就没有合法落点），
-// 收尾必然有 dragend（哪怕用户把卡拖到列子外面松手）—— 这里照着走一遍，才不会测出一条
-// 只在脚本里成立的顺序。返回那次 dragover：它是不是被「接住」了，是浏览器放不放行的依据。
-const drag = (from, to) => {
-  document.dispatch("dragstart", head(from[0], from[1], from[2]));
-  document.dispatch("dragover", head(to[0], to[1], to[2]));
-  const over = document.lastEvent;
-  document.dispatch("drop", head(to[0], to[1], to[2]));
-  document.dispatch("dragend", head(from[0], from[1], from[2]));
-  return over;
-};
-check("卡头自己就是手柄（整张卡都可拖会误伤卡里文本的选择）",
-  head("one", "then.", 0)?.attributes?.draggable === "true");
-eq("只有 3B 的动作卡挂得上手柄（路由卡这类「顺序没有意义」的卡片不在其中，光标也不该骗人）",
-  findAll((e) => e.dataset?.act === "drag-card").length, 5);
-const landed = drag(["one", "then.", 0], ["one", "then.", 2]);
-check("落在有效目标上：说成 move 并接住 dragover，否则浏览器压根不会发出 drop",
-  [landed.defaultPrevented, landed.dataTransfer.dropEffect], [true, "move"]);
-eq("第一条拖到第 3 张卡上：它成为第 3 条，中间那些往前挪一格",
-  oneIds(), ["a2", "a3", "a1", "a4"]);
-drag(["one", "then.", 1], ["one", "then.", 1]);
-eq("拖到自己身上什么都不改", oneIds(), ["a2", "a3", "a1", "a4"]);
-const persistedBefore = (h.draft.then.persistent || []).length;
-const refused = drag(["one", "then.", 0], ["persist", "then.", 0]);
-check("跨类的落点不接住：在浏览器那边就是「这里放不下」，而不是放下以后偷偷改语义",
-  refused.defaultPrevented === false);
-eq("一次性动作不能靠一拖变成常驻动作（那改的是归谁执行，不是顺序）",
-  [(h.draft.then.one_shot || []).length, (h.draft.then.persistent || []).length],
-  [4, persistedBefore]);
-check("被拒绝的拖动不留下半透明的卡片：dragend 把样式擦干净了",
-  !findAll((e) => (e.className || "").includes("dragging") || (e.className || "").includes("drag-over")).length);
-resetSaves();
-await h.$("btn-save").onclick();
-p = saveOf("save_profile")?.payload;
-eq("拖出来的顺序就是保存下去的顺序", p?.then?.one_shot?.map((a) => a.id), ["a2", "a3", "a1", "a4"]);
-click(findAll((e) => e.dataset?.act === "add-one" && e.dataset?.pre === "else.")[0]);
-check("ELSE 那一支也有自己的动作列（这是跨支拒绝的前提）", byBind("else.one_shot.0.action.app") !== null);
-const thenBefore = oneIds();
-drag(["one", "then.", 0], ["one", "else.", 0]);
-eq("THEN 的卡拖不进 ELSE：两支各自排队，互不串门", oneIds(), thenBefore);
-h.pick("profile", "office");   // 丢掉这张没填应用名的 ELSE 临时卡
-
 group("广播只换徽标，不重建表单");
 click(officeRow);
 type(byBind("name"), "打字打到一半");
@@ -1175,6 +1321,66 @@ await broadcast("netsense://status", {
 await broadcast("netsense://evaluation", movedView);
 check("同一份身份再来两条广播，一次都不再多问", askedNics() === afterMove);
 check("有线口不再显示那一行空着的 SSID 值", !findById("st-net").textContent.includes("Office_5G"));
+
+// —————————————————————— 条件即时预览 ——————————————————————
+
+group("条件徽标跟着表单立刻预览，不等引擎那一轮");
+// 现场那句「matched 和绿框出现得太慢」慢在引擎那一轮：它要按自己的采样节律走，还要等
+// `change_delay_secs` 去抖（默认 5 秒）。这一组只问**接线**：表单改了以后徽标有没有就地跟上、
+// 发出去的是不是草稿、合并有没有生效、「已经生效」有没有被预览冒充。
+// 匹配本身算得对不对不在这里 —— 那由 `conditions::evaluator` 的 Rust 单元测试守，
+// 这里的替身只是把同一份快照的三态报回来。
+const previewCalls = () => invokeLog.filter((c) => c.cmd === "preview_match").length;
+const lastPreviewPayload = () =>
+  JSON.parse(invokeLog.filter((c) => c.cmd === "preview_match").pop().args.payload);
+// 前面几组把 `view` 换成过别的替身（worker 状态那几组），这一组从基准那份重新开始：
+// 「引擎说已生效」那几条断言要的是 `viewFixture` 里 office = active 这个事实。
+h.view = viewFixture;
+h.pick("profile", "home");
+await wait(300);
+await settle();
+check("选中一条以后编辑器问过条件预览", previewCalls() >= 1, `一次都没问（${previewCalls()}）`);
+check("发出去的是整份清单，不只是选中那一条",
+  lastPreviewPayload().length === h.cfg.profiles.length,
+  `清单 ${lastPreviewPayload().length} 条，配置 ${h.cfg.profiles.length} 条`);
+check("home 开局没命中：徽标写着未命中，规则卡也没有绿描边",
+  findById("pbadge-home").textContent === strings["editor.status_not_matched"] &&
+  !findById("rbox-r1").className.includes("r-match"));
+// home 那条 Rule 是两个条件的 AND：只把 SSID 改成此刻连着的这台，规则还不该命中。
+// 这一步挡的是「前端自己凑了一个匹配出来」—— AND 是后端算的，界面无权提前替它收工。
+type(byBind("rules.0.conditions.0.value"), "Office_5G");
+await wait(300);
+await settle();
+eq("发出去的是草稿，不是磁盘上那一份",
+  lastPreviewPayload().find((p) => p.id === "home").rules[0].conditions[0].value, "Office_5G");
+eq("这一条条件的徽标改成 MATCH（不发任何广播）",
+  findById("cbs-r1-0").textContent, strings["editor.status_match"]);
+check("但另一条条件还没对上：规则卡不提前变绿",
+  !findById("rbox-r1").className.includes("r-match") &&
+  findById("rbs-r1").textContent === strings["editor.status_nomatch"]);
+// 网关 MAC 也对上以后，AND 才成立。
+type(byBind("rules.0.conditions.1.value"), "aa:bb:cc:dd:ee:ff");
+await wait(300);
+await settle();
+check("两个条件都对上：规则卡立刻描上绿边", findById("rbox-r1").className.includes("r-match"));
+eq("规则徽标改成 MATCH", findById("rbs-r1").textContent, strings["editor.status_match"]);
+eq("列表那一行也跟着说命中", findById("pbadge-home").textContent, strings["editor.status_match"]);
+check("但那一行的「已生效」绿描边没有被预览冒充：它只跟引擎走",
+  !findById("prow-home").className.includes("live"));
+eq("引擎说已生效的那一条，徽标仍是 ACTIVE、不被预览改写",
+  findById("pbadge-office").textContent, strings["editor.status_active"]);
+const callsBeforeTyping = previewCalls();
+for (const v of ["A", "AB", "ABC", "ABCD", "ABCDE"]) type(byBind("rules.0.conditions.0.value"), v);
+await wait(400);
+await settle();
+eq("连打五个字符只多问一次后端（每个按键一趟 IPC 的那种写法没有回来）",
+  previewCalls(), callsBeforeTyping + 1);
+type(byBind("rules.0.conditions.0.value"), "NotThisNetwork");
+await wait(300);
+await settle();
+eq("改回一个对不上的名字，那一行的徽标跟着退回未命中",
+  findById("pbadge-home").textContent, strings["editor.status_not_matched"]);
+check("规则卡的绿边也一起退掉", !findById("rbox-r1").className.includes("r-match"));
 
 // —————————————————————— 交给 Rust 那半边的材料 ——————————————————————
 

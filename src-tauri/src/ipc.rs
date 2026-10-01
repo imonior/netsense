@@ -18,7 +18,7 @@ use crate::engine::{ActionKind, Msg};
 use crate::i18n;
 use crate::log;
 // `list_known_ssids` 是 PAL trait 方法，需把 trait 引入作用域
-use crate::platform::{platform_name, priv_channel, NetworkPlatform as _, NicInfo, PrinterInfo};
+use crate::platform::{platform_name, priv_channel, NetworkPlatform as _, AppEntry, NicInfo, PrinterInfo};
 use crate::state::{self, AppState};
 
 /// 前端读取当前网络状态 + 引擎视图（Active / Conflict / 每个 Profile 的三态）+ 语言 + 提权通道。
@@ -39,6 +39,37 @@ pub fn get_engine_status(state: State<'_, std::sync::Arc<AppState>>) -> String {
     let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
     serde_json::to_string(&eng.view(&cfg)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 编辑器用：拿**引擎此刻的快照**给表单里正填着的条件算一遍三态。
+///
+/// 存在的理由是那几秒的等待：引擎一轮要走自己的采样节律与 `change_delay_secs` 去抖
+/// （默认 5 秒，最坏 8 秒以上），而「我填的这条 SSID 现在对不对得上」本来不需要等它。
+/// `payload` 是**表单当前内容**（含没保存的草稿）的 Profile 数组 —— 判据仍然只有
+/// [`crate::conditions::eval_profile`] 那一份，前端不重写第二套匹配规则。
+///
+/// 这里用的是已经采到的那一份快照，不在这一问一答里再采一次：一次采样要拉若干子进程
+/// （macOS 的降级链里含一次几秒的 `system_profiler`），那样「即时预览」反而成了最慢的一条。
+/// 引擎还没跑完过第一轮时作答不了（快照是全空的默认值，拿它算出来的「都不匹配」只是没测过），
+/// 于是返回空数组，让界面继续用引擎广播的那份徽标。
+#[tauri::command(async)]
+pub fn preview_match(
+    state: State<'_, std::sync::Arc<AppState>>,
+    payload: String,
+) -> Result<String, String> {
+    let profiles: Vec<Profile> = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+    let snap = {
+        let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+        if !eng.sampled() {
+            return Ok("[]".to_string());
+        }
+        eng.snapshot.clone()
+    };
+    let evals: Vec<_> = profiles
+        .iter()
+        .map(|p| crate::conditions::eval_profile(p, &snap))
+        .collect();
+    serde_json::to_string(&evals).map_err(|e| e.to_string())
 }
 
 /// 前端读取全部在用网卡（有线 / 无线 / VPN），供面板与设置窗口的「网络硬件信息」列展示。
@@ -327,6 +358,26 @@ pub fn get_adapters(state: State<'_, std::sync::Arc<AppState>>) -> Vec<NicInfo> 
 #[tauri::command(async)]
 pub fn get_printers(state: State<'_, std::sync::Arc<AppState>>) -> Vec<PrinterInfo> {
     state.plat.list_printers()
+}
+
+/// 本机已装程序清单（编辑器里启动程序动作的候选）。
+///
+/// 空数组是合法答案：枚举范围是「有启动意图登记」的那些（macOS 的 `.app`、Windows
+/// 开始菜单的快捷方式、Linux 的 `.desktop`），一台干净机器上一条都没有是可能的。
+/// 界面因此把这栏留成可手输，另一个入口是 [`pick_app`]（磁盘上任意一个程序）。
+/// `async` 的理由同 `get_networks` —— 枚举要拉子进程或遍历目录。
+#[tauri::command(async)]
+pub fn get_installed_apps(state: State<'_, std::sync::Arc<AppState>>) -> Vec<AppEntry> {
+    state.plat.list_installed_apps()
+}
+
+/// 弹系统自己的文件选择器挑一个程序，返回其路径；用户取消 → `None`。
+///
+/// `async` 不是可选项：这是**模态**对话框，会阻塞到用户做出选择（可能好几分钟），
+/// 而非 async 命令跑在主线程，等待期间整个界面会失去响应。
+#[tauri::command(async)]
+pub fn pick_app(state: State<'_, std::sync::Arc<AppState>>) -> Result<Option<String>, String> {
+    state.plat.pick_app()
 }
 
 /// 切换 UI 语言并写回软件配置（`language` 字段）。

@@ -27,8 +27,9 @@
 //! （被撤销 / 需密码 / 装不上）、或这一批的形状白名单表达不了时才回落到逐次授权。
 
 use super::{
-    extract_mac, parse_kv, poll_ssid_watch, prefers_dark_from_defaults, printers_from_lpstat, run, run_env,
-    sh_q, timeout_secs, C_LOCALE, Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel,
+    dedupe_sort_apps, extract_mac, parse_kv, poll_ssid_watch, prefers_dark_from_defaults,
+    printers_from_lpstat, run, run_env,
+    sh_q, timeout_secs, AppEntry, C_LOCALE, Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel,
     ProbeTarget,
     TunnelTarget, WatcherHandle,
 };
@@ -604,6 +605,57 @@ fn open_args(app: &str, args: &[String]) -> Vec<String> {
         v.extend(args.iter().cloned());
     }
     v
+}
+
+/// 一个 `.app` 包路径 → 下拉条目：名字去掉后缀（`Slack.app` → `Slack`），路径原样带回。
+///
+/// 路径要**是 UTF-8**：非 UTF-8 的路径没法原样穿回 `open`，宁可这条不进清单（手输
+/// 仍能填进去），也不要塞一个被替换字符弄脏的路径 —— 那是必然启动失败的假目标。
+fn app_entry(path: &Path) -> Option<AppEntry> {
+    let name = path.file_name()?.to_str()?.strip_suffix(".app")?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(AppEntry {
+        name: name.to_string(),
+        path: path.to_str()?.to_string(),
+    })
+}
+
+/// 深度上限：`/Applications` 下一层（厂商子目录，如 `Adobe`）就覆盖了全部的现有排法；
+/// 再深只会把包内辅助件当程序扫出来。`.app` 包自身**不再下钻**。
+fn scan_app_dir(dir: &Path, depth: u8, out: &mut Vec<AppEntry>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with('.') {
+            continue;
+        }
+        let p = ent.path();
+        if name.ends_with(".app") {
+            if let Some(e) = app_entry(&p) {
+                out.push(e);
+            }
+            continue;
+        }
+        if depth > 0 && p.is_dir() {
+            scan_app_dir(&p, depth - 1, out);
+        }
+    }
+}
+
+/// `.app` 的四个标准位置，顺序即去重时保留的顺序（系统目录一份的显示名更权威）。
+fn app_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join("Applications"));
+    }
+    dirs
 }
 
 fn elevated_script_line(path: &str, args: &[String]) -> String {
@@ -1224,7 +1276,10 @@ struct VpnEvidence {
 /// 只对「不是硬件端口」的网络服务问 `-getinfo`：VPN 客户端创建的服务都以自己的名字
 /// 出现在 `-listallnetworkservices` 里而不在 `-listallhardwareports` 里，硬件口既问不
 /// 出隧道的地址、又要多起一倍子进程。
-fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
+///
+/// `nc_rows` 是调用方现场读过一次的 `scutil --nc list`（[`scutil_nc_rows_now`]）：
+/// 归属判定和「装了但没连」的那几张卡要的是同一份清单，不该各起一次子进程。
+fn collect_vpn_evidence(hw_ports: &[HwPort], nc_rows: &[(String, String)]) -> VpnEvidence {
     let hw: std::collections::HashSet<&str> = hw_ports.iter().map(|p| p.port.as_str()).collect();
     let mut svc_ip = Vec::new();
     for svc in network_services() {
@@ -1240,7 +1295,7 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
     }
     VpnEvidence {
         svc_ip,
-        connected: scutil_nc_connected(),
+        connected: connected_labels(nc_rows),
     }
 }
 
@@ -1252,22 +1307,90 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
 ///    丢信息，不是提纯）。
 /// 2. **唯一的已连接会话**：`alone`（系统上只有这一条隧道在用）且 `scutil --nc list`
 ///    里只有一条 `(Connected)`。两个「唯一」同时成立时它们指的几乎必然是同一件事；
-///    缺任何一个都不再推断。
+///    缺任何一个都不再推断。这一条还带一个**反证**：那个会话自己的服务如果报得出地址、
+///    而那个地址不是这条隧道的（含这条隧道根本没报出 IPv4 的情况），两件事就不是同一件，
+///    照样不认 —— 「唯一」只是没人 competing，反证才是这里真正的证据。
+///
+/// 界面上「连着没有」每一张卡都写得出来（`up` 是 `ifconfig`/`scutil` 直接给的），程序名
+/// 却只有证据才给：认不出只是少一格信息，界面退回通用的「VPN」；认错是给用户的设备安一个
+/// 具体到某家软件的假答案，它会接着被当成 3B2「维持连接」的对象。
 ///
 /// 曾经还有第三条路，它是错的，别再加回来：无人认领时按关键词扫一遍全部服务、命中即返回。
 /// 装了某家客户端的机器上，那个服务**一直**在清单里（断开也在、也没有地址），于是任何一条
 /// 认领不上的隧道都会被说成是它建的 —— 那个结果和这台设备没有任何关系，界面上得到的却
 /// 是一个**听起来很具体的错答案**。认不出来只是少一格信息，认错才是事故。
 fn attribute_vpn(ev: &VpnEvidence, ip: Option<&str>, alone: bool) -> Option<String> {
-    if let Some(addr) = ip.filter(|a| !a.is_empty()) {
-        if let Some((svc, _)) = ev.svc_ip.iter().find(|(_, a)| a == addr) {
+    let addr = ip.filter(|a| !a.is_empty());
+    if let Some(a) = addr {
+        if let Some((svc, _)) = ev.svc_ip.iter().find(|(_, reported)| reported == a) {
             return Some(svc.clone());
         }
     }
     if alone && ev.connected.len() == 1 {
-        return Some(ev.connected[0].clone());
+        let label = ev.connected[0].clone();
+        // 反证：这个会话的服务报得出的那个地址，不是脚下这条隧道的。
+        // 名字比对忽略大小写：会话标签与网络服务名是同一家客户端写的两处，只差个大小写
+        // 不代表它们是两个东西，而这里宁可少一格信息。
+        let owns_it = ev
+            .svc_ip
+            .iter()
+            .find(|(svc, _)| svc.eq_ignore_ascii_case(&label))
+            .map_or(true, |(_, reported)| addr.is_some_and(|a| a == *reported));
+        if owns_it {
+            return Some(label);
+        }
+        return None;
     }
     None
+}
+
+/// 「装了、此刻没连」的 VPN 客户端：给界面一张不带地址、状态写着没连的卡。
+///
+/// macOS 没有「utun → 进程」的公开映射（见 [`attribute_vpn`]），归属只能等客户端自己报出
+/// 地址；但「这台机器上有 Tailscale、ProtonVPN 这么几个 VPN 客户端，它们现在没连」是
+/// `scutil --nc list` 直接答得出的事实，不需要猜哪条隧道是谁建的。
+///
+/// 已经连着的那些不再补卡：它们自己那条隧道就在清单里，两张卡说同一件事只会让人以为
+/// 这里有两个 VPN。卡片的名字照原样用会话标签 —— 那是用户自己取的名字，不是这边编的；
+/// 旁边那枚产品名标签由 [`super::vpn_app_for`] 决定要不要挂（标题已经说明白了就不挂）。
+///
+/// `up: false` 且不带任何地址：这样的行进不了 conditions 层的身份快照（那边按
+/// 「`up` 或有 IPv4」收网卡），也就是说不参与条件比对，只是界面的一行话。
+fn idle_vpn_rows(nc_rows: &[(String, String)], live: &[super::NicInfo]) -> Vec<super::NicInfo> {
+    let mut seen: Vec<&str> = Vec::new();
+    nc_rows
+        .iter()
+        .filter(|(_, line)| !scutil_row_connected(line))
+        .map(|(label, _)| label.as_str())
+        .filter(|&label| {
+            !live.iter().any(|n| {
+                n.kind == super::NicKind::Vpn
+                    && (n.name == label
+                        || n.label.as_deref() == Some(label)
+                        || n.app.as_deref() == Some(label))
+            })
+        })
+        // 同一个客户端可以有两条配置（两条工作隧道），标签一样。两张一模一样的卡
+        // 只会让人以为机器上有两个 VPN 客户端。
+        .filter(|&label| {
+            if seen.contains(&label) {
+                return false;
+            }
+            seen.push(label);
+            true
+        })
+        .map(|label| super::NicInfo {
+            name: label.to_string(),
+            // 这条会话没有设备名，标题能用的只有它自己的标签；把它同时填进 `label`，
+            // 面板的标题就是这个名字本身，而不会在后面再缀一遍「(VPN)」—— 类型信息
+            // 本来就由旁边那枚标签负责。
+            label: Some(label.to_string()),
+            kind: super::NicKind::Vpn,
+            up: false,
+            app: super::vpn_app_for(label),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// 设备名 → 网络服务名（供 `networksetup -setdhcp` 等写入操作定位）。
@@ -1331,10 +1454,7 @@ fn scutil_row_connected(line: &str) -> bool {
 
 /// 清单里全部隧道的用户可见标签（报错时列给用户看，省得他一条条试）。
 fn scutil_nc_labels() -> Vec<String> {
-    let Ok(out) = run("/usr/sbin/scutil", &["--nc", "list"]) else {
-        return Vec::new();
-    };
-    scutil_nc_rows(&out)
+    scutil_nc_rows_now()
         .into_iter()
         .map(|(label, _)| label)
         .collect()
@@ -1348,12 +1468,14 @@ fn connected_labels(rows: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
-/// 当前处于已连接状态的 VPN 会话标签（未连的一律不进结果）。
-fn scutil_nc_connected() -> Vec<String> {
-    let Ok(out) = run("/usr/sbin/scutil", &["--nc", "list"]) else {
-        return Vec::new();
-    };
-    connected_labels(&scutil_nc_rows(&out))
+/// 现场读一次 `scutil --nc list` 的行（标签 + 整行文本）。
+///
+/// 三条路都靠这一份：隧道的归属判定、报错时列给用户看的清单、以及界面上那些
+/// 「装了但没连」的 VPN 卡。它们各自起一次子进程的话，一次网卡枚举要多拉两趟。
+fn scutil_nc_rows_now() -> Vec<(String, String)> {
+    run("/usr/sbin/scutil", &["--nc", "list"])
+        .map(|out| scutil_nc_rows(&out))
+        .unwrap_or_default()
 }
 
 /// 一次 `scutil --nc list` 的判定结果。不把行文本带出去，省掉一串生命周期问题。
@@ -1504,10 +1626,14 @@ impl NetworkPlatform for MacPlatform {
         ])
     }
 
-    /// 枚举当前在用的全部网卡。
+    /// 枚举当前在用的全部网卡，外加「装了但没连」的 VPN 会话。
     ///
     /// 「在用」= 链路 UP，并且有一条真实地址（IPv4 / 非 link-local IPv6）或已关联上无线
     /// 网络（刚连上还没拿到地址的那一瞬也要能看到）。
+    ///
+    /// 后面那一类只带名字和产品名（`up: false`、没有地址）：面板要回答的是「这台机器上有
+    /// 哪几个 VPN、现在连着没有」，而 macOS 没有公开的「utun → 进程」映射，连着的那条只能
+    /// 靠证据归属，没连的这几条反而有 `scutil --nc list` 给出的确定名字可显示。
     /// 每次调用会拉起若干子进程，故整体经 [`super::cached_nics`] 做 TTL 缓存
     /// —— 面板每次状态广播都要一份快照。
     fn list_interfaces(&self) -> Vec<super::NicInfo> {
@@ -1516,6 +1642,7 @@ impl NetworkPlatform for MacPlatform {
             let routes = default_routes();
             let wifi_dev = wifi_iface();
             let snaps = iface_snapshot();
+            let nc_rows = scutil_nc_rows_now();
             let mut out: Vec<super::NicInfo> = Vec::new();
 
             for dev in all_devices() {
@@ -1578,7 +1705,7 @@ impl NetworkPlatform for MacPlatform {
                 .map(|(i, _)| i)
                 .collect();
             if !vpn_rows.is_empty() {
-                let ev = collect_vpn_evidence(&hw);
+                let ev = collect_vpn_evidence(&hw, &nc_rows);
                 let alone = vpn_rows.len() == 1;
                 for i in vpn_rows {
                     let ip = out[i].ipv4.clone();
@@ -1586,6 +1713,11 @@ impl NetworkPlatform for MacPlatform {
                 }
             }
 
+            // 「装了、没连」的那些也要进清单，而且要在**没有隧道在用**时照样读：
+            // 那恰恰是它们唯一还能现身的时候 —— 用户问的正是「我的 VPN 软件怎么不见了」。
+            // 放在归属判定之后：去重要比对的 `app` 那时才填好。
+            let idle = idle_vpn_rows(&nc_rows, &out);
+            out.extend(idle);
             // 展示顺序：无线 → 有线 → VPN → 其它；同类按设备名（en0 先于 en5）
             let rank = |k: super::NicKind| match k {
                 super::NicKind::Wireless => 0,
@@ -1686,6 +1818,41 @@ impl NetworkPlatform for MacPlatform {
         let cmd_args = open_args(app, args);
         let refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
         run("open", &refs).map(|_| ())
+    }
+
+    fn list_installed_apps(&self) -> Vec<AppEntry> {
+        // 只列 `.app` 包：那正是 `open -a <路径>` 受理的形状（见 `app_entry`）。
+        // /System/Applications 下的系统程序也在内 —— 用户在 3B 里想启动「系统设置」
+        // 之类的场景是真实存在的，且它们确实在磁盘上、确实能启动。
+        let mut out = Vec::new();
+        for dir in app_search_dirs() {
+            scan_app_dir(&dir, 1, &mut out);
+        }
+        dedupe_sort_apps(out)
+    }
+
+    fn pick_app(&self) -> Result<Option<String>, String> {
+        // 只让挑 `APPL`：这台机器上「能启动的程序」就是 `.app` 包，别的形状交给手输。
+        // 提示语先按 AppleScript 字符串字面量转义（字典是我们自己的文案，但同一条
+        // 规则对五种语言都成立，不赌哪一份里没有引号）。
+        let prompt = i18n::t("pal.pick_app_title")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let osa = format!(
+            "POSIX path of (choose file with prompt \"{prompt}\" \
+             default location (path to applications folder) of type {{\"APPL\"}})"
+        );
+        match run("osascript", &["-e", &osa]) {
+            Ok(out) => {
+                // `POSIX path of` 对目录（`.app` 就是目录）会带尾斜杠，去掉再存。
+                let p = out.trim().trim_end_matches('/').to_string();
+                Ok((!p.is_empty()).then_some(p))
+            }
+            // 用户点了取消：osascript 以 -128 退出（stderr 形如
+            // `execution error: User canceled. (-128)`）。「想了想又关掉」不是错误。
+            Err(e) if e.contains("(-128)") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String> {
@@ -1790,6 +1957,7 @@ impl NetworkPlatform for MacPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::{NicInfo, NicKind};
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -2303,10 +2471,171 @@ mod tests {
         assert_eq!(attribute_vpn(&two, None, false), None);
     }
 
+    /// 两个「唯一」只是没有别的东西来争，那个会话的服务**自己报得出的地址**才是正面证据。
+    /// 它和脚下这条隧道对不上，就说明这两件事不是同一件 —— 这条挡住的是「唯一已连接会话」
+    /// 被当成免检通道：界面上宁可退回通用的「VPN」，也不要一个具体到某家软件的假答案，
+    /// 因为那个名字接下来会被 3B2 的「维持连接」拿去当对象。
+    #[test]
+    fn a_connected_session_that_reports_a_different_address_does_not_own_this_tunnel() {
+        let ev = VpnEvidence {
+            svc_ip: vec![("Tailscale".into(), "100.84.1.2".into())],
+            connected: v(&["Tailscale"]),
+        };
+        // 这条隧道有 IPv4，但不是那个会话报出的那个
+        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), true), None);
+        // 这条隧道报不出 IPv4（只有 inet6）：会话那条有，两者就不是同一条
+        assert_eq!(attribute_vpn(&ev, None, true), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), true), None);
+        // 地址对上时两条款给出同一个答案（这里同时确认反证不会把正确的认领一起否掉）
+        assert_eq!(
+            attribute_vpn(&ev, Some("100.84.1.2"), true).as_deref(),
+            Some("Tailscale")
+        );
+        // 会话标签与服务名只差大小写，仍是同一家客户端写的同一个东西
+        let ci = VpnEvidence {
+            svc_ip: vec![("tailscale".into(), "100.84.1.2".into())],
+            connected: v(&["Tailscale"]),
+        };
+        assert_eq!(attribute_vpn(&ci, Some("10.64.0.7"), true), None);
+        // 那个会话报不出地址（正在连、或这类客户端不问 networksetup）→ 反证不存在，
+        // 「唯一的已连接会话」照旧算数：收紧这条不能把已有的能力削掉
+        let mute = VpnEvidence {
+            svc_ip: Vec::new(),
+            connected: v(&["Tailscale"]),
+        };
+        assert_eq!(
+            attribute_vpn(&mute, Some("10.64.0.7"), true).as_deref(),
+            Some("Tailscale")
+        );
+    }
+
     /// 会话标签的筛法：清单里未连的那几行不能进候选（本例只有一条已连）。
     #[test]
     fn only_connected_sessions_are_kept() {
         assert_eq!(connected_labels(&scutil_nc_rows(NC_LIST)), v(&["Tailscale"]));
         assert!(connected_labels(&[]).is_empty());
+    }
+
+    fn live_vpn(name: &str, app: Option<&str>) -> NicInfo {
+        NicInfo {
+            name: name.to_string(),
+            kind: NicKind::Vpn,
+            up: true,
+            app: app.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// 用户问「我的 VPN 软件怎么都不见了」时，恰恰是**一条隧道都没在用**的那一刻：
+    /// 所以未连的会话必须独立于隧道枚举出现，且带着自己的名字。
+    #[test]
+    fn disconnected_sessions_still_get_a_card() {
+        let rows = scutil_nc_rows(NC_LIST);
+        let idle = idle_vpn_rows(&rows, &[]);
+        assert_eq!(idle.len(), 1, "已连的那条不该再补卡");
+        let n = &idle[0];
+        assert_eq!(n.name, "ProtonVPN", "卡片名字用用户自己在客户端里看到的那个标签");
+        assert_eq!(n.label.as_deref(), Some("ProtonVPN"), "没有设备名可显示，标题就是它");
+        assert_eq!(n.kind, NicKind::Vpn);
+        assert!(!n.up, "未连的会话要能被界面判成「没连」");
+        assert!(n.ipv4.is_none() && n.mac.is_none(), "没连的链路不该编出任何地址");
+        // 产品名和会话标签写的是同一个软件时不重复一遍（名称那一行已经说清是哪个软件）
+        assert_eq!(n.app, None);
+    }
+
+    /// 一条在用的隧道 + 一个没连的客户端：两者各占一张卡，谁也不顶掉谁。
+    /// 挡的是「按名字去重把在用的那条也抹掉」，那样面板会少一格真实在用的 VPN。
+    #[test]
+    fn an_idle_session_is_only_dropped_when_a_live_row_already_says_it() {
+        let rows = scutil_nc_rows(NC_LIST);
+        // Tailscale 正在用（归属认得出，填在 app 上），ProtonVPN 装着没连
+        let live = vec![live_vpn("utun4", Some("Tailscale"))];
+        let idle = idle_vpn_rows(&rows, &live);
+        assert_eq!(
+            idle.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            v(&["ProtonVPN"])
+        );
+
+        // 同一个会话标签已经在清单里了（设备名、标签、归属三种写法都算）→ 不再补第二张
+        for dup in [
+            live_vpn("ProtonVPN", None),
+            {
+                let mut n = live_vpn("utun9", None);
+                n.label = Some("ProtonVPN".into());
+                n
+            },
+            live_vpn("utun9", Some("ProtonVPN")),
+        ] {
+            assert!(
+                idle_vpn_rows(&rows, &[dup]).is_empty(),
+                "在用清单里已经有这一条，却还是补了第二张卡"
+            );
+        }
+    }
+
+    /// 卡片标题已经是会话标签，所以产品名那枚标签只在**标题没说清**的时候挂。
+    #[test]
+    fn an_idle_card_shows_the_product_name_only_when_it_adds_something() {
+        let line =
+            |label: &str| format!("* (Disconnected)   UUID VPN (x.y) \"{label}\"  [VPN:x.y]");
+        let rows = scutil_nc_rows(&format!(
+            "{}\n{}\n{}\n{}",
+            line("Forti"),
+            line("ProtonVPN"),
+            line("随便一条隧道"),
+            line("Tailscale")
+        ));
+        let idle = idle_vpn_rows(&rows, &[]);
+        assert_eq!(idle.len(), 4);
+        // 标签只写了厂商名前缀 → 产品名补全，这一格是真信息
+        assert_eq!(idle[0].app.as_deref(), Some("FortiClient"));
+        // 标签本身已经是这个软件的名字（差别只在空格）→ 不在旁边再写一遍
+        assert_eq!(idle[1].app, None);
+        // 认不出 → 留 None，界面退回通用的「VPN」，不猜
+        assert_eq!(idle[2].app, None);
+        assert_eq!(idle[2].name, "随便一条隧道");
+        assert_eq!(idle[3].app, None);
+    }
+
+    /// 同一个客户端的多条配置（标签一样）只给一张卡。
+    #[test]
+    fn identical_labels_are_not_repeated() {
+        let rows = scutil_nc_rows(
+            "* (Disconnected) A VPN (ch.protonvpn.mac) \"ProtonVPN\" [VPN:ch.protonvpn.mac]\n\
+             * (Disconnected) B VPN (ch.protonvpn.mac) \"ProtonVPN\" [VPN:ch.protonvpn.mac]",
+        );
+        let idle = idle_vpn_rows(&rows, &[]);
+        assert_eq!(idle.len(), 1);
+        assert!(idle[0].app.is_none(), "ProtonVPN 与 Proton VPN 是同一个产品名，不写两遍");
+    }
+
+    /// `.app` 包的取名字规则：只剥这一个后缀，路径原样（`open -a <路径>` 受理的形状）。
+    #[test]
+    fn app_entry_strips_only_the_bundle_suffix() {
+        let e = app_entry(Path::new("/Applications/Slack.app")).unwrap();
+        assert_eq!((e.name.as_str(), e.path.as_str()), ("Slack", "/Applications/Slack.app"));
+        // 名字里的点不是后缀：剥的必须是**末尾**那一个
+        assert_eq!(app_entry(Path::new("/A/foo.bar.app")).unwrap().name, "foo.bar");
+        // 不是包、剥完为空（`.app` 这种隐藏名）都不收 —— 下拉里一条假目标都不要有
+        assert!(app_entry(Path::new("/Applications/Slack")).is_none());
+        assert!(app_entry(Path::new("/Applications/.app")).is_none());
+    }
+
+    /// 去重按**路径**而不是名字：同名两份（系统目录与用户目录各一个）各自保留；
+    /// 排序不区分大小写，同名的再按路径定序 —— 列表顺序不能跟着文件系统枚举变。
+    #[test]
+    fn apps_dedupe_by_path_and_sort_case_insensitively() {
+        let mk = |name: &str, path: &str| AppEntry { name: name.into(), path: path.into() };
+        let out = dedupe_sort_apps(vec![
+            mk("zeta", "/Z.app"),
+            mk("Alpha", "/System/Applications/Alpha.app"),
+            mk("Alpha", "/Applications/Alpha.app"),
+            mk("zeta", "/Z.app"),
+            mk("beta", "/B.app"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "Alpha", "beta", "zeta"]);
+        assert_eq!(out[0].path, "/Applications/Alpha.app");
+        assert_eq!(out[1].path, "/System/Applications/Alpha.app");
     }
 }

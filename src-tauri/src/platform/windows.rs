@@ -20,9 +20,9 @@
 //!    不做字符串拼接，避免接口名含空格/特殊字符时被重新切分。
 
 use super::{
-    poll_ssid_watch, prefers_dark_from_reg, printer_label, run, timeout_secs, Health, InterfaceStatus,
-    NetworkPlatform,
-    PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget, WatcherHandle,
+    dedupe_sort_apps, poll_ssid_watch, prefers_dark_from_reg, printer_label, run, timeout_secs, AppEntry,
+    Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
+    WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
@@ -243,6 +243,31 @@ fn parse_json_object(out: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(t).ok()
 }
 
+/// 解析 [`WindowsPlatform::list_known_ssids`] 那份 JSON 字符串数组。
+///
+/// 只有一条记录时 PowerShell 会把数组退化成一个对象（本文件里 `list_interfaces` 与
+/// `list_adapters` 都做过同一处理），两种写法都收。值要 `trim` 并丢掉空白项：下拉里一条
+/// 空白既选不中，也没法向用户解释它是什么。
+fn parse_ssid_values(raw: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        return Vec::new();
+    };
+    let items: Vec<&serde_json::Value> = match &v {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Null => Vec::new(),
+        other => vec![other],
+    };
+    let mut out: Vec<String> = items
+        .into_iter()
+        .filter_map(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// 当前无线适配器名。`MediaType = 'Native 802.11'` 是 Wi-Fi 的语言无关判据。
 fn wifi_iface() -> Option<String> {
     let out = ps("$ErrorActionPreference='SilentlyContinue';\
@@ -254,9 +279,107 @@ fn wifi_iface() -> Option<String> {
     Some(name.to_string())
 }
 
+/// 「profile 名 → 空中 SSID」这张表由 WLAN profile 文件自己给，拼在读状态与读网卡的脚本前面。
+///
+/// 为什么不走 `netsh wlan show interfaces`：那是本地化文本 + OEM 代码页（模块头的规矩就是
+/// 因此立的），而 `%ProgramData%\Microsoft\Wlansvc\Profiles\Interfaces\<guid>\*.xml` 是磁盘上
+/// 的 UTF-8 文件，`[xml]` 解析与系统语言无关。隐藏网络那一档 XML 里只有 `<hex>`，按字节解回
+/// UTF-8；再解不动就丢掉这一条，让调用方退回 profile 名 —— 宁可少一格信息。
+///
+/// 一趟把所有 profile 都收进哈希表，是因为这两处脚本每张网卡都要问一次名字：按卡起子进程
+/// 会把「读一次状态」变成 N 次 netsh，而编辑器要看着当前 SSID 立刻变（那条教训见
+/// `fresh_status` 的注释）。跨接口 GUID 目录合并成一张表时按「先到先得」去重：profile 名在
+/// 两台接口上指的是同一个 SSID 才是常态，而这里要的也只是名字，不是身份。
+///
+/// PowerShell 的 `@{}` 哈希表按**不区分大小写**取键，而 profile 名在 Windows 上本就不区分
+/// 大小写 —— 这一点是白得的，也别反过来依赖它：调用方只拿它查名字。变量名全部带 `wlan`
+/// 前缀：这段要和调用方的脚本共用一个会话，`$i`、`$f` 这类名字撞进去，症状是网卡清单少几行。
+///
+/// 读不动这个目录（权限、或这台机器根本没存过 profile）时表就是空的：`$wlanNames` 那份
+/// profile 名列表因此成为候选下拉的来源，现连 SSID 那两格也退回 profile 名 —— 与修改前的
+/// 行为一致，不会更差，而这一趟本来就要把目录走到底，收集它不花第二次子进程。
+const WLAN_SSID_MAP_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
+$wlanSsid=@{};
+$wlanNames=@();
+$wlanDir=Join-Path $env:ProgramData 'Microsoft\Wlansvc\Profiles\Interfaces';
+if (Test-Path -LiteralPath $wlanDir) {
+ foreach ($wlanFile in @(Get-ChildItem -LiteralPath $wlanDir -Recurse -Filter *.xml -ErrorAction SilentlyContinue)) {
+  try {
+   $wlanXml=[xml][System.IO.File]::ReadAllText($wlanFile.FullName);
+   $wlanName=[string]$wlanXml.WLANProfile.name;
+   if (-not $wlanName) { continue };
+   $wlanNames += $wlanName;
+   $wlanSsidEl=@($wlanXml.WLANProfile.SSIDConfig.SSID) | Select-Object -First 1;
+   $wlanSsidText=[string]$wlanSsidEl.name;
+   if (-not $wlanSsidText) {
+    $wlanHex=[string]$wlanSsidEl.hex;
+    if ($wlanHex -and (($wlanHex.Length % 2) -eq 0)) {
+     $wlanBytes=[byte[]]::new([int]($wlanHex.Length/2));
+     for ($wlanI=0; $wlanI -lt $wlanBytes.Length; $wlanI++) { $wlanBytes[$wlanI]=[System.Convert]::ToByte($wlanHex.Substring($wlanI*2,2),16) };
+     $wlanSsidText=[System.Text.Encoding]::UTF8.GetString($wlanBytes)
+    }
+   };
+   $wlanSsidText=([string]$wlanSsidText).Trim();
+   if ($wlanSsidText -and -not $wlanSsid.ContainsKey($wlanName)) { $wlanSsid[$wlanName]=$wlanSsidText };
+  } catch {}
+ }
+}"#;
+
+/// `netsh wlan show interfaces` 文本 → 「网卡 MAC（[`normalize_mac`] 形态）→ 当前 SSID」。
+///
+/// 为什么「当前 SSID」这一格单独回到 netsh：CIM 那份 `Get-NetConnectionProfile.Name` 是
+/// **NLA 网络名**，不是空中的 SSID —— 网络签名一变（驱动重载、网关变更、VPN 介入），
+/// NLA 就给同一个网络新建一个对象并加 ` 2`、` 3` 消歧，界面上于是出现一个设备上根本不
+/// 存在的名字。netsh 的 `SSID` 行才是关联状态本身。字段名 `SSID` / `BSSID` 在任何语言下
+/// 都是拉丁文（本函数上方取 BSSID 的旧代码就依赖这一点），本地化的只是别人。
+///
+/// 值的编码仍是控制台 OEM 代码页（中文 Windows 是 936），[`run`] 按 UTF-8 解：
+/// ASCII 的 SSID 原样通过；一旦解出替换字符（`U+FFFD`）就说明它不全是 ASCII，我们无法
+/// 保证没被解坏 —— 这一段整条丢掉，调用方退回 profile XML 里的名字（磁盘上的 UTF-8，
+/// 编码上绝不会错）。宁可少一格信息，也不要显示一个错名字。
+///
+/// 归属按每段接口块里**第一个** MAC 形态的串（`Physical address` 行）算，不是按顺序猜：
+/// BSSID 行带着 `BSSID` 字样会被跳过，GUID 行不是六个两字符的组也匹配不上。
+/// 这样多张 Wi-Fi 网卡同时在用时，各自的 SSID 不会串到对方头上。
+fn netsh_ssids_by_mac(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut mac: Option<String> = None;
+    let mut ssid: Option<String> = None;
+    // 末尾补一个空行：最后一个接口块也要落账
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if let (Some(m), Some(s)) = (mac.take(), ssid.take()) {
+                out.insert(m, s);
+            }
+            mac = None;
+            ssid = None;
+            continue;
+        }
+        let t = line.trim_start();
+        if t.starts_with("SSID") {
+            if let Some((_, v)) = t.split_once(':') {
+                let v = v.trim();
+                if !v.is_empty() && !v.contains('\u{FFFD}') {
+                    ssid = Some(v.to_string());
+                }
+            }
+            continue;
+        }
+        if mac.is_none() && !t.contains("BSSID") {
+            if let Some(m) = super::extract_mac(line) {
+                mac = Some(super::normalize_mac(&m));
+            }
+        }
+    }
+    out
+}
+
 /// 读取一次完整状态快照（一次 PowerShell 调用取全部字段）。
 fn read_status() -> InterfaceStatus {
-    let script = r#"$ErrorActionPreference='SilentlyContinue';
+    let script = format!(
+        "{}\n{}",
+        WLAN_SSID_MAP_PS,
+        r#"$ErrorActionPreference='SilentlyContinue';
 $ad = Get-NetAdapter -Physical | Where-Object { $_.MediaType -eq 'Native 802.11' } | Select-Object -First 1;
 if (-not $ad) { $ad = Get-NetAdapter | Where-Object { $_.Name -match 'Wi-?Fi|WLAN|Wireless' } | Select-Object -First 1 }
 if (-not $ad) { '{}' ; exit }
@@ -268,16 +391,19 @@ $v6   = Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv6 | Select-Obj
 $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
 [pscustomobject]@{
   iface   = $ad.Name;
-  ssid    = $prof.Name;
+  mac     = $ad.MacAddress;
+  prof    = $prof.Name;
+  ssid    = $wlanSsid[[string]$prof.Name];
   ipv4    = $ip.IPAddress;
   prefix  = $ip.PrefixLength;
   gateway = $rt.NextHop;
   dns     = ($dns.ServerAddresses -join ',');
   v6dhcp  = $v6.Dhcp
-} | ConvertTo-Json -Compress"#;
+} | ConvertTo-Json -Compress"#
+    );
 
     let mut st = InterfaceStatus::default();
-    let Some(v) = ps(script).ok().and_then(|o| parse_json_object(&o)) else {
+    let Some(v) = ps(&script).ok().and_then(|o| parse_json_object(&o)) else {
         return st;
     };
     let get = |k: &str| -> Option<String> {
@@ -288,8 +414,10 @@ $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix
     };
 
     st.iface = get("iface");
-    st.ssid = get("ssid");
-    st.connected = st.ssid.is_some();
+    // 三层来源，按可靠度排：netsh 的 SSID 行（关联状态本身，下面的 netsh 调用里取）>
+    // WLAN profile XML 里的空中名字（按 profile 名查，见 `WLAN_SSID_MAP_PS`）>
+    // profile 名（`Get-NetConnectionProfile` 回答的那个，撞名时可能带 ` 2`）。
+    st.ssid = get("ssid").or_else(|| get("prof"));
     st.ipv4 = get("ipv4");
     st.gateway = get("gateway");
     st.dns = get("dns");
@@ -304,13 +432,21 @@ $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix
     };
 
     // BSSID / 信号强度：只从 netsh 文本里取 ASCII 字段（MAC、百分比），
-    // 因此不受中文 Windows 的本地化/代码页影响。
+    // 因此不受中文 Windows 的本地化/代码页影响。同一份文本里顺带取当前 SSID。
     //
     // 注意这里用 `has_iface` 布尔量而不是 `if let Some(x) = &st.iface`：
     // 后者会让 `st.iface` 在整个块内保持不可变借用，而块内又要写 `st.bssid` 等字段，
     // 触发 E0502（借用了 st 又可变借用 st）。
     if st.iface.is_some() {
         if let Ok(text) = run("netsh", &["wlan", "show", "interfaces"]) {
+            // 按这台 Wi-Fi 网卡的 MAC 认领 SSID：多张无线网卡同时在用时，
+            // 「第一行 SSID」可能属于另一张卡。
+            if let Some(name) = get("mac")
+                .map(|m| super::normalize_mac(&m))
+                .and_then(|m| netsh_ssids_by_mac(&text).get(&m).cloned())
+            {
+                st.ssid = Some(name);
+            }
             for line in text.lines() {
                 // BSSID 行：字段名保持英文
                 if line.contains("BSSID") {
@@ -331,6 +467,9 @@ $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix
         let gm = st.gateway.as_deref().and_then(gateway_mac_for);
         st.gateway_mac = gm;
     }
+    // 连没连上：SSID 是那个「只有连着才有」的量，因此它有没有值就是连接状态。
+    // 放在 netsh 之后算 —— 那一步可能刚把它填上。
+    st.connected = st.ssid.is_some();
     st
 }
 
@@ -397,7 +536,14 @@ fn kind_from_row(media: &str, desc: &str, name: &str) -> super::NicKind {
 ///
 /// `up` 取自 `Status`，不再写死 `true`：以前能进到这个函数的行必然是 `Up`（筛选在
 /// PowerShell 里做完了），所以现在多了「已知的虚拟口」这一类，状态必须原样带出来。
-fn nic_from_row(r: &serde_json::Value) -> Option<super::NicInfo> {
+///
+/// `ssid_by_mac` 是 `netsh wlan show interfaces` 那份「网卡 MAC → 当前 SSID」：
+/// 这张卡的 MAC 命中就用它（关联状态本身），否则退回 profile XML 的名字，再退回 profile 名。
+/// 匹配在 Rust 里做、不进 PowerShell：MAC 的归一化（大小写、分隔符）只有一份实现。
+fn nic_from_row(
+    r: &serde_json::Value,
+    ssid_by_mac: &std::collections::BTreeMap<String, String>,
+) -> Option<super::NicInfo> {
     let get = |k: &str| -> Option<String> {
         r.get(k)
             .and_then(|x| x.as_str())
@@ -409,7 +555,12 @@ fn nic_from_row(r: &serde_json::Value) -> Option<super::NicInfo> {
     let ipv6 = get("v6");
     let media = get("media").unwrap_or_default();
     let desc = get("desc").unwrap_or_default();
-    let ssid = get("ssid");
+    // 三层来源（与 `read_status` 同一口径）：netsh 按 MAC 认领 > profile XML 的空中名字 > profile 名
+    let ssid = get("mac")
+        .map(|m| super::normalize_mac(&m))
+        .and_then(|m| ssid_by_mac.get(&m).cloned())
+        .or_else(|| get("ssid"))
+        .or_else(|| get("prof"));
     let up = get("status").is_some_and(|s| s.eq_ignore_ascii_case("Up"));
 
     let kind = kind_from_row(&media, &desc, &name);
@@ -1039,6 +1190,99 @@ fn set_default_printer_script(printer: &str) -> String {
     )
 }
 
+// —————————————————————————— 启动程序（3B launch_app 的候选） ——————————————————————————
+
+/// 「这台机器装着哪些能启动的程序」，一条一个 JSON 对象 `{name, path}`。
+///
+/// 只扫**开始菜单**（全机 + 当前用户两份）里的 `.lnk`：每一个快捷方式都是安装器写下的
+/// 「给人启动的入口」，名字就是它写在菜单里的那个；而 `Start-Process` 恰好直接受理
+/// `.lnk` 的完整路径 —— 枚举出来的形状与要下发的形状是同一个，中间没有翻译。
+/// 不扫 `Program Files` 的裸 `.exe`：卸载器、运行时、辅助进程会一起进来，下拉变垃圾场；
+/// 那些没登记入口的程序照样可以手输路径或走 [`WindowsPlatform::pick_app`]。
+///
+/// `Get-ChildItem -Recurse` 对单个目录递归（两个根各自走），`SilentlyContinue` 让某个根
+/// 读不动时还有另一个；两个都空才输出 `[]`。
+const INSTALLED_APPS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
+$appDirs=@(
+  (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+);
+$appItems=@(foreach ($d in $appDirs) {
+  Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |
+    ForEach-Object { [pscustomobject]@{ name=$_.BaseName; path=$_.FullName } }
+});
+if ($appItems.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $appItems -Compress }"#;
+
+/// 解析 [`INSTALLED_APPS_PS`] 的 JSON。
+///
+/// 只有一条记录时 PowerShell 会把数组退化成**单个对象**（`parse_ssid_values` 处理的是
+/// 同一个坑），两种写法都收。名字或路径为空的行不要：选中它只会让下一次下发拿空串去
+/// `Start-Process`。去重与排序交给共用的 [`dedupe_sort_apps`]。
+fn parse_installed_apps(raw: &str) -> Vec<AppEntry> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        return Vec::new();
+    };
+    let items: Vec<&serde_json::Value> = match &v {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Null => Vec::new(),
+        other => vec![other],
+    };
+    let out: Vec<AppEntry> = items
+        .into_iter()
+        .filter_map(|x| {
+            let name = x.get("name")?.as_str()?.trim();
+            let path = x.get("path")?.as_str()?.trim();
+            if name.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some(AppEntry {
+                name: name.to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect();
+    dedupe_sort_apps(out)
+}
+
+/// 「挑一个程序」的脚本：系统通用的 `OpenFileDialog`。
+///
+/// 取消 → 什么都不输出（调用方按 `Ok(None)` 收）；标题与筛选文案都走字典
+/// （`pal.pick_app_title` / `pal.pick_app_filter`），两条都经 [`psq`] 进单引号字面量。
+/// 筛选里放 `.exe/.lnk/.bat/.cmd`：和下拉的枚举范围一致 —— 选得到的东西，
+/// `Start-Process` 与手输走的是同一条下发路径。
+fn pick_app_script(title: &str, filter: &str) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         Add-Type -AssemblyName System.Windows.Forms; \
+         $d = New-Object System.Windows.Forms.OpenFileDialog; \
+         $d.Title = {t}; $d.Filter = {f}; $d.CheckFileExists = $true; \
+         if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($d.FileName) }}",
+        t = psq(title),
+        f = psq(filter),
+    )
+}
+
+/// 与 [`ps`] 同一套编码前缀，但显式要求 **STA** 单元：WinForms 的通用对话框要它
+/// （`powershell.exe` 5.1 的控制台宿主默认就是 STA，这里钉住是为了不依赖那个默认值）。
+fn ps_sta(script: &str) -> Result<String, String> {
+    let full = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$ProgressPreference='SilentlyContinue';\r\n{}",
+        script
+    );
+    run(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Sta",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &full,
+        ],
+    )
+}
+
 impl NetworkPlatform for WindowsPlatform {
     fn watch_ssid(&self, cb: Box<dyn Fn(Option<String>) + Send + Sync>) -> WatcherHandle {
         poll_ssid_watch(|| WindowsPlatform.get_current_ssid(), cb)
@@ -1124,7 +1368,7 @@ foreach ($n in @(Get-NetAdapter)) {
     name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status;
     ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop;
     dns=(($dns | ForEach-Object { $_.ServerAddresses }) -join ',');
-    ssid=$prof.Name;
+    ssid=$wlanSsid[[string]$prof.Name]; prof=$prof.Name;
   });
 };
 if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
@@ -1133,7 +1377,12 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                 .iter()
                 .map(|(needle, _)| *needle)
                 .collect();
-            let script = format!("$vpn={};\n{}", ps_arr(&needles), NIC_ROWS_PS_BODY);
+            let script = format!(
+                "$vpn={};\n{}\n{}",
+                ps_arr(&needles),
+                WLAN_SSID_MAP_PS,
+                NIC_ROWS_PS_BODY
+            );
 
             let raw = match ps(&script) {
                 Ok(o) => o,
@@ -1148,7 +1397,17 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                 other => vec![other],
             };
 
-            let mut out: Vec<super::NicInfo> = rows.into_iter().filter_map(nic_from_row).collect();
+            // 现连 SSID：这张卡在 netsh 里报了 SSID 就用它（关联状态本身），
+            // 否则退回 profile XML 的名字。netsh 起不来（服务停用等）就是空表。
+            let ssid_by_mac = match run("netsh", &["wlan", "show", "interfaces"]) {
+                Ok(text) => netsh_ssids_by_mac(&text),
+                Err(_) => std::collections::BTreeMap::new(),
+            };
+
+            let mut out: Vec<super::NicInfo> = rows
+                .into_iter()
+                .filter_map(|r| nic_from_row(r, &ssid_by_mac))
+                .collect();
 
             let rank = |k: super::NicKind| match k {
                 super::NicKind::Wireless => 0,
@@ -1384,6 +1643,27 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
         ps(&script).map(|_| ())
     }
 
+    fn list_installed_apps(&self) -> Vec<AppEntry> {
+        match ps(INSTALLED_APPS_PS) {
+            Ok(out) => parse_installed_apps(&out),
+            Err(e) => {
+                // 空下拉对用户说的是「这台机器没装东西」，而真实原因可能是脚本起不来 ——
+                // 与 list_printers 同一条决策：不弹框，只在日志里留下这个区别。
+                crate::log::warn(&i18n::tf("logs.apps_failed", &[("error", &e)]));
+                Vec::new()
+            }
+        }
+    }
+
+    fn pick_app(&self) -> Result<Option<String>, String> {
+        let out = ps_sta(&pick_app_script(
+            &i18n::t("pal.pick_app_title"),
+            &i18n::t("pal.pick_app_filter"),
+        ))?;
+        let p = out.trim();
+        Ok((!p.is_empty()).then(|| p.to_string()))
+    }
+
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String> {
         // 按扩展名决定解释器：.ps1 → PowerShell；.bat/.cmd → cmd；其余直接执行
         let lower = path.to_ascii_lowercase();
@@ -1417,21 +1697,21 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
     }
 
     fn list_known_ssids(&self) -> Option<Vec<String>> {
-        // 直接读 WLAN 配置 XML（`[xml]` 解析），语言无关且编码正确；
-        // 比解析 `netsh wlan show profiles` 的本地化文本可靠得多。
-        let script = r#"$ErrorActionPreference='SilentlyContinue';
-$d = Join-Path $env:ProgramData 'Microsoft\Wlansvc\Profiles\Interfaces';
-if (-not (Test-Path $d)) { exit }
-$names = Get-ChildItem -Path $d -Recurse -Filter *.xml -ErrorAction SilentlyContinue | ForEach-Object {
-  try { ([xml][System.IO.File]::ReadAllText($_.FullName)).WLANProfile.name } catch { }
-} | Where-Object { $_ } | Sort-Object -Unique;
-[Console]::Out.Write(($names -join "`n"))"#;
-        let out = ps(script).ok()?;
-        let list: Vec<String> = out
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
+        // 候选清单要报的是**空中那个名字**，不是 profile 名：用户在 VPN/路由器上看到的、
+        // 条件里要写进配置的都是前者（`WLAN_SSID_MAP_PS` 说的是同一件事）。从前这里直接取
+        // profile 的 `<name>`，于是「 2」被当成 SSID 的一部分列进了下拉框。
+        //
+        // 表是空的（读不动那个目录）才退回 profile 名：让下拉整个空掉是对一个查不到名字的
+        // 机器撒谎，而这一列本来就一直是这个名字。条件仍可手输（#123 之后那格是可输入的）。
+        let script = format!(
+            "{}\n{}",
+            WLAN_SSID_MAP_PS,
+            r#"if ($wlanSsid.Count -gt 0) { @($wlanSsid.Values) | ConvertTo-Json -Compress }
+elseif ($wlanNames.Count -gt 0) { @($wlanNames) | ConvertTo-Json -Compress }
+else { '[]' }"#
+        );
+        let out = ps(&script).ok()?;
+        let list = parse_ssid_values(&out);
         if list.is_empty() {
             None
         } else {
@@ -1486,6 +1766,40 @@ mod tests {
         assert!(parse_printer_rows("Some header column\tmaybe\t\n").is_empty());
     }
 
+    /// 已装程序清单：两种 JSON 形状都收（单条记录时 PowerShell 把数组退成一个对象），
+    /// 名字/路径为空的条目不要；同一路径只留一条。
+    #[test]
+    fn installed_apps_accept_both_json_shapes_and_drop_empties() {
+        // 数组形状（两条；排序不区分大小写，Slack 在 Steam 前）
+        let rows = parse_installed_apps(
+            r#"[{"name":"Steam","path":"C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Steam.lnk"},
+                {"name":"Slack","path":"C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Slack.lnk"}]"#,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Slack");
+        assert_eq!(rows[1].name, "Steam");
+        // 单对象形状 —— ConvertTo-Json 对单元素数组的退化，不认它就会「装了 1 个程序时下拉全空」
+        let one = parse_installed_apps(
+            r#"{"name":"7-Zip File Manager","path":"C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\7-Zip\\7-Zip File Manager.lnk"}"#,
+        );
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, "7-Zip File Manager");
+        // 空清单 / 空输出 / 混进来的报错文本 → 空
+        assert!(parse_installed_apps("[]").is_empty());
+        assert!(parse_installed_apps("").is_empty());
+        assert!(parse_installed_apps("Get-ChildItem : Access denied").is_empty());
+        // 空名字、空路径、缺字段都不是一条能下发的候选
+        assert!(parse_installed_apps(
+            r#"[{"name":"","path":"C:\\a.lnk"},{"name":"x","path":"  "},{"name":"y"}]"#
+        )
+        .is_empty());
+        // 同一路径出现两次只留一条（两个开始菜单根可能登记同一份快捷方式）
+        let dup = parse_installed_apps(
+            r#"[{"name":"WeChat","path":"C:\\a.lnk"},{"name":"WeChat","path":"C:\\a.lnk"}]"#,
+        );
+        assert_eq!(dup.len(), 1, "同一路径去重");
+    }
+
     /// 网卡行的取舍规则。这条钉住的是用户报的那个现象：**没连上的虚拟网卡整批消失**
     /// （脚本按 `Status -eq 'Up'` 筛完，Rust 又要求「有 IPv4」）。
     ///
@@ -1497,7 +1811,7 @@ mod tests {
         let wifi = nic_from_row(&json!({
             "name": "Wi-Fi", "desc": "Intel(R) Wi-Fi 6E AX211 160MHz",
             "status": "Up", "media": "Native 802.11", "ip": "192.168.1.23", "ssid": "Office_5G"
-        }))
+        }), &Default::default())
         .expect("在用的 Wi-Fi 必须在清单上");
         assert_eq!(wifi.kind, super::super::NicKind::Wireless);
         assert!(wifi.up);
@@ -1506,7 +1820,7 @@ mod tests {
         // 没连上的隧道：一条地址都没有，但「装了没连」本身就是要看的信息
         let off = nic_from_row(&json!({
             "name": "Tailscale", "desc": "Tailscale Tunnel", "status": "Disconnected"
-        }))
+        }), &Default::default())
         .expect("未连接的 VPN 隧道也要列出来");
         assert_eq!(off.kind, super::super::NicKind::Vpn);
         assert!(!off.up, "状态要原样带出来，不能假称在用");
@@ -1516,17 +1830,204 @@ mod tests {
         let v6only = nic_from_row(&json!({
             "name": "Ethernet", "desc": "Realtek Gaming 2.5GbE", "status": "Up",
             "media": "802.3", "v6": "2001:db8::1"
-        }))
+        }), &Default::default())
         .expect("只有全局 IPv6 的网卡也是在用的");
         assert_eq!(v6only.ipv6.as_deref(), Some("2001:db8::1"));
 
         // 没有地址、又不是隧道的行（WAN Miniport 那一类）不该占位
         assert!(nic_from_row(&json!({
             "name": "WAN Miniport (IP)", "desc": "WAN Miniport (IP)", "status": "Disconnected"
-        }))
+        }), &Default::default())
         .is_none());
         // 连名字都没有的行不是网卡，是脚本没吐全
-        assert!(nic_from_row(&json!({ "status": "Up", "ip": "10.0.0.2" })).is_none());
+        assert!(
+            nic_from_row(&json!({ "status": "Up", "ip": "10.0.0.2" }), &Default::default())
+                .is_none()
+        );
+    }
+
+    /// 现连 SSID 认的是**空中那个名字**，profile 名只在 XML 里查不到时兜底。用户报的现象是
+    /// SSID 后面凭空多出一个空格和数字 —— 那是 Windows 给重名 profile 加的消歧后缀，
+    /// 而 `Get-NetConnectionProfile` 回答的正是 profile 名，不是这个网络在空中的名字。
+    ///
+    /// 这一条钉的是 XML 与 profile 名这两层；更硬的第三层（netsh 现场认领）见
+    /// `the_live_claim_by_mac_beats_both_stored_names`。
+    #[test]
+    fn the_air_ssid_wins_over_the_profile_name() {
+        use serde_json::json;
+        let wifi = |ssid: Option<&str>, prof: Option<&str>| {
+            let mut row = json!({
+                "name": "Wi-Fi", "desc": "Intel(R) Wi-Fi 6E AX211 160MHz",
+                "status": "Up", "media": "Native 802.11", "ip": "192.168.1.23"
+            });
+            // 查不到的那一列脚本吐 null，Rust 侧要当「没有」而不是空串
+            let obj = row.as_object_mut().unwrap();
+            obj.insert("ssid".into(), ssid.into());
+            obj.insert("prof".into(), prof.into());
+            nic_from_row(&row, &Default::default()).expect("在用的 Wi-Fi 必须在清单上")
+        };
+        assert_eq!(
+            wifi(Some("Office_5G"), Some("Office_5G 2"))
+                .ssid
+                .as_deref(),
+            Some("Office_5G"),
+            "XML 里的真空名字优先，后缀版本不能出现在界面上"
+        );
+        assert_eq!(
+            wifi(None, Some("Office_5G 2")).ssid.as_deref(),
+            Some("Office_5G 2"),
+            "XML 查不到时退回 profile 名：那是本函数从前唯一的来源，比空白强"
+        );
+        assert_eq!(
+            wifi(Some(""), Some("Cafe")).ssid.as_deref(),
+            Some("Cafe"),
+            "空串等同于查不到"
+        );
+        // 非无线的行不认领 SSID：那一列是连接配置名（域名或工作组名），不是无线名字
+        let wired = nic_from_row(&json!({
+            "name": "Ethernet", "desc": "Realtek Gaming 2.5GbE", "status": "Up",
+            "media": "802.3", "ip": "10.0.0.5", "ssid": "contoso", "prof": "contoso"
+        }), &Default::default())
+        .expect("在用的有线网卡必须在清单上");
+        assert_eq!(wired.ssid, None);
+    }
+
+    /// 第三层来源：`netsh wlan show interfaces` 的现场数据，按网卡 MAC 认领。
+    /// 它压过磁盘上的两个名字（profile XML 的空中名、profile 名）—— 那是「此刻关联」
+    /// 对「曾经记住」。行里的 `mac` 是大写短横线（`$ad.MacAddress` 的本相），
+    /// 表键是 `normalize_mac` 的形态，必须先归一化再查。
+    #[test]
+    fn the_live_claim_by_mac_beats_both_stored_names() {
+        use serde_json::json;
+        let row = |mac: &str, ssid: Option<&str>, prof: Option<&str>| {
+            let mut r = json!({
+                "name": "Wi-Fi", "desc": "Intel(R) Wi-Fi 6E AX211 160MHz",
+                "status": "Up", "media": "Native 802.11", "ip": "192.168.1.23", "mac": mac
+            });
+            let obj = r.as_object_mut().unwrap();
+            obj.insert("ssid".into(), ssid.into());
+            obj.insert("prof".into(), prof.into());
+            r
+        };
+        let claim: std::collections::BTreeMap<String, String> =
+            [("f0:2f:74:1a:2b:3c".to_string(), "MyWiFi".to_string())]
+                .into_iter()
+                .collect();
+        let ssid_of = |r: &serde_json::Value| {
+            nic_from_row(r, &claim)
+                .expect("在用的 Wi-Fi 必须在清单上")
+                .ssid
+        };
+
+        // 用户报的现场：任务栏是 `MyWiFi 3`，netsh 说关联的是 `MyWiFi`
+        assert_eq!(
+            ssid_of(&row("F0-2F-74-1A-2B-3C", None, Some("MyWiFi 3"))).as_deref(),
+            Some("MyWiFi"),
+            "现场报的名字压过 NLA 的消歧后缀"
+        );
+        // 现场压过 XML：连接态以此刻关联为准（XML 里可能是改过 SSID 的存量配置）
+        assert_eq!(
+            ssid_of(&row("F0-2F-74-1A-2B-3C", Some("OldName"), Some("OldName 2"))).as_deref(),
+            Some("MyWiFi"),
+            "现场认得这张卡时，磁盘上的两个名字都让位"
+        );
+        // 这张口没被认领 —— 别人的认领不能落到它头上，退回 XML
+        assert_eq!(
+            ssid_of(&row("10-7B-44-9E-0F-A1", Some("Cafe"), Some("Cafe 2"))).as_deref(),
+            Some("Cafe"),
+            "MAC 不匹配的认领不适用于本行"
+        );
+        // 没被认领且 XML 也查不到：最弱的一层照旧兜底
+        assert_eq!(
+            ssid_of(&row("10-7B-44-9E-0F-A1", None, Some("Cafe 2"))).as_deref(),
+            Some("Cafe 2"),
+            "三层都给不出名字时才退回 profile 名"
+        );
+    }
+
+    /// `netsh wlan show interfaces` 的文本解析：认领按每段接口块里**第一个** MAC 串
+    /// （`物理地址` 行）算；BSSID 行带着 `BSSID` 字样不参与，两张无线网卡不会互认。
+    /// 夹具就用用户报的现场：空中是 `MyWiFi`，`配置文件` 行是 NLA 的 `MyWiFi 3`。
+    ///
+    /// 值里的 `U+FFFD` 是「这段值不全是 ASCII」的信号（[`run`] 按 UTF-8 解 OEM
+    /// 代码页的字节）：宁可整条丢掉、退回 XML，也不显示一个可能已解坏的名字。
+    #[test]
+    fn netsh_blocks_attribute_each_air_ssid_to_its_own_interface() {
+        let text = "\
+接口名称           : Wi-Fi
+描述               : Intel(R) Wi-Fi 6E AX211 160MHz
+GUID               : 3f5b1a2c-9d4e-4a7b-8c1d-2e3f40516273
+物理地址           : F0-2F-74-1A-2B-3C
+状态               : 已连接
+SSID               : MyWiFi
+BSSID              : E8-84-C6-93-AD-EB
+网络类型           : 结构
+配置文件           : MyWiFi 3
+
+接口名称           : 以太网 2
+描述               : Realtek USB GbE Family Controller
+物理地址           : 02-00-54-55-4E-01
+状态               : 已断开
+
+接口名称           : Wi-Fi 2
+描述               : MediaTek Wi-Fi 6 MT7921
+物理地址           : 10-7B-44-9E-0F-A1
+状态               : 已连接
+SSID               : Lab:5G
+BSSID              : 60-32-B9-00-AA-BB
+配置文件           : Lab
+
+接口名称           : Wi-Fi 3
+描述               : Intel(R) Wi-Fi 6E AX211 160MHz
+物理地址           : 3C-58-C2-11-22-33
+状态               : 已连接
+SSID               : \u{fffd}\u{fffd}的网络
+BSSID              : 60-32-B9-00-AA-CC
+配置文件           : 中文网络
+
+";
+        let map = netsh_ssids_by_mac(text);
+        assert_eq!(
+            map.get("f0:2f:74:1a:2b:3c").map(String::as_str),
+            Some("MyWiFi"),
+            "`配置文件` 行的 `MyWiFi 3` 是 NLA 名字，不是空中的 SSID"
+        );
+        assert!(
+            !map.contains_key("e8:84:c6:93:ad:eb"),
+            "BSSID 是邻居的 MAC，不能成为认领的键"
+        );
+        assert!(
+            !map.contains_key("02:00:54:55:4e:01"),
+            "断开的接口没有 SSID 行，不该产生条目"
+        );
+        assert_eq!(
+            map.get("10:7b:44:9e:0f:a1").map(String::as_str),
+            Some("Lab:5G"),
+            "SSID 里本来就有冒号时只切第一个，值要整个留下"
+        );
+        assert!(
+            !map.contains_key("3c:58:c2:11:22:33"),
+            "值里出现 U+FFFD 说明 OEM 解码可能已解坏：整条丢掉，让调用方退回 XML"
+        );
+        assert_eq!(map.len(), 2);
+    }
+
+    /// `list_known_ssids` 交回来的 JSON 有两种形状（只有一条记录时 PowerShell 不吐数组），
+    /// 而空白值进了下拉框就是一条选不中、也没法向用户解释的行。
+    #[test]
+    fn known_ssids_are_trimmed_sorted_and_deduped_whatever_shape_ps_returns() {
+        assert_eq!(
+            parse_ssid_values("[\"B\",\" A \",\"B\",\"\",\"\\t\"]"),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!(
+            parse_ssid_values("\"OnlyOne\""),
+            vec!["OnlyOne".to_string()]
+        );
+        assert!(parse_ssid_values("[]").is_empty());
+        assert!(parse_ssid_values("null").is_empty());
+        // 脚本报错时吐的是文本而不是 JSON：那种情况下宁可少一个下拉，不要一排乱码
+        assert!(parse_ssid_values("Get-ChildItem : Access to the path was denied").is_empty());
     }
 
     /// 打印机名是一段自由文本，而这里要把它交进一段 PowerShell 里。它只能出现在

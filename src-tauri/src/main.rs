@@ -270,6 +270,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ipc::get_status,
             ipc::get_engine_status,
+            ipc::preview_match,
             ipc::get_interfaces,
             ipc::get_adapters,
             ipc::get_config,
@@ -281,6 +282,8 @@ fn main() {
             ipc::probe_network,
             ipc::get_networks,
             ipc::get_printers,
+            ipc::get_installed_apps,
+            ipc::pick_app,
             ipc::open_logs,
             ipc::get_log_files,
             ipc::read_log,
