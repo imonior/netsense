@@ -12,7 +12,7 @@ use super::{
     dedupe_sort_apps, extract_mac, poll_ssid_watch, prefers_dark_from_gsettings, printers_from_lpstat,
     run, run_env,
     timeout_secs, AppEntry, C_LOCALE,
-    Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
+    Health, InterfaceStatus, MAX_ROUTES_PER_IFACE, NetworkPlatform, PrinterInfo, PrivChannel, ProbeTarget, TunnelTarget,
     WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
@@ -402,6 +402,33 @@ fn get_field_all(dev: &str, field: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `nmcli -g IP4.ROUTE` 的行 → 目的前缀清单（去重、剥掉多播/广播、上限
+/// [`MAX_ROUTES_PER_IFACE`]）。
+///
+/// nmcli 给的是 `dst = 10.0.2.0/24, nh = 0.0.0.0, mt = 100`，界面那一格只要目的前缀；
+/// 多播段（224.0.0.0/4 起）与全网广播每条链路都有，写出来只会把真正管的那几个网挤掉。
+fn route_prefixes(rows: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for row in rows {
+        let rest = match row.split_once("dst =") {
+            Some((_, rest)) => rest,
+            None => row,
+        };
+        let pfx = rest.split(',').next().unwrap_or("").trim();
+        if !pfx.contains('/') {
+            continue;
+        }
+        let first = pfx.split('/').next().unwrap_or("").split('.').next().unwrap_or("");
+        if first.parse::<u8>().map(|o| o >= 224).unwrap_or(false) {
+            continue;
+        }
+        if out.len() < MAX_ROUTES_PER_IFACE && !out.iter().any(|p| p == pfx) {
+            out.push(pfx.to_string());
+        }
+    }
+    out
 }
 
 /// 当前特权通道：`sudo -n` 可用 → Direct；否则 → Prompt（pkexec）。
@@ -862,6 +889,13 @@ impl NetworkPlatform for LinuxPlatform {
                         .ok()
                         .and_then(|o| extract_mac(&o))
                 });
+                // 路由前缀只有 VPN 那一格会显示（面板的「网关或路由」），所以也只问隧道：
+                // 这一问是每条链路一次 `nmcli` 子进程，物理口用了它也没有地方摆。
+                let routes = if kind == super::NicKind::Vpn {
+                    route_prefixes(&get_field_all(&dev, "IP4.ROUTE"))
+                } else {
+                    Vec::new()
+                };
 
                 out.push(super::NicInfo {
                     name: dev,
@@ -874,6 +908,7 @@ impl NetworkPlatform for LinuxPlatform {
                     netmask,
                     ipv6,
                     gateway,
+                    routes,
                     gateway_mac,
                     dns: if dns.is_empty() { None } else { Some(dns.join(",")) },
                     app: if kind == super::NicKind::Vpn {
@@ -1330,6 +1365,33 @@ mod tests {
         assert_eq!(ip_link_ready(ETH_CABLE_OUT, "eth0"), Some(false));
         // 查的不是这台设备时不能瞎答
         assert_eq!(ip_link_ready(WG_UP, "wg1"), None);
+    }
+
+    /// 面板「网关或路由」那一格读的是这个清单：只留目的前缀，剥掉 nmcli 的 `dst = …, nh = …`
+    /// 外壳，丢掉每条链路都有的多播/广播段，并且有上限（WireGuard 的 allowed-ips 可以是一片
+    /// /32）。挡不住的是 nmcli 换格式 —— 那只会让这一格变空，不会写成别的值。
+    #[test]
+    fn nm_route_rows_reduce_to_destination_prefixes() {
+        let rows: Vec<String> = [
+            "dst = 0.0.0.0/0, nh = 10.0.0.1, mt = 100",
+            "dst = 10.30.35.0/24, nh = 0.0.0.0, mt = 100",
+            "dst = 10.30.35.0/24, nh = 0.0.0.0, mt = 100",
+            "dst = 255.255.255.255/32, nh = 0.0.0.0, mt = 100",
+            "dst = 224.0.0.0/4, nh = 0.0.0.0, mt = 100",
+            "IP4.ROUTE[6]: dst = 192.168.9.0/24, nh = 0.0.0.0, mt = 100",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            route_prefixes(&rows).join(","),
+            "0.0.0.0/0,10.30.35.0/24,192.168.9.0/24"
+        );
+        let many: Vec<String> = (0..30)
+            .map(|i| format!("dst = 10.0.{i}.0/24, nh = 0.0.0.0, mt = 100"))
+            .collect();
+        assert_eq!(route_prefixes(&many).len(), MAX_ROUTES_PER_IFACE);
+        assert!(route_prefixes(&[]).is_empty());
     }
 
     /// nmcli 的 terse 输出把名字里的 `:` 转义成 `\:`，一列一个字段。

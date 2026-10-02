@@ -49,6 +49,8 @@
   "popup.kind_wireless": "無線LAN",
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "その他",
+  "popup.vpn_egress": "出口インターフェース",
+  "popup.vpn_routes": "ゲートウェイ / ルート",
   "editor.loading_status": "ハードウェア状態を読み込み中...",
   "editor.global_fallback": "フォールバック（0 件）",
   "editor.ipv6_config": "2. IPv6 設定",

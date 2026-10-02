@@ -49,6 +49,8 @@
   "popup.kind_wireless": "무선",
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "기타",
+  "popup.vpn_egress": "출구 인터페이스",
+  "popup.vpn_routes": "게이트웨이 / 경로",
   "editor.loading_status": "하드웨어 상태 불러오는 중...",
   "editor.global_fallback": "폴백 (일치 없음)",
   "editor.ipv6_config": "2. IPv6 구성",

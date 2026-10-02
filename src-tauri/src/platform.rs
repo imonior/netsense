@@ -86,6 +86,12 @@ pub struct NicInfo {
     pub ipv6: Option<String>,
     /// 该网卡上的默认网关（多网卡时只有走默认路由的那张有值）
     pub gateway: Option<String>,
+    /// 该网卡自己的路由前缀（`0.0.0.0/0`、`10.30.35.0/24` 这类），最多 12 条。
+    ///
+    /// VPN 隧道通常是点到点、没有下一跳，`gateway` 于是空着 —— 能回答「这条隧道管哪些网」
+    /// 的只有这张表，面板的「网关或路由」那一格在 `gateway` 为空时读它。采集走的是各平台
+    /// 本来就要跑一遍的那份路由表，不额外起子进程；`[]` = 这条链路没有可显示的路由。
+    pub routes: Vec<String>,
     /// 该网关 IP 对应的 MAC
     pub gateway_mac: Option<String>,
     pub dns: Option<String>,
@@ -100,6 +106,12 @@ pub struct NicInfo {
     /// 而它同时带着 `up: false`，界面据此说「未连接」。
     pub app: Option<String>,
 }
+
+/// 一张网卡在 [`NicInfo::routes`] 里最多留几条前缀（三平台同一个上限）。
+///
+/// 隧道可以把整张网段拆成一堆 /32 逐条下发（WireGuard 的 `allowed-ips` 常见形态），
+/// 面板那一格只有几十字宽：全采回来既撑爆每次广播的载荷、也一行都显示不完。
+pub(crate) const MAX_ROUTES_PER_IFACE: usize = 12;
 
 /// NIC 列表缓存 TTL。
 ///

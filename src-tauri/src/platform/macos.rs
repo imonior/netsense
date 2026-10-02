@@ -32,7 +32,7 @@
 use super::{
     dedupe_sort_apps, extract_mac, parse_kv, poll_ssid_watch, prefers_dark_from_defaults,
     printers_from_lpstat, run, run_env,
-    sh_q, timeout_secs, AppEntry, C_LOCALE, Health, InterfaceStatus, NetworkPlatform, PrinterInfo, PrivChannel,
+    sh_q, timeout_secs, AppEntry, C_LOCALE, Health, InterfaceStatus, MAX_ROUTES_PER_IFACE, NetworkPlatform, PrinterInfo, PrivChannel,
     ProbeTarget,
     TunnelTarget, WatcherHandle,
 };
@@ -1178,8 +1178,11 @@ struct IfaceSnap {
     running: bool,
     /// `inet` 地址。`ipconfig getifaddr` 只认得部分接口，隧道上要靠这里兜住。
     inet: Option<String>,
-    /// 是否有非 link-local 的 `inet6` 地址（有些 VPN 隧道只在 v6 上有地址）
-    v6_global: bool,
+    /// 非 link-local 的 `inet6` 地址（有些 VPN 隧道只在 v6 上有地址）。
+    ///
+    /// 留着地址本身而不只是「有没有」：`fd7a:115c:a1e0::/48` 这类写死在客户端源码里的
+    /// 段，只有拿到地址才认得出来（见 [`product_from_address`]）。
+    v6: Vec<String>,
 }
 
 /// 一次 `ifconfig` 取回所有接口的状态，替代逐条 `ifconfig <dev>`。
@@ -1207,7 +1210,7 @@ fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSna
                     IfaceSnap {
                         running: line.contains("RUNNING"),
                         inet: None,
-                        v6_global: false,
+                        v6: Vec::new(),
                     },
                 );
                 cur = Some(dev);
@@ -1222,7 +1225,7 @@ fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSna
         } else if let Some(rest) = t.strip_prefix("inet6 ") {
             let a = rest.split_whitespace().next().unwrap_or("");
             if !a.is_empty() && !a.starts_with("fe80") {
-                e.v6_global = true;
+                e.v6.push(a.to_string());
             }
         }
     }
@@ -1242,32 +1245,98 @@ fn is_noise_device(dev: &str) -> bool {
     false
 }
 
-/// 默认路由表：`设备名 -> 网关 IP`。
-///
-/// `netstat -rn -f inet` 的 default 行形如：
+/// 一次 `netstat -rn -f inet` 的两份产物：默认路由的网关，和每张网卡自己带着的前缀。
+struct RouteTables {
+    /// `设备名 -> 默认网关 IP`。只有**带网关**的 default 行才进这张表。
+    gateway: std::collections::HashMap<String, String>,
+    /// `设备名 -> 路由前缀`（`0.0.0.0/0`、`10.30.35.0/24`），每张最多 [`MAX_ROUTES_PER_IFACE`] 条。
+    prefixes: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// 读路由表（一次子进程，两份产物都要）。
+fn route_tables() -> RouteTables {
+    parse_route_tables(&run("netstat", &["-rn", "-f", "inet"]).unwrap_or_default())
+}
+
+/// 行尾那一列是设备名；`netstat` 在路由会过期时后面还跟一个秒数，那就要往前挪一列。
+fn route_dev_col<'b>(t: &[&'b str]) -> &'b str {
+    let last = t[t.len() - 1];
+    if t.len() >= 5 && last.chars().all(|c| c.is_ascii_digit()) {
+        t[t.len() - 2]
+    } else {
+        last
+    }
+}
+
+/// 解析 `netstat -rn -f inet`。default 行形如
 /// ```text
 /// default            192.168.1.1        UGScg                  en0
-/// default            10.8.0.1           UGScIg                utun4
+/// default            link#22            UCSIg               utun5
 /// ```
-/// 只有**带默认网关**的那张网卡才需要展示网关信息，其余留空（避免把别的接口
-/// 的路由张冠李戴）。
-fn default_routes() -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let Ok(out) = run("netstat", &["-rn", "-f", "inet"]) else {
-        return map;
-    };
+/// 网关只取**带 IP 的那一种**（隧道通常是点到点、下一跳写成 `link#N`，那张网卡展示的
+/// 是它自己的 `0.0.0.0/0`），而带 `/` 的前缀行按设备名归到各网卡：只有「这一行的目的
+/// 网络属于这条链路」这一个含义，才不会把别的接口的路由张冠李戴。
+///
+/// 列位不固定（`Expire` 有值时行尾多一个数字），设备名按 [`route_dev_col`] 取。
+fn parse_route_tables(out: &str) -> RouteTables {
+    let mut gateway = std::collections::HashMap::new();
+    let mut prefixes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for line in out.lines() {
         let t: Vec<&str> = line.split_whitespace().collect();
-        if t.len() >= 4 && t[0] == "default" {
-            let gw = t[1];
-            let dev = t[t.len() - 1];
-            // 直连路由（link#N）与重复项跳过
-            if gw.contains('.') && !map.contains_key(dev) {
-                map.insert(dev.to_string(), gw.to_string());
-            }
+        if t.len() < 4 {
+            continue;
         }
+        let dev = route_dev_col(&t);
+        let dest = t[0];
+        if dest == "default" {
+            let gw = t[1];
+            if gw.contains('.') && !gateway.contains_key(dev) {
+                gateway.insert(dev.to_string(), gw.to_string());
+            }
+            push_route(&mut prefixes, dev, "0.0.0.0/0");
+            continue;
+        }
+        // 前缀行：`10.30.30/24`（netstat 会省掉末位的 .0）、`100.100.100.100/32`。
+        // 主机路由（`10.30.35.2  10.30.35.2  UH` 这种没有 `/` 的）说的是这条链路自己，
+        // 不是它管哪些网；多播与广播段（224.0.0/4、255.255.255.255/32）每条链路都有。
+        let Some(pfx) = normalize_v4_prefix(dest) else { continue };
+        push_route(&mut prefixes, dev, &pfx);
     }
-    map
+    RouteTables { gateway, prefixes }
+}
+
+/// 往 `dev` 的前缀表里追加一条，满了就停。
+fn push_route(
+    map: &mut std::collections::HashMap<String, Vec<String>>,
+    dev: &str,
+    pfx: &str,
+) {
+    let v = map.entry(dev.to_string()).or_default();
+    if v.len() < MAX_ROUTES_PER_IFACE && !v.iter().any(|p| p == pfx) {
+        v.push(pfx.to_string());
+    }
+}
+
+/// 把 netstat 省略写法的 IPv4 前缀补回四段（`10.30.30/24` → `10.30.30.0/24`）。
+///
+/// 不是 IPv4 前缀（缺 `/`、段数不对、首段是 224 以上的多播/广播）一律 `None`：
+/// 那些行没有展示价值。
+fn normalize_v4_prefix(dest: &str) -> Option<String> {
+    let (addr, pfx) = dest.split_once('/')?;
+    pfx.parse::<u8>().ok()?;
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() < 2 || parts.len() > 4 {
+        return None;
+    }
+    let first = parts[0].parse::<u8>().ok()?;
+    if first >= 224 {
+        return None;
+    }
+    let mut octets = ["0"; 4];
+    for (i, p) in parts.iter().enumerate() {
+        octets[i] = p;
+    }
+    Some(format!("{}.{}.{}.{}/{}", octets[0], octets[1], octets[2], octets[3], pfx))
 }
 
 /// 设备名 → 种类。无线优先按硬件端口名判断（本地化系统上是「Wi-Fi」/「无线局域网」），
@@ -1327,7 +1396,7 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
 
 /// 判定一条隧道的归属软件；证据对不上就返回 `None`（界面退回通用的「VPN」标签）。
 ///
-/// 非特权进程拿不到「utun → 进程」这张表，所以这里只承认三条**和这台设备有关**的线索：
+/// 非特权进程拿不到「utun → 进程」这张表，所以这里只承认四条**和这台设备有关**的线索：
 /// 1. **按 IP 认领**：哪个网络服务报出了这条隧道的 IPv4，这条隧道就是它建的。服务名是
 ///    客户端自己写的，照原样显示（不做关键词归一：用户自建的 "MyVPN" 归一成 "VPN" 是
 ///    丢信息，不是提纯）。
@@ -1336,10 +1405,15 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
 ///    但它要起一个特权子进程、而且问不出的场合不少（免密通道没装、装的是不认这个子命令的
 ///    旧版脚本、持有者已经退出），所以它排在按 IP 认领之后：那条不用提权就能问，成立时
 ///    报出的还是用户自己给服务取的名字。
-/// 3. **wireguard-go 的控制套接字**（[`wireguard_sock`]）：隧道名下挂着上游实现留下的
+/// 3. **隧道地址里写死的那段产品前缀**（[`product_from_address`]）：1 和 2 都要客户端
+///    肯开口，而 Network Extension 形态的客户端（macsys 版 Tailscale）既不从
+///    `networksetup` 报地址、也没有 wireguard-go 那枚套接字 —— 它建的那条隧道于是没人认领。
+///    它留在自己地址里的常数是剩下那条不用问任何人的线索：这条设备**自己**带着某家产品
+///    写死的段，认的就是这台机器上的这条隧道，不是「系统里装过什么」。
+/// 4. **wireguard-go 的控制套接字**（[`wireguard_sock`]）：隧道名下挂着上游实现留下的
 ///    套接字，就说明这条隧道由 wireguard-go 管。这条是设备绑定的直接证据，但名字只写到
 ///    实现为止 —— 套接字说得出「wireguard-go」，说不出背后是哪个 GUI/脚本拉起来的，
-///    硬指一个牌子就是把猜测写成答案。
+///    硬指一个牌子就是把猜测写成答案；所以它排在 3 之后：3 给得出牌子。
 ///
 /// 界面上「连着没有」每一张卡都写得出来（`up` 是 `ifconfig`/`scutil` 直接给的），程序名
 /// 却只有证据才给：认不出只是少一格信息，界面退回通用的「VPN」；认错是给用户的设备安一个
@@ -1354,6 +1428,7 @@ fn collect_vpn_evidence(hw_ports: &[HwPort]) -> VpnEvidence {
 ///   隧道的」当反证。可 macsys 版 Tailscale 这类客户端**从不出**地址，反证永远不成立，
 ///   而它们恰恰是这条规则唯一要照顾的形态：现场一条别人家的 wireguard 隧道，就因为没人在
 ///   争，被安上了「Tailscale」。反证只在会开口的客户端身上存在，这道门就只剩「唯一」。
+///   第 3 条证据要解决的就是同一批客户端，但它问的是隧道自己的地址，不需要「唯一」。
 ///
 /// 认不出来只是少一格信息，认错才是事故。
 fn attribute_vpn(
@@ -1361,6 +1436,7 @@ fn attribute_vpn(
     ip: Option<&str>,
     wg_sock: bool,
     owner: Option<&str>,
+    v6: &[String],
 ) -> Option<String> {
     let addr = ip.filter(|a| !a.is_empty());
     if let Some(a) = addr {
@@ -1371,10 +1447,33 @@ fn attribute_vpn(
     if let Some(name) = owner.filter(|s| !s.is_empty()) {
         return Some(name.to_string());
     }
+    if let Some(name) = product_from_address(v6) {
+        return Some(name);
+    }
     if wg_sock {
         return Some("WireGuard".to_string());
     }
     None
+}
+
+/// 产品写死在自己源码里的 IPv6 段 → 产品名。
+///
+/// 只收「只有一家在用」的常数段，**不收** `100.64.0.0/10` 那类公用 CGNAT 段：谁都可以
+/// 拿它发地址，据此认领就把「看起来像」当成了「是」。
+const PRODUCT_ADDRESS_PREFIXES: &[(&str, &str)] = &[
+    // Tailscale 的 ULA 段（它给每条隧道都发一个这段的地址，与 MagicDNS 开没开无关）
+    ("fd7a:115c:a1e0::", "Tailscale"),
+];
+
+/// 第 3 条证据：这条隧口的 `inet6` 地址里有没有某家产品的常数段。
+///
+/// 边界要说清楚：它只认「这台机器上这条设备确实带着这个地址」，地址是内核给的，不是
+/// 某个客户端的配置给的；把别的产品的地址伪装成这一段，任何按名字归属的规则都挡不住。
+fn product_from_address(v6: &[String]) -> Option<String> {
+    PRODUCT_ADDRESS_PREFIXES
+        .iter()
+        .find(|(pfx, _)| v6.iter().any(|a| a.starts_with(pfx)))
+        .map(|(_, name)| (*name).to_string())
 }
 
 /// wireguard-go 给每条它管的隧道留一个控制套接字（上游约定：`<dir>/<dev>.sock`）。
@@ -1407,14 +1506,14 @@ type TunOwnerEntry = (Instant, Option<String>);
 static TUN_OWNER_CACHE:
     OnceLock<Mutex<std::collections::HashMap<String, TunOwnerEntry>>> = OnceLock::new();
 
-/// 隧道归属的第三条证据：**谁正握着 wireguard-go 为这条设备留的控制套接字**。
+/// 隧道归属的一条证据：**谁正握着 wireguard-go 为这条设备留的控制套接字**。
 ///
 /// 普通用户读不到答案：`/var/run/wireguard` 是 root 的 `0700`，握着那个套接字的又是 root
 /// 进程，非特权的 `lsof` 看不见它的 fd。所以这一问只能走 [`PRIV_SCRIPT`] 那条免密通道 ——
 /// 也就是说**只有通道已经就绪才问**。
 ///
 /// 绝不为了一个显示用的名字去弹授权框：那是拿「界面少一格信息」换「每次刷新都打断用户」。
-/// 于是下面这些场合一律安静地返回 `None`，归属退回 [`attribute_vpn`] 原有的两条证据：
+/// 于是下面这些场合一律安静地返回 `None`，归属退回 [`attribute_vpn`] 其余那几条证据：
 /// 通道没装 / 装的是旧版脚本（不认这个子命令）、sudo 免密被撤销、套接字没有持有者、
 /// 进程名拿不到。
 fn tunnel_owner(dev: &str) -> Option<String> {
@@ -1760,7 +1859,7 @@ impl NetworkPlatform for MacPlatform {
     fn list_interfaces(&self) -> Vec<super::NicInfo> {
         super::cached_nics(|| {
             let hw = hardware_ports();
-            let routes = default_routes();
+            let rt = route_tables();
             let wifi_dev = wifi_iface();
             let snaps = iface_snapshot();
             let nc_rows = scutil_nc_rows_now();
@@ -1776,7 +1875,7 @@ impl NetworkPlatform for MacPlatform {
                 let running = snap.map(|s| s.running).unwrap_or(false);
                 // 判据不是「有没有 IPv4」：VPN 隧道常常只在 IPv6 上有地址，`ipconfig
                 // getifaddr` 也认不全这些设备 —— 只看 IPv4 的话用户那条 VPN 就凭空消失。
-                let addressed = snap.map(|s| s.inet.is_some() || s.v6_global).unwrap_or(false);
+                let addressed = snap.map(|s| s.inet.is_some() || !s.v6.is_empty()).unwrap_or(false);
                 let ipv4 = run("ipconfig", &["getifaddr", &dev])
                     .ok()
                     .map(|o| o.trim().to_string())
@@ -1795,7 +1894,8 @@ impl NetworkPlatform for MacPlatform {
                     continue;
                 }
 
-                let gateway = routes.get(&dev).cloned();
+                let gateway = rt.gateway.get(&dev).cloned();
+                let route_list = rt.prefixes.get(&dev).cloned().unwrap_or_default();
                 let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
                 let dns = port.and_then(|p| dns_of_service(&p.port));
                 let ipv6 = port.and_then(|p| v6_of_service(&p.port));
@@ -1810,6 +1910,7 @@ impl NetworkPlatform for MacPlatform {
                     netmask,
                     ipv6,
                     gateway,
+                    routes: route_list,
                     gateway_mac,
                     dns,
                     // 隧道归属留到清单收齐后再填（下面那段）
@@ -1829,12 +1930,15 @@ impl NetworkPlatform for MacPlatform {
             if !vpn_rows.is_empty() {
                 let ev = collect_vpn_evidence(&hw);
                 for i in vpn_rows {
+                    let name = out[i].name.clone();
                     let ip = out[i].ipv4.clone();
-                    let wg = wireguard_sock(&out[i].name);
+                    let v6 = snaps.get(&name).map(|s| s.v6.clone()).unwrap_or_default();
+                    let wg = wireguard_sock(&name);
                     // 只有套接字真在那儿才去问持有者：这一问要花一次 root，而它对那个
                     // 路径之外的设备本来就没有答案。
-                    let owner = wg.then(|| tunnel_owner(&out[i].name)).flatten();
-                    out[i].app = attribute_vpn(&ev, ip.as_deref(), wg, owner.as_deref());
+                    let owner = wg.then(|| tunnel_owner(&name)).flatten();
+                    out[i].app =
+                        attribute_vpn(&ev, ip.as_deref(), wg, owner.as_deref(), &v6);
                 }
             }
 
@@ -2435,6 +2539,10 @@ mod tests {
             "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n",
             "utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280\n",
             "\tinet6 fd1c:b7b7:1::2 prefixlen 64 \n",
+            "utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280\n",
+            "\tinet6 fe80::ecd3:bc8e:4800:1e71%utun5 prefixlen 64 scopeid 0x16\n",
+            "\tinet 100.88.7.94 --> 100.88.7.94 netmask 0xffffffff\n",
+            "\tinet6 fd7a:115c:a1e0::112b:75f prefixlen 48\n",
             "ppp0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500\n",
             "\tinet 192.0.2.7 --> 192.0.2.8 netmask 0xffffffff\n",
             "anpi1: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500\n",
@@ -2445,17 +2553,20 @@ mod tests {
         assert_eq!(m.get("en0").unwrap().inet.as_deref(), Some("10.20.20.168"));
         // link-local 那一条不算地址：只有 fe80:: 的口（en4）仍然算「没地址」
         assert_eq!(m.get("en4").unwrap().inet, None);
-        assert!(!m.get("en4").unwrap().v6_global);
+        assert!(m.get("en4").unwrap().v6.is_empty());
         // 建了但没起来的隧道：RUNNING 为真、地址为空 → 枚举时被丢掉的正是这种
         assert_eq!(
             m.get("utun3"),
-            Some(&IfaceSnap { running: true, inet: None, v6_global: false })
+            Some(&IfaceSnap { running: true, inet: None, v6: Vec::new() })
         );
         // 只有 IPv6 地址的隧道必须留下，否则用户的 VPN 在面板上凭空消失
-        assert!(m.get("utun4").unwrap().v6_global);
+        assert_eq!(m.get("utun4").unwrap().v6, vec!["fd1c:b7b7:1::2".to_string()]);
+        // 地址本身要留着（归属第 3 条证据认的就是段前缀），而 fe80:: 那条不配进这张表
+        assert_eq!(m.get("utun5").unwrap().v6, vec!["fd7a:115c:a1e0::112b:75f".to_string()]);
+        assert_eq!(m.get("utun5").unwrap().inet.as_deref(), Some("100.88.7.94"));
         // 隧道行的 `inet A --> B` 取本端地址
         assert_eq!(m.get("ppp0").unwrap().inet.as_deref(), Some("192.0.2.7"));
-        assert_eq!(m.len(), 6);
+        assert_eq!(m.len(), 7);
     }
 
     #[test]
@@ -2590,13 +2701,13 @@ mod tests {
             svc_ip: vec![("ProtonVPN".into(), "10.64.0.2".into())],
         };
         // 隧道自己没有 IPv4（只有 inet6）→ 地址这条线连不上，认不出
-        assert_eq!(attribute_vpn(&ev, None, false, None), None);
-        assert_eq!(attribute_vpn(&ev, Some(""), false, None), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None, &[]), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), false, None, &[]), None);
         // 地址是别人的隧道（本例里那条服务）的，也不算这条的证据
-        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), false, None), None);
+        assert_eq!(attribute_vpn(&ev, Some("100.84.1.2"), false, None, &[]), None);
         // 连证据清单是空的也一样：认不出就是 None，交给界面退回通用标签
         assert_eq!(
-            attribute_vpn(&VpnEvidence::default(), None, false, None),
+            attribute_vpn(&VpnEvidence::default(), None, false, None, &[]),
             None
         );
     }
@@ -2613,22 +2724,22 @@ mod tests {
             ],
         };
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), false, None).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), false, None, &[]).as_deref(),
             Some("Tailscale")
         );
         assert_eq!(
-            attribute_vpn(&ev, Some("192.0.2.9"), false, None).as_deref(),
+            attribute_vpn(&ev, Some("192.0.2.9"), false, None, &[]).as_deref(),
             Some("AnyConnect")
         );
         // 服务名比实现名具体：两条证据同时在场时，报出地址的服务优先
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), true, None).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), true, None, &[]).as_deref(),
             Some("Tailscale")
         );
         // 报出地址的服务也排在套接字持有者之前：那条不用提权就能问，而且给出的是用户
         // 自己给服务取的名字
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), true, Some("example")).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), true, Some("example"), &[]).as_deref(),
             Some("Tailscale")
         );
     }
@@ -2639,16 +2750,16 @@ mod tests {
     fn the_socket_holder_is_more_specific_than_the_implementation_name() {
         let ev = VpnEvidence::default();
         assert_eq!(
-            attribute_vpn(&ev, None, true, Some("someapp")).as_deref(),
+            attribute_vpn(&ev, None, true, Some("someapp"), &[]).as_deref(),
             Some("someapp")
         );
         // 空串不算答案（脚本那边要么给路径、要么非 0 退出，这边不给空名字上界面）
         assert_eq!(
-            attribute_vpn(&ev, None, true, Some("")).as_deref(),
+            attribute_vpn(&ev, None, true, Some(""), &[]).as_deref(),
             Some("WireGuard")
         );
         // 反过来不成立：这一格只可能来自那条套接字，没问过就是 None
-        assert_eq!(attribute_vpn(&ev, None, false, None).as_deref(), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None, &[]).as_deref(), None);
     }
 
     /// 现场回归：macsys 版 Tailscale 的服务**从不出**地址，旧规则「唯一在用隧道 + 唯一已
@@ -2659,16 +2770,101 @@ mod tests {
     #[test]
     fn a_foreign_tunnel_stays_unnamed_without_device_bound_evidence() {
         let ev = VpnEvidence::default();
-        assert_eq!(attribute_vpn(&ev, Some("10.30.35.2"), false, None), None);
-        assert_eq!(attribute_vpn(&ev, None, false, None), None);
+        assert_eq!(attribute_vpn(&ev, Some("10.30.35.2"), false, None, &[]), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None, &[]), None);
         assert_eq!(
-            attribute_vpn(&ev, Some("10.30.35.2"), true, None).as_deref(),
+            attribute_vpn(&ev, Some("10.30.35.2"), true, None, &[]).as_deref(),
             Some("WireGuard")
         );
         assert_eq!(
-            attribute_vpn(&ev, None, true, None).as_deref(),
+            attribute_vpn(&ev, None, true, None, &[]).as_deref(),
             Some("WireGuard")
         );
+    }
+
+    /// 现场回归（本机那条 utun5）：macsys 版 Tailscale 既不从 `networksetup` 报地址、
+    /// 也没有 wireguard-go 的套接字，第 1、2 条证据全部落空 —— 归属靠的是这条隧道自己
+    /// 带着的常数段。反过来，CGNAT 那段 IPv4（`100.64.0.0/10` 谁都能拿来发地址）**不是**
+    /// 证据：据此认领就又回到了「看起来像」，正是本模块开头否掉的那两条路之一。
+    #[test]
+    fn the_tailscale_ula_on_the_tunnel_itself_names_it() {
+        let ev = VpnEvidence::default();
+        let ts = vec!["fd7a:115c:a1e0::112b:75f".to_string()];
+        assert_eq!(
+            attribute_vpn(&ev, None, false, None, &ts).as_deref(),
+            Some("Tailscale"),
+            "只有 inet6 的隧道也要认得出来"
+        );
+        assert_eq!(
+            attribute_vpn(&ev, Some("100.88.7.94"), false, None, &ts).as_deref(),
+            Some("Tailscale")
+        );
+        // 别家实现的 v6 段不算
+        let other = vec!["fd1c:b7b7:1::2".to_string()];
+        assert_eq!(attribute_vpn(&ev, None, false, None, &other), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None, &[]), None);
+        // 说得出牌子的排在只到实现名的那条之前
+        assert_eq!(
+            attribute_vpn(&ev, None, true, None, &ts).as_deref(),
+            Some("Tailscale")
+        );
+        // 而报得出这条地址的服务仍然排在最前（用户自己取的名字更具体）
+        let ev2 = VpnEvidence {
+            svc_ip: vec![("MyVPN".into(), "100.88.7.94".into())],
+        };
+        assert_eq!(
+            attribute_vpn(&ev2, Some("100.88.7.94"), false, None, &ts).as_deref(),
+            Some("MyVPN")
+        );
+    }
+
+    /// 本机抓的两条：隧道（点到点，下一跳写成 `link#N`，网关那格空着，「它管哪些网」全
+    /// 在前缀里）与物理口（带 IP 网关）。多播/广播段每条链路都有，主机路由说的就是这条
+    /// 链路自己 —— 两者都没有展示价值。
+    #[test]
+    fn route_tables_split_gateway_and_prefixes() {
+        let out = concat!(
+            "Routing tables\n\nInternet:\n",
+            "Destination        Gateway            Flags               Netif Expire\n",
+            "default            192.168.71.1       UGScg                 en0\n",
+            "default            link#22            UCSIg               utun5\n",
+            "10.30.30/24        utun4              USc                 utun4\n",
+            "10.30.35/24        utun4              USc                 utun4\n",
+            "10.30.35.2         10.30.35.2         UH                  utun4\n",
+            "100.100.100.100/32 link#22            UCS                 utun5\n",
+            "224.0.0/4          link#22            UmCSI               utun5\n",
+            "255.255.255.255/32 link#22            UCSI                utun5\n",
+            "192.168.71.0/24    link#4             UCS                 en0       0\n",
+        );
+        let rt = parse_route_tables(out);
+        assert_eq!(rt.gateway.get("en0").map(String::as_str), Some("192.168.71.1"));
+        assert_eq!(rt.gateway.get("utun5"), None, "link#N 不是网关 IP，别把它搬上界面");
+        assert_eq!(
+            rt.prefixes.get("utun5").unwrap(),
+            &["0.0.0.0/0".to_string(), "100.100.100.100/32".to_string()]
+        );
+        assert_eq!(
+            rt.prefixes.get("utun4").unwrap(),
+            &["10.30.30.0/24".to_string(), "10.30.35.0/24".to_string()],
+            "netstat 省掉的末位 .0 要补回来"
+        );
+        // 行尾带 Expire 数字时设备名在倒数第二列
+        assert_eq!(
+            rt.prefixes.get("en0").unwrap(),
+            &["0.0.0.0/0".to_string(), "192.168.71.0/24".to_string()]
+        );
+    }
+
+    /// 一张 /32 一片的隧道（WireGuard 的 `allowed-ips` 常见形态）不撑爆面板：采到上限就停。
+    /// 挡住的是「无上限」；挡不住的是顺序 —— 超上限后留下的是路由表里靠前的那几条。
+    #[test]
+    fn route_prefixes_are_capped_per_interface() {
+        let mut out = String::from("Destination Gateway Flags Netif\n");
+        for i in 0..30 {
+            out.push_str(&format!("10.0.{i}.0/24 utun4 USc utun4\n"));
+        }
+        let rt = parse_route_tables(&out);
+        assert_eq!(rt.prefixes.get("utun4").unwrap().len(), MAX_ROUTES_PER_IFACE);
     }
 
     /// IP 认领必须地址真对上：服务报着另一个地址时，这条隧道仍是无人认领的。
@@ -2677,12 +2873,12 @@ mod tests {
         let ev = VpnEvidence {
             svc_ip: vec![("Tailscale".into(), "100.84.1.2".into())],
         };
-        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), false, None), None);
-        assert_eq!(attribute_vpn(&ev, None, false, None), None);
-        assert_eq!(attribute_vpn(&ev, Some(""), false, None), None);
+        assert_eq!(attribute_vpn(&ev, Some("10.64.0.7"), false, None, &[]), None);
+        assert_eq!(attribute_vpn(&ev, None, false, None, &[]), None);
+        assert_eq!(attribute_vpn(&ev, Some(""), false, None, &[]), None);
         // 地址对上才认领；套接字在同时也不会把正确的认领盖掉
         assert_eq!(
-            attribute_vpn(&ev, Some("100.84.1.2"), true, None).as_deref(),
+            attribute_vpn(&ev, Some("100.84.1.2"), true, None, &[]).as_deref(),
             Some("Tailscale")
         );
     }

@@ -569,6 +569,17 @@ fn nic_from_row(
     }
 
     let gateway = get("gw");
+    // 路由前缀：脚本那边把这张口的 IPv4 前缀用逗号拼成一串送来（见 `NIC_ROWS_PS_BODY`）。
+    // 上限截在这里而不是脚本里：脚本写死的数字会和 `MAX_ROUTES_PER_IFACE` 各走各的。
+    let mut routes: Vec<String> = get("routes")
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    routes.truncate(super::MAX_ROUTES_PER_IFACE);
     let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
     let netmask = r
         .get("prefix")
@@ -596,6 +607,7 @@ fn nic_from_row(
         netmask,
         ipv6,
         gateway,
+        routes,
         gateway_mac,
         dns: get("dns"),
         app,
@@ -1362,11 +1374,14 @@ foreach ($n in @(Get-NetAdapter)) {
   $ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1;
   $v6   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Link' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1;
   $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
+  $rts  = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 | ForEach-Object { $_.DestinationPrefix }) |
+          Where-Object { $_ -and $_ -notlike "$($ip.IPAddress)/*" -and $_ -notlike '224.*' -and $_ -notlike '255.*' };
   $dns  = Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4;
   $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
   $list.Add([pscustomobject]@{
     name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status;
     ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop;
+    routes=($rts -join ',');
     dns=(($dns | ForEach-Object { $_.ServerAddresses }) -join ',');
     ssid=$wlanSsid[[string]$prof.Name]; prof=$prof.Name;
   });
@@ -1833,6 +1848,30 @@ mod tests {
         }), &Default::default())
         .expect("只有全局 IPv6 的网卡也是在用的");
         assert_eq!(v6only.ipv6.as_deref(), Some("2001:db8::1"));
+
+        // 「网关或路由」那一格读的是 `routes`：键名两边各写一次（脚本里拼串、这里拆分），
+        // 拼错了不会编译失败、只会静默变成空清单，所以这一条钉住这份契约，顺带钉住
+        // 「逗号分隔、允许空格」这个约定。
+        let routed = nic_from_row(&json!({
+            "name": "WireGuard", "desc": "Wintun Userspace Tunnel", "status": "Up",
+            "ip": "10.30.35.2", "routes": "0.0.0.0/0, 10.30.35.0/24,10.30.30.0/24"
+        }), &Default::default())
+        .expect("带路由的隧道");
+        assert_eq!(
+            routed.routes.join(","),
+            "0.0.0.0/0,10.30.35.0/24,10.30.30.0/24"
+        );
+
+        // 上限只由 `MAX_ROUTES_PER_IFACE` 说了算（脚本那边不截）：`allowed-ips` 拆成
+        // 一片 /32 时，多出来的前缀必须在这里被砍掉。
+        let many: Vec<String> = (0..20).map(|i| format!("10.0.{i}.0/24")).collect();
+        let capped = nic_from_row(&json!({
+            "name": "WireGuard", "desc": "Wintun Userspace Tunnel", "status": "Up",
+            "ip": "10.30.35.2", "routes": many.join(",")
+        }), &Default::default())
+        .expect("带路由的隧道");
+        assert_eq!(capped.routes.len(), super::super::MAX_ROUTES_PER_IFACE);
+        assert_eq!(capped.routes.last().map(String::as_str), Some("10.0.11.0/24"));
 
         // 没有地址、又不是隧道的行（WAN Miniport 那一类）不该占位
         assert!(nic_from_row(&json!({

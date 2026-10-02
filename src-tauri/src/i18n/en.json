@@ -49,6 +49,8 @@
   "popup.kind_wireless": "Wi-Fi",
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "Other",
+  "popup.vpn_egress": "Egress",
+  "popup.vpn_routes": "Gateway / routes",
   "editor.loading_status": "Loading hardware status...",
   "editor.global_fallback": "Fallback (zero match)",
   "editor.ipv6_config": "2. IPv6 Configuration",

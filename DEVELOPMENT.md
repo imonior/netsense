@@ -679,11 +679,14 @@ nothing shows a wall of `—`):
    netmask, gateway, IPv6, DNS. `get_interfaces` guarantees the primary NIC is `nics[0]`
    (the single judge is `automation::primary_nic`), so the frontend never re-implements "which NIC is mine".
    Below it, "Other active interfaces" lists the remaining non-VPN NICs as cards.
-2. **VPN / virtual adapters** — one card per VPN NIC (owning app shown as the tag; the tag is omitted
-   when the entry's own name already says it). Every card in this section carries a **Status** row
-   (`popup.connected` / `popup.disconnected`, driven by the NIC's `up`), because this list also contains
-   the VPN clients that are installed but not connected — a card with no address at all would otherwise
-   look like a collection failure.
+2. **VPN / virtual adapters** — one card per VPN NIC, titled with the **owning app** (`n.app`, falling
+   back to the device name when nothing bound to it) and tagged with the generic `VPN` label. Its rows
+   run **Status → Egress → IPv4 → Gateway / routes → DNS**: Status is `popup.connected` /
+   `popup.disconnected` driven by the NIC's `up`, because this list also contains the VPN clients that
+   are installed but not connected — a card with no address at all would otherwise look like a
+   collection failure. Egress is the device the traffic actually leaves through (`utun4`, `wg0`), so it
+   is dropped for a disconnected session that owns no device; the last row shows the prefixes routed
+   through that interface and falls back to the gateway address (§9.6).
 3. **Quick Switch** — only Profiles whose `quick` flag is set (a per-profile editor checkbox), each row **with a live status badge**
    (`ACTIVE` / `NOT MATCH` / `CONFLICT` / `DISABLED` / `ERROR`) — clicking a row calls `apply_profile({id})`,
    which re-evaluates that Profile's own conditions rather than forcing anything.
@@ -750,7 +753,7 @@ The upper layer (`main.rs` / `ipc.rs` / `engine.rs` / `conditions` / `detection`
 | Elevate = Direct | sudoers allow-list script (`sudo -n`, no dialog) | process already admin | `sudo -n` available |
 | Elevate = Prompt | `osascript ... with administrator privileges` — the first change on a machine without the channel installs it in that same prompt (§9.1) | config batches: resident helper (`win_helper.rs`, one UAC per GUI session, same `Start-Process -Verb RunAs` to spawn it); fallback / user scripts: UAC per call (`Start-Process -Verb RunAs`) | `pkexec` |
 | Saved SSID list | `networksetup -listpreferredwirelessnetworks` | read WLAN config XML (`[xml]` parse), taking `<SSID><name>` (the air name, same source as the row above; hidden networks come back from `<hex>`), falling back to the profile name when the tree gives nothing | `nmcli con show` filtered to `802-11-wireless` |
-| Which app owns a VPN NIC | **evidence only, three tiers**: the service whose `-getinfo` reports this tunnel's IPv4 → the process holding `/var/run/wireguard/<dev>.sock` (asked over the privileged channel, §9.1) → that socket's mere presence, which says only "WireGuard"; otherwise left blank | adapter **description** through `VPN_APP_TABLE` | connection name through `VPN_APP_TABLE` |
+| Which app owns a VPN NIC | **evidence only, four tiers**: the service whose `-getinfo` reports this tunnel's IPv4 → the process holding `/var/run/wireguard/<dev>.sock` (asked over the privileged channel, §9.1) → an `inet6` address of this very tunnel inside a vendor-constant block (`fd7a:115c:a1e0::/48` is Tailscale's; CGNAT ranges do not qualify) → that socket's mere presence, which says only "WireGuard"; otherwise left blank | adapter **description** through `VPN_APP_TABLE` | connection name through `VPN_APP_TABLE` |
 | Open log folder | `open` | `explorer` | `xdg-open` |
 
 > The "Connect tunnel" row deliberately uses **neither** elevate channel below: a worker that elevated
@@ -843,7 +846,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **519 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **521 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1461,20 +1464,39 @@ What no automated gate can reach, and therefore what needs a real machine per OS
   any unclaimed tunnel to whichever client happens to be installed — a specific-looking wrong answer
   about a device it has nothing to do with. Attribution requires evidence bound to that interface: an
   IPv4 one of those services reports, the process that holds the wireguard-go control socket
-  (`/var/run/wireguard/<dev>.sock`, read over the passwordless channel — §9.1), or the socket's mere
+  (`/var/run/wireguard/<dev>.sock`, read over the passwordless channel — §9.1), an `inet6` address the
+  tunnel itself carries inside a block a vendor hardcoded into its product, or the socket's mere
   presence. The holder answers down to the software, so it outranks the socket; the socket alone stops
   at the implementation, because it cannot say which GUI or script launched it; and a service naming
   that IPv4 outranks both, because that answer costs no privilege and is the client's own words.
-  Anything else returns `None` and the UI falls back to the generic VPN label (§9.6). A "single tunnel
-  up + single connected session" inference used to be a third route; it was removed because its
-  falsifier — that session's own service reporting a *different* IPv4 — can never fire for clients
-  like macsys Tailscale, which never report an address at all. The case the route existed for is the
-  case where it is unfalsifiable, and in the field it mislabelled a foreign WireGuard tunnel.
+  The address tier exists because macsys Tailscale matches none of the other three: it never answers
+  `-getinfo` with an address (§9.6) and does not use wireguard-go's socket, so its tunnels were listed
+  with no name at all. Only constant, single-vendor blocks qualify — `fd7a:115c:a1e0::/48` yes,
+  `100.64.0.0/10` no, because anyone may hand out CGNAT addresses and naming on that would turn
+  "looks like" into "is". Anything else returns `None` and the UI falls back to the generic VPN label
+  (§9.6). A "single tunnel up + single connected session" inference used to be a further route; it was
+  removed because its falsifier — that session's own service reporting a *different* IPv4 — can never
+  fire for clients like macsys Tailscale, which never report an address at all. The case the route
+  existed for is the case where it is unfalsifiable, and in the field it mislabelled a foreign
+  WireGuard tunnel. Note the difference to the tier kept above: that one reads a constant out of the
+  kernel's address for *this* device, so it does not need the "no other client could produce it"
+  uniqueness the deleted route could never establish.
 - **A VPN card always says whether it is connected; the app name only appears on evidence.** That
   asymmetry is the whole rule for this section: `up` comes straight from `ifconfig`/`scutil`/`Status`,
-  so it is never a guess, while the tag above it is withheld whenever the evidence does not bind to
-  *this* interface. A missing name costs one cell of information; a wrong name is a specific lie the
+  so it is never a guess, while the card title (`n.app`) is withheld whenever the evidence does not
+  bind to *this* interface — the title then falls back to the device name and the tag stays the
+  generic `VPN`. A missing name costs one cell of information; a wrong name is a specific lie the
   user then aims "keep this VPN connected" at.
+- **A VPN card answers "which network does this tunnel own" with prefixes, not with a gateway.**
+  Tunnels are point-to-point: they usually have no next hop, so `gateway` is empty exactly where that
+  row is most wanted. `NicInfo::routes` therefore carries the destination prefixes routed through that
+  interface (capped at `MAX_ROUTES_PER_IFACE` = 12 per interface on all three legs), and the row falls
+  back to `gateway` when nothing was collected. The cap exists because a WireGuard `allowed-ips`
+  config can split a whole range into one /32 per host: uncapped, that both floods every broadcast
+  payload and renders as an unreadable wall in a card a few dozen characters wide. Collection reuses
+  the route dump each leg already parses for `gateway` (`netstat -rn -f inet`,
+  `Get-NetRoute -InterfaceIndex`, `nmcli IP4.ROUTE`); only Linux pays an extra query, and only for VPN
+  rows, because no other card displays the field.
 - **Windows takes the air name from the live association, not from any Windows "network name".**
   `Get-NetConnectionProfile.Name` is the **NLA network object's** name: when the network signature
   changes (adapter re-init, driver reload, sleep/wake, DHCP or gateway change, VPN interference) Windows

@@ -49,6 +49,8 @@
   "popup.kind_wireless": "无线",
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "其他",
+  "popup.vpn_egress": "网络出口",
+  "popup.vpn_routes": "网关或路由",
   "editor.loading_status": "加载硬件真实状态中...",
   "editor.global_fallback": "兜底（零命中）",
   "editor.ipv6_config": "二、IPv6 协议配置",
