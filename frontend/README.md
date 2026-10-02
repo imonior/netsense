@@ -55,8 +55,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 - **3B 两张列表的顺序就是执行的顺序**（3B1 逐条跑，前一条结束才轮到下一条；3B2 只决定 worker
   谁先起）。改顺序只有一个入口：卡头上的 ↑ / ↓，动的就是同一个数组。跨支、跨类的移动在控件层面
   就做不到 —— ↑/↓ 的 `data-pre` 与 `data-kind` 把它限定在同一支的同一张列表里，不需要额外的拒绝逻辑。
-- **状态条第 3 格（当前网络）有两份来源，各自按自己的代价更新**：地址、掩码、网关、DNS、
-  信号来自 `status` —— 它就在每一条 `netsense://status` 里，引擎每轮都带一份新采样过来，所以
+- **状态条第 3 格（当前网络）有两份来源，各自按自己的代价更新**：地址、掩码、网关、DNS 来自
+  `status` —— 它就在每一条 `netsense://status` 里，引擎每轮都带一份新采样过来，所以
   这一格天然新鲜，不需要为它再问后端一次；接口标签和这张网卡自己的 MAC 只能问 `get_interfaces`
   （一次子进程），而它们只随「连着的是哪张口、关联到哪个 AP」变化，于是判据用 `EngineView` 的
   身份指纹：指纹不动就不取。反过来，每条广播都取一次会把编辑器拖进引擎的节律里 —— 一轮下发
@@ -98,7 +98,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 520 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 519 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**

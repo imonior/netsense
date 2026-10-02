@@ -30,7 +30,6 @@
   "popup.status": "状态",
   "popup.connected": "已连接",
   "popup.profile": "当前使用配置",
-  "popup.signal": "信号",
   "popup.ip": "IPv4",
   "popup.gateway": "网关",
   "popup.dns": "DNS",

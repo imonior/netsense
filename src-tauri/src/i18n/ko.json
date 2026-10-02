@@ -30,7 +30,6 @@
   "popup.status": "상태",
   "popup.connected": "연결됨",
   "popup.profile": "적용된 프로필",
-  "popup.signal": "신호",
   "popup.ip": "IPv4",
   "popup.gateway": "게이트웨이",
   "popup.dns": "DNS",

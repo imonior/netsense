@@ -517,7 +517,7 @@
     $("st-cond").innerHTML = p2 || `<span class="empty">${esc(t("editor.state_none"))}</span>`;
 
     // 格 3：当前网络信息。条件值从这里取，而不是让用户手抄 MAC。
-    // 与托盘面板同一套字段、同一顺序：iface → SSID → signal → mac → IPv4 → netmask → gateway → IPv6 → DNS
+    // 与托盘面板同一套字段、同一顺序：iface → SSID → mac → IPv4 → netmask → gateway → IPv6 → DNS
     // 地址那几项的来源是**最近一条广播里的 `status`**：引擎每轮都带着它，所以它天然就是新的，
     // 不必为它再拉一次子进程。身份那几项（SSID / BSSID / 网卡集合）在 `view.snapshot` 里。
     // `nicList` 补的是这两份都没有的东西 —— 这张口叫什么、它自己的 MAC —— 而它们只在
@@ -537,10 +537,6 @@
     }
     // SSID（无线才显示具体值，有线时留空行占位）
     rows.push([t("status.ssid"), wireless ? ssidDisplay : "", "wifi_ssid", wireless ? s.ssid : undefined]);
-    // Signal strength（仅无线且有 RSSI 时显示）
-    if (wireless && s.rssi != null) {
-      rows.push([t("popup.signal"), s.rssi + " dBm"]);
-    }
     // MAC
     if (primary && primary.mac) {
       rows.push([t("popup.mac"), primary.mac, "bssid", primary.mac]);

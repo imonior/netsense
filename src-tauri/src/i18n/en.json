@@ -30,7 +30,6 @@
   "popup.status": "Status",
   "popup.connected": "Connected",
   "popup.profile": "Applied profile",
-  "popup.signal": "Signal",
   "popup.ip": "IPv4",
   "popup.gateway": "Gateway",
   "popup.dns": "DNS",

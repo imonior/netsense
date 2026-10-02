@@ -1314,7 +1314,7 @@ eq("English 界面里不残留写死的中文字面", cjkInDom(), []);
 
 group("广播之后，「当前网络」那一格跟着变新");
 // 这一格有两份来源，分开是因为它们的「变新」代价完全不同：
-//   地址/掩码/网关/DNS/信号 —— 引擎每轮广播都自带一份新采样（`status`），零代价、零延迟；
+//   地址/掩码/网关/DNS —— 引擎每轮广播都自带一份新采样（`status`），零代价、零延迟；
 //   接口标签与这张口自己的 MAC —— 只能问 `get_interfaces`（子进程），而它只在**身份**
 //   变了的时候才会变。所以判据是身份指纹，不是「来了一条广播就再问一次后端」。
 // 早先的版本是每条广播问一次：一轮下发会连发两条（evaluation + status），编辑器于是
@@ -1333,7 +1333,10 @@ check("下发过静态 IP 之后地址立刻见新，而编辑器没有为它多
 check("新地址现在就摆在格 3 里", findById("st-net").textContent.includes("10.20.30.40/24"));
 check("旧地址不再留在界面上", !findById("st-net").textContent.includes("192.168.1.100/24"));
 check("DNS 也跟着换了", findById("st-net").textContent.includes("10.20.30.1"));
-check("信号强度用的是广播里那一份", findById("st-net").textContent.includes("-47 dBm"));
+// 广播里仍然带着 `rssi`（后端取 SSID/BSSID 的那一趟顺手就把信号强度读回来了，为它单独省一趟
+// 子进程是省不出来的），但两处界面都不再显示它 —— 这一条钉住的是「别再把它摆回当前网络信息区」。
+check("信号强度不再出现在这一格", !findById("st-net").textContent.includes("dBm"),
+  findById("st-net").textContent.slice(0, 120));
 
 group("换了口才重取网卡明细，同一条身份不重复取");
 // 身份指纹里的 `primary_interface` / `interfaces` 一变，就说明连着的是另一张口了：

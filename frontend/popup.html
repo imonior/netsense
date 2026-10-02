@@ -161,7 +161,6 @@
     <div class="row" id="workers-row" hidden><span class="k" id="k-workers" data-i18n="popup.workers">Maintained</span><span class="v" id="v-workers">—</span></div>
     <div class="row"><span class="k" id="k-iface" data-i18n="popup.interface">Interface</span><span class="v" id="v-iface">—</span></div>
     <div class="row"><span class="k" id="k-ssid" data-i18n="status.ssid">SSID</span><span class="v" id="v-ssid">—</span></div>
-    <div class="row"><span class="k" id="k-signal" data-i18n="popup.signal">Signal</span><span class="v" id="v-signal">—</span></div>
     <div class="row"><span class="k" id="k-mac" data-i18n="popup.mac">MAC</span><span class="v" id="v-mac">—</span></div>
     <div class="row"><span class="k" id="k-ip" data-i18n="popup.ip">IPv4</span><span class="v" id="v-ip">—</span></div>
     <div class="row"><span class="k" id="k-netmask" data-i18n="popup.netmask">Netmask</span><span class="v" id="v-netmask">—</span></div>
@@ -387,7 +386,7 @@
 
       // 「在用的那张网卡」的明细：主网卡由 Rust 侧选定（`automation::primary_nic`）并放在
       // `get_interfaces` 首位，这里只把它的字段与状态快照合并展示，取不到的整行收起。
-      // SSID / 信号强度只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络。
+      // SSID 只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络。
       const primary = primaryNic();
       const wireless = !primary || primary.kind === "wireless";
       setRow("iface", primary ? nicTitle(primary) : st.iface);
@@ -396,7 +395,6 @@
       // 那会与同一面板上的绿点、IP / DNS 行自相矛盾。
       if (!ssid) ssid = connected ? t("status.ssid_unknown", "Unknown") : t("popup.disconnected", "Not connected");
       setRow("ssid", wireless ? ssid : "");
-      setRow("signal", wireless && st.rssi != null ? st.rssi + " dBm" : "");
       setRow("mac", primary && primary.mac);
       setRow("ip", st.ipv4 || (primary && primary.ipv4));
       setRow("netmask", (primary && primary.netmask) || st.netmask);

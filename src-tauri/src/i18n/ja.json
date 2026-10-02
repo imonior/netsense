@@ -30,7 +30,6 @@
   "popup.status": "状態",
   "popup.connected": "接続済み",
   "popup.profile": "適用中のプロファイル",
-  "popup.signal": "電波",
   "popup.ip": "IPv4",
   "popup.gateway": "ゲートウェイ",
   "popup.dns": "DNS",
