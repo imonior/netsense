@@ -674,7 +674,7 @@ All four windows are created at startup and only shown/hidden — the webview is
 Three sections, all fed by `get_status` + `get_interfaces` (rows whose value is missing collapse, so
 nothing shows a wall of `—`):
 1. **Current network** — status dot in the header, then applied profile (three-way: Active name /
-   **Conflict: names** in amber / "No profile applied"), last 3B1 run, maintained 3B2 workers, and the
+   **Conflict: names** in amber / "No profile applied"), maintained 3B2 workers, and the
    details of *the NIC actually in use*: interface, SSID (only when it is wireless), MAC, IPv4,
    netmask, gateway, IPv6, DNS. `get_interfaces` guarantees the primary NIC is `nics[0]`
    (the single judge is `automation::primary_nic`), so the frontend never re-implements "which NIC is mine".

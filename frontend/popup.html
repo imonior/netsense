@@ -157,7 +157,6 @@
   <div class="section"><span id="sec-info" data-i18n="popup.section_info">Current network</span><span class="dot" id="dot"></span></div>
   <div class="card">
     <div class="row"><span class="k" id="k-profile" data-i18n="popup.profile">Applied profile</span><span class="v" id="v-profile">—</span></div>
-    <div class="row" id="run-row" hidden><span class="k" id="k-run" data-i18n="popup.last_run">Last run</span><span class="v" id="v-run">—</span></div>
     <div class="row" id="workers-row" hidden><span class="k" id="k-workers" data-i18n="popup.workers">Maintained</span><span class="v" id="v-workers">—</span></div>
     <div class="row"><span class="k" id="k-iface" data-i18n="popup.interface">Interface</span><span class="v" id="v-iface">—</span></div>
     <div class="row"><span class="k" id="k-ssid" data-i18n="status.ssid">SSID</span><span class="v" id="v-ssid">—</span></div>
@@ -342,28 +341,6 @@
         pv.classList.add("warn");
       } else {
         pv.textContent = t("status.no_profile", "No profile applied");
-      }
-
-      // 3B1 留痕：面板上只报「几条成功 / 共几条」，逐条结果在编辑器的动作卡片上。
-      // `total` 为 0 就是那次运行一条动作都没有，整行不给看 —— 挂个 0/0 只会让人以为全失败了。
-      const lr = eng.last_run;
-      const runRow = document.getElementById("run-row");
-      const rv = document.getElementById("v-run");
-      const failed = lr ? (lr.outcomes || []).filter(o => !o.ok) : [];
-      runRow.hidden = !lr || !lr.total;
-      if (runRow.hidden) {
-        rv.textContent = "—";
-        rv.className = "v";
-        rv.title = "";
-      } else {
-        const done = (lr.outcomes || []).length - failed.length;
-        rv.textContent = `${lr.profile} · ${done}/${lr.total}` +
-          (lr.running ? ` · ${t("editor.action_running", "Running…")}` : "");
-        rv.className = "v" + (lr.running || !failed.length
-          ? "" : (failed.length === lr.total ? " bad" : " warn"));
-        rv.title = failed.length
-          ? "\n" + failed.map(f => `${f.label}: ${f.error || t("editor.action_failed", "Failed")}`).join("\n")
-          : "";
       }
 
       // 3B2 常驻 worker：面板只报「此刻在维持什么、哪一条没维持住」。逐条的间隔与
