@@ -109,6 +109,9 @@ pub enum DisplayStatus {
     Conflict,
     /// 命中了，但执行过程出错
     Error,
+    /// 命中了，但引擎处于「设为 DHCP」后的暂停中：不会去动网卡，所以既不是
+    /// Active 也不是 Error —— 后者在前端意味着「已经对网卡动过手」。
+    Suspended,
 }
 
 /// 系统层面的判定结果。
@@ -302,6 +305,8 @@ pub struct Engine {
     active_id: Option<String>,
     /// 上次成功下发的 Profile 内容指纹（内容没变就别再弹一次授权框）
     applied_fp: Option<String>,
+    /// 「设为 DHCP」后的手动暂停（见 [`Engine::hold_automation`]）。
+    hold: bool,
     /// 上次应用的 fallback 内容指纹。与 `applied_fp` **互相作废**：
     /// 下发过任何 Profile 配置就得清空 fallback 记档 —— 否则「Home 下了静态 IP →
     /// 到了零命中的咖啡馆」会因为 fallback 内容与启动时那次相同而被跳过，
@@ -340,6 +345,7 @@ impl Default for Engine {
             first_pass_done: false,
             active_id: None,
             applied_fp: None,
+            hold: false,
             fallback_fp: None,
             blocked: None,
             errors: HashMap::new(),
@@ -372,7 +378,29 @@ impl Engine {
     pub fn note_sampled(&mut self, snap: NetworkSnapshot, now: Instant) {
         self.last_sample = Some(now);
         self.snapshot = snap;
-        self.scheduler.observe(&self.snapshot, now);
+        if self.scheduler.observe(&self.snapshot, now) && self.hold {
+            // 网络真的变了：DHCP 后的手动暂停到此结束，自动化恢复正常节律。
+            // （判定仍走各 Profile 自己的 change_delay —— 变化刚发生，暂不「稳定」。）
+            self.hold = false;
+            log::info(&i18n::t("engine.hold_released"));
+        }
+    }
+
+    /// 进入「设为 DHCP」后的手动暂停：引擎不再自动评估与下发，直到下一次网络变化。
+    ///
+    /// 为什么要有它：DHCP 与某个 Profile 的静态 IP 正是互相抵消的两件事 —— 没有暂停时，
+    /// 「设为 DHCP」成功后的重采样轮会立刻重新命中该 Profile 并把静态 IP 又下回去，
+    /// 用户的每一次点击都是白点。暂停期间照常采样（见 `note_sampled`），所以网络一变，
+    /// 这里就解除。
+    ///
+    /// 暂停只拦「引擎自己发起」的轮询与下发（含本进程改网络触发的强制重采）；
+    /// 用户的显式动作 —— 面板的「立即应用」与「探测」—— 不受它约束。
+    pub fn hold_automation(&mut self) {
+        self.hold = true;
+    }
+
+    pub fn automation_held(&self) -> bool {
+        self.hold
     }
 
     /// 记一笔「本机网络刚被改过」：下一轮无条件重采样并重算判定。
@@ -391,7 +419,13 @@ impl Engine {
     }
 
     /// 本轮到期的 Profile（空 = 什么都不用做）。
+    ///
+    /// 暂停期间恒为空：这样 `evaluate` 也不会推进任何 Profile 的节律（`after_evaluation`
+    /// 只认真正到期的那些），解除后各条 Profile 按自己的 timing 自然到期。
     pub fn due(&self, cfg: &Config, now: Instant) -> Vec<String> {
+        if self.hold {
+            return Vec::new();
+        }
         self.scheduler.due(&cfg.profiles, now, !self.first_pass_done)
     }
 
@@ -449,6 +483,9 @@ impl Engine {
             _ => {
                 if self.active_id.as_deref() == Some(ev.id.as_str()) {
                     DisplayStatus::Active
+                } else if self.hold && ev.matched {
+                    // 暂停期间不会去动网卡 —— 这里不能沿用「命中却没生效 = 3A 失败」的红叉
+                    DisplayStatus::Suspended
                 } else if ev.matched {
                     // 命中但既不是 Active 也没进冲突名单 = 被 3A 失败挡住了
                     DisplayStatus::Error
@@ -1172,6 +1209,12 @@ fn pass(state: &Arc<AppState>, manual: Option<String>) {
     }
     let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+    // DHCP 暂停：只采样（上面已完成），不评估、不下发、不跑兜底。连 `forced` 也拦 ——
+    // 「设为 DHCP」自己触发的强制轮若放行，暂停会被当场推翻（评估 → 重新命中 → 下回去）。
+    // 用户显式点的「立即应用」不走这条捷径，不受这里约束。
+    if manual.is_none() && eng.automation_held() {
+        return;
+    }
     if manual.is_none() && !forced && eng.due(&cfg, now).is_empty() {
         return;
     }
@@ -1183,7 +1226,11 @@ fn pass(state: &Arc<AppState>, manual: Option<String>) {
     if let Some(id) = &manual {
         manual_apply(state, &mut eng, &cfg, id, &allowed);
     }
-    reconcile(state, &mut eng, &cfg, &allowed);
+    if !eng.automation_held() {
+        // 暂停期间连 reconcile 都不跑：切换、兜底都是引擎的自动行为，
+        // 而暂停的全部意义就是让它们在网络变化前住手。
+        reconcile(state, &mut eng, &cfg, &allowed);
+    }
     drop(cfg);
     drop(eng);
     publish_view(state);
@@ -1515,19 +1562,24 @@ fn set_dhcp(state: &Arc<AppState>) {
     };
     match res {
         Ok(()) => {
+            // 平台状态缓存已由 exec_ops 丢弃，立刻采一份就是切 DHCP 之后的现场。
+            // 采样在锁外：macOS 上一次 get_status 最坏含一次数秒的 system_profiler。
+            let snap = NetworkSnapshot::sample(&state.plat);
             {
                 let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
                 // 已切回 DHCP：当前生效状态不再等于任何 manual 配置，记档全部作废。
                 // worker 同属那份配置 —— 用户手动接管了这张网卡，就不能再让后台每 30 秒
-                // 把某个 Profile 的状态改回来。
+                // 把某个 Profile 的状态改回来；健康监测同理（它唯一能做的事就是
+                // 「探测失败 → 再回落一次 DHCP」，此刻既多余又吓人）。
+                eng.stop_monitor();
                 eng.stop_workers();
                 eng.applied_fp = None;
                 eng.fallback_fp = None;
                 eng.active_id = None;
-                // 平台状态缓存已由 exec_ops 丢弃，引擎这份快照却不会自己变新：它还是
-                // 切 DHCP 之前采的。不强制重采，下一轮就拿着旧身份判定，面板上的
-                // 匹配状况因此慢一整轮。
-                eng.request_resample();
+                // 先把这份快照记成新基线，再武装暂停：这样「暂停等到下一次网络变化」
+                // 说的是**之后**的变化 —— 切 DHCP 自己引起的现场变动不算数。
+                eng.note_sampled(snap, Instant::now());
+                eng.hold_automation();
             }
             let msg = i18n::t("notify.dhcp_done");
             log::info(&msg);
@@ -1542,39 +1594,51 @@ fn set_dhcp(state: &Arc<AppState>) {
     publish_status_now(state);
 }
 
-/// 「强制探测当前网络」：按当前 Active Profile 的健康度目标探一次；
-/// 没配置时用内置默认值，保证这个菜单项在任何配置下都有明确结果。
+/// 「探测当前网络」：重新采样 → 立即评估 → 按判定执行。
+///
+/// 它回答的是「现在这台网络该不该跑自动化、该跑哪条」：恰中一条就按那一条的
+/// THEN 执行（网络 + 3B，与面板上的「立即应用」同一条链路），多命中只报告不挑人，
+/// 零命中只报告不动网卡 —— 兜底属于引擎的自动行为，等它自己按节律走。
+///
+/// 它是用户的显式动作，不受 DHCP 暂停约束（暂停只拦引擎自己发起的轮询与下发），
+/// 也不会解除暂停。
 fn probe(state: &Arc<AppState>) {
-    let (target, timeout_ms) = {
-        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-        let active = eng.active_id.as_deref();
-        let health = active.and_then(|id| cfg.profile_by_id(id)).and_then(|p| {
-            p.then
-                .as_ref()
-                .and_then(|b| b.network.as_ref())
-                .and_then(|n| n.verify.as_ref())
-                .and_then(|v| v.health.as_ref())
-                .cloned()
-        });
-        match health {
-            Some(h) => network::probe_target(&h),
-            None => network::default_probe_target(),
-        }
-    };
     log::info(&i18n::t("notify.probe_running"));
-    let ok = network::probe_ok(&state.plat, &target, timeout_ms);
-    let msg = i18n::t(if ok {
-        "notify.probe_ok"
-    } else {
-        "notify.probe_fail"
+    let now = Instant::now();
+    // 采样在锁外，理由同 set_dhcp。
+    let snap = NetworkSnapshot::sample(&state.plat);
+    let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+    eng.note_sampled(snap, now);
+    eng.evaluate(&cfg, now);
+    let allowed = Arc::new(AllowedScripts {
+        scripts_dir: state.scripts_dir.clone(),
+        explicit: cfg.allowed_scripts.clone(),
     });
-    if ok {
-        log::info(&msg);
-    } else {
-        log::warn(&msg);
+    match eng.decision.clone() {
+        Decision::Active { id } => manual_apply(state, &mut eng, &cfg, &id, &allowed),
+        Decision::Conflict { ids } => {
+            let names: Vec<String> = ids
+                .iter()
+                .map(|id| {
+                    cfg.profile_by_id(id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| id.clone())
+                })
+                .collect();
+            let msg = i18n::tf("notify.probe_conflict", &[("names", &names.join(", "))]);
+            log::warn(&msg);
+            crate::state::emit_action(state, "probe", false, msg);
+        }
+        Decision::NoActiveProfile => {
+            let msg = i18n::t("notify.probe_no_match");
+            log::info(&msg);
+            crate::state::emit_action(state, "probe", false, msg);
+        }
     }
-    crate::state::emit_action(state, "probe", ok, msg);
+    drop(cfg);
+    drop(eng);
+    publish_view(state);
 }
 
 fn publish_status_now(state: &Arc<AppState>) {
@@ -1866,6 +1930,73 @@ mod tests {
 
         assert_eq!(eng.status_of(&ev("office", true)), DisplayStatus::Error);
         assert_eq!(eng.view(&cfg).profiles[0].error, None);
+    }
+
+    /// 「设为 DHCP」后的暂停：轮询停摆，直到网络真的变了才恢复。
+    /// 判据落在 `due()` 上（`pass` 的提前收工与 `evaluate` 的节律推进都经由它），
+    /// 所以这里只钉 due 的空与非空。
+    #[test]
+    fn dhcp_hold_stops_the_schedule_until_the_network_changes() {
+        let mut eng = Engine::new();
+        let mut office = profile("office");
+        office.detection.mode = crate::config::DetectionMode::PollingOnly;
+        office.detection.poll_interval_secs = 30;
+        let cfg = Config {
+            profiles: vec![office],
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let snap = |ssid: &str| NetworkSnapshot {
+            ssid: Some(ssid.to_string()),
+            ..Default::default()
+        };
+        eng.note_sampled(snap("A"), t0);
+        eng.evaluate(&cfg, t0);
+        assert!(eng.due(&cfg, t0).is_empty(), "刚评估过，没到下一个轮询点");
+
+        // set_dhcp 的收尾顺序：先把这份快照记成新基线、再武装暂停 ——
+        // 切 DHCP 自己引起的现场变动不算「网络变化」。
+        eng.note_sampled(snap("A"), t0);
+        eng.hold_automation();
+        let later = t0 + std::time::Duration::from_secs(3600);
+        assert!(
+            eng.due(&cfg, later).is_empty(),
+            "暂停期间轮询必须停摆，这就是「自动化暂时失效」"
+        );
+
+        // 网络变化 → 解除；节律交还给 Profile 自己的 timing。
+        eng.note_sampled(snap("B"), later);
+        assert!(!eng.automation_held(), "观察到变化就要解除暂停");
+        assert_eq!(eng.due(&cfg, later), vec!["office".to_string()]);
+    }
+
+    /// 暂停里的 Profile 展示成 Suspended（前端 PAUSED），不是 ERROR：
+    /// 暂停是用户在「设为 DHCP」里亲自点的，而 ERROR 在前端的含义是
+    /// 「对网卡动过手且失败了」—— 这两件事混成一个红叉，用户会去改本来正确的条件。
+    #[test]
+    fn a_held_profile_reads_as_suspended_not_error() {
+        let mut eng = Engine::new();
+        let cfg = Config {
+            profiles: vec![profile("office")],
+            ..Default::default()
+        };
+        eng.evaluation = Evaluation {
+            profiles: vec![ev("office", true)],
+            matched_ids: ids(&["office"]),
+        };
+        // set_dhcp 之后的现场：判定快照还停在它身上，但 active_id 已被清掉、
+        // 暂停已武装（这正是「命中却没生效」在暂停期的固有形态）。
+        eng.decision = Decision::Active { id: "office".into() };
+        eng.active_id = None;
+        eng.hold_automation();
+
+        assert_eq!(eng.status_of(&ev("office", true)), DisplayStatus::Suspended);
+        let view = eng.view(&cfg);
+        assert_eq!(view.profiles[0].status, DisplayStatus::Suspended);
+        assert_eq!(view.profiles[0].error, None);
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["profiles"][0]["status"], "suspended", "前端按这个字符串分叉");
+        assert_eq!(v["state"]["state"], "active", "暂停不改判定，只让引擎住手");
     }
 
     /// 条件层与执行层各说各话：一个 Profile 的失败不传染给别的 Profile。

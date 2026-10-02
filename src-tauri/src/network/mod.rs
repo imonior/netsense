@@ -11,7 +11,7 @@ pub mod readback;
 
 use crate::config::NetworkConfig;
 use crate::i18n;
-use crate::platform::{Health, NetworkPlatform, ProbeTarget};
+use crate::platform::NetworkPlatform;
 use std::time::Duration;
 
 pub use health::HealthMonitor;
@@ -80,34 +80,6 @@ pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
             ],
         ),
     }
-}
-
-/// 一次性探测目标（用于「立即探测」与健康度校验）。与持续监测共用同一份配置形状。
-pub fn probe_target(cfg: &crate::config::HealthConfig) -> (ProbeTarget, u64) {
-    (
-        ProbeTarget {
-            mode: cfg.mode.clone(),
-            http_target: cfg.http_target.clone(),
-            icmp_target: cfg.icmp_target.clone(),
-        },
-        cfg.timeout.max(1) * 1000,
-    )
-}
-
-/// 默认探测目标：没配健康度时也让「立即探测」有明确结果，而不是静默什么都不做。
-pub fn default_probe_target() -> (ProbeTarget, u64) {
-    (
-        ProbeTarget {
-            mode: crate::config::ProbeMode::Both,
-            http_target: Some("http://cp.cloudflare.com".to_string()),
-            icmp_target: Some("223.5.5.5".to_string()),
-        },
-        5000,
-    )
-}
-
-pub fn probe_ok<P: NetworkPlatform>(plat: &P, target: &ProbeTarget, timeout_ms: u64) -> bool {
-    matches!(plat.probe(target, timeout_ms), Health::Ok)
 }
 
 #[cfg(test)]

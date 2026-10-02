@@ -335,7 +335,7 @@
     const STATUS_LABEL = {
       active: "editor.status_active", conflict: "editor.status_conflict",
       error: "editor.status_error", disabled: "editor.status_disabled",
-      not_matched: "editor.status_nomatch",
+      not_matched: "editor.status_nomatch", suspended: "editor.status_suspended",
     };
     const statusText = (s) => (STATUS_LABEL[s] ? t(STATUS_LABEL[s], s.toUpperCase()) : "");
     // worker 的状态词只有五个，而且编辑器里已经有同一份 —— 面板复用，不另造一套 key
@@ -357,8 +357,15 @@
       pv.classList.remove("warn", "bad");
       if (dec.state === "active") {
         const a = viewOf(data, dec.id);
-        pv.textContent = nameOf(data, dec.id) + (a && a.error ? " × " + a.error : "");
-        if (a && a.error) pv.classList.add("bad");
+        // 「设为 DHCP」后的暂停：判定暂时还指着它，但引擎已经住手了 —— 说成
+        // 「已暂停」并给 warn 色，别让它看起来仍然生效。
+        if (a && a.status === "suspended") {
+          pv.textContent = t("status.suspended", "Automation paused until the network changes");
+          pv.classList.add("warn");
+        } else {
+          pv.textContent = nameOf(data, dec.id) + (a && a.error ? " × " + a.error : "");
+          if (a && a.error) pv.classList.add("bad");
+        }
       } else if (dec.state === "conflict") {
         pv.textContent = t("status.conflict", "Conflict: {names}")
           .replace("{names}", (dec.ids || []).map(id => nameOf(data, id)).join(", "));
@@ -419,7 +426,9 @@
       list.innerHTML = rows.map(p => {
         const v = viewOf(data, p.id);
         const s = v ? v.status : (p.enabled ? "" : "disabled");
-        const on = dec.state === "active" && dec.id === p.id;
+        // 「当前」跟着**生效**走（生效状态只有引擎说得算）：suspended 不算 —— 那时
+        // 网卡在 DHCP 手上，这一行要留着 Apply 让用户能手动叫回来。
+        const on = s === "active";
         return `<div class="sw${on ? " current" : ""}${p.enabled ? "" : " disabled"}" data-id="${esc(p.id)}" data-name="${esc(p.name || p.id)}">
                   <span>${esc(p.name || p.id)}</span>
                   <span style="display:flex;gap:6px;align-items:center;">
@@ -663,9 +672,11 @@
     // 刚才发生了什么，而不是被丢进一堆 .log 文件前面。目录入口在软件设置里。
     document.getElementById("btn-logs").onclick = () => invoke("open_log_viewer").catch(() => {});
     document.getElementById("btn-quit").onclick = () => invoke("quit_app").catch(() => {});
-    // DHCP / 探测都在后台线程执行（可能触发系统授权框），这里只负责发起
+    // DHCP / 探测都在后台线程执行（可能触发系统授权框），这里只负责发起。
+    // 点击时只报「已发起」：真正的结果（含失败）由 `netsense://action` 回来时 toast ——
+    // 点一下就报完成，碰上授权被取消就是先报成功再报失败。
     document.getElementById("btn-dhcp").onclick = async () => {
-      try { await invoke("force_dhcp"); toast(t("notify.dhcp_done", "Switched to DHCP")); }
+      try { await invoke("force_dhcp"); toast(t("notify.dhcp_running", "Switching to DHCP…")); }
       catch (e) { toast(String(e)); }
     };
     document.getElementById("btn-probe").onclick = async () => {

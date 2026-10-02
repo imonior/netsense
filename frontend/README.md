@@ -98,7 +98,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 521 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 525 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -152,7 +152,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
     "snapshot": { "ssid": "...", "gateway_mac": "...", "bssid": "...",
                   "primary_interface": "en0", "interfaces": [...], "tunnels": [...] },
     "profiles": [ { "id": "...", "name": "...", "enabled": true, "matched": true,
-                    "status": "active|not_matched|conflict|disabled|error",
+                    "status": "active|not_matched|conflict|disabled|error|suspended",
                     "error": "…",                 // 仅 error 时
                     "rules": [ { "id":"r1", "status":"match|no_match|inactive",
                                  "conditions":[{"id":"c1","kind":"wifi_ssid","value":"…","status":"match|no_match|inactive"}] } ] } ],
@@ -184,6 +184,12 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `ERROR` **只**来自 3A（网络下发/回读没过，或健康度监测回落 DHCP）；3B1 跑成 `partial` / `failed`
 不改 `profiles[].status`，Profile 依然是 `active` —— 网络配置确实落地了，动作失败只是要在
 `last_run` 里说清楚的一条信息。所以 `last_run.status` 与 `DisplayStatus` 是两个维度，别拿一个去算另一个。
+
+`SUSPENDED`（`profiles[].status == "suspended"`）是第三种展示态：面板上的「DHCP」按钮成功之后，
+引擎进入暂停 —— 网卡在 DHCP 手上，条件仍可能命中，但引擎不再自动评估、下发或跑兜底，直到网络
+下一次变化（采样照旧，指纹一变就解除）。它既不是 `active`（网卡此刻不在任何配置手上）也不是
+`error`（没有任何下发失败），界面把它显示成 PAUSED 而不是红叉；判定快照 `state` 在暂停期间保持
+原样，暂停只体现在 `profiles[].status` 上。
 `workers[]` 同理：一条 `faulted` 的常驻动作说的是「有个东西没维持住」，不是「环境错了」，
 所以它只染徽标、不动状态。`pending`（worker 起了、第一次核对还没回）由后端报，前端不替它补；
 表单里有这条动作、`workers[]` 里却没有 = 引擎此刻没在维持它，这时徽标留空。
@@ -205,8 +211,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `save_global` | `payload: {fallback, allowed_scripts}` | 保存 Profile 之外的全局项（零命中兜底 + 脚本白名单）。兜底**不是** Profile：它没有条件，不参与匹配与冲突；但网络与 3B 动作（`one_shot` / `persistent`）和 THEN 分支同形，引擎会真跑、真起 worker。**整份替换**这两个字段，所以两侧都必须带齐 —— 白名单的编辑面在软件设置窗口，编辑器保存兜底时必须把读到的 `allowed_scripts` 原样传回去（兜底的动作同理：编辑器带着整份动作清单保存），反之亦然，否则一次保存就清空另一项 |
 | `delete_profile` | `id` | 删除并按 id 找不到时报错 |
 | `apply_profile` | `id` | 请求「立即应用」。**不绕过条件**：引擎重评该 Profile 自己的 Rules/Conditions，禁用中直接拒、冲突中拒绝并回 `netsense://action` |
-| `force_dhcp` | — | 把当前网络切回 DHCP（异步，结果走 `netsense://action`） |
-| `probe_network` | — | 手动探测（同上） |
+| `force_dhcp` | — | 把当前网络（主网卡）切回 DHCP **并让自动化暂停**：引擎停止自动评估、下发与健康监测，直到网络下一次变化（采样照旧，变化即解除；面板/编辑器显示 PAUSED）。异步，结果走 `netsense://action` |
+| `probe_network` | — | 重新采样并立即评估当前网络：唯一命中就走「立即应用」那条链路（网络 + 3B），多命中只报告名字、零命中只报告，都不动网卡。不受 DHCP 暂停约束，也不解除暂停（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字）。交的是**空中那个名字**，与面板「当前网络」那一格同源，判据见上面那段 |
 | `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |
 | `get_installed_apps` | — | 本机登记了启动项的程序 `[{name, path}]`（第 4 列「启动程序」动作的候选）：macOS 是 /Applications 一带的 `.app`，Windows 是开始菜单的 `.lnk`（`Start-Process` 直接受理它），Linux 是 XDG 目录里 `Type=Application` 的 `.desktop`。`path` 是平台自己受理的形状（`open -a` / `Start-Process` / exec），界面按 `name` 列出、选中的是它。枚举不到就是空表：候选只是捷径，手输与「浏览…」始终在 |

@@ -1224,6 +1224,22 @@ await settle(2);
 check("刷新后原来那个输入框还在（没有被重绘掉）", byBind("name") === before);
 eq("未保存的输入没有被广播覆盖", before.value, "打字打到一半");
 
+group("「设为 DHCP」后的暂停：PAUSED 徽标 + 状态条讲清楚，既不显示生效也不显示失败");
+h.view = engineView(
+  [{ id: "office", name: "Office_5G", enabled: true, matched: true, status: "suspended", rules: [] }],
+  { state: "active", id: "office" },
+);
+h.refreshLive();
+eq("行徽标显示 PAUSED，而不是红叉或 ACTIVE",
+  findById("pbadge-office").textContent.trim(), strings["editor.status_suspended"]);
+check("状态条说明已暂停，并点名是哪套配置",
+  findById("st-profile").textContent.includes(strings["status.suspended"]) &&
+  findById("st-profile").textContent.includes("Office_5G"),
+  findById("st-profile").textContent);
+check("暂停不算生效：绿描边不出现", !findById("prow-office").classList.contains("live"));
+eq("第二格留空：暂停中没有「按哪些条件生效」可言",
+  findById("st-cond").textContent.trim(), strings["editor.state_none"]);
+
 group("生效的那一行描边，且与状态条同口径");
 const lastRun = {
   profile_id: "office", profile: "Office_5G", branch: "then", total: 3, running: false,

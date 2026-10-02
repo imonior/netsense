@@ -293,6 +293,15 @@ Rule    = (all *enabled* Conditions ANDed)
   `a_health_fallback_drops_active_without_an_error_message`, `conflict_and_error_stay_two_different_layers`.
   If one of them has to change, the layering is changing, and that deserves a spec edit rather than a
   test edit.
+- **The DHCP button pauses automation, and only a network change resumes it** (`Engine::hold_automation`).
+  A successful `set_dhcp` samples a fresh snapshot and records it *before* arming the hold, so the change
+  DHCP itself made cannot lift it; while set, `Engine::due` returns empty and automatic passes sample but
+  neither evaluate nor reconcile, so nothing can flip the NIC back to the profile's static IP the user just
+  overrode (the forced resample of an apply is constrained too — it would immediately re-match and re-push). The hold lifts in `note_sampled` the moment the fingerprint actually changes (`engine.hold_released`),
+  and anything that still matches reads `suspended` — a fourth display state, PAUSED in the UI, deliberately
+  not ERROR. Explicit user actions are not blocked: "Apply now" runs through `manual_apply` as usual, and the
+  probe button (below) is likewise unaffected and does not lift the hold. Pinned by
+  `dhcp_hold_stops_the_schedule_until_the_network_changes` and `a_held_profile_reads_as_suspended_not_error`.
 - Values are compared against a single [`NetworkSnapshot`] sampled once per pass, so SSID / BSSID /
   gateway-MAC conditions cannot disagree because they were read at different instants. MACs are
   normalized on both sides (`aa:bb:cc:dd:ee:ff` == `AA-BB-CC-DD-EE-FF`).
@@ -690,7 +699,11 @@ nothing shows a wall of `—`):
 3. **Quick Switch** — only Profiles whose `quick` flag is set (a per-profile editor checkbox), each row **with a live status badge**
    (`ACTIVE` / `NOT MATCH` / `CONFLICT` / `DISABLED` / `ERROR`) — clicking a row calls `apply_profile({id})`,
    which re-evaluates that Profile's own conditions rather than forcing anything.
-Bottom: "settings / logs / DHCP / probe / check for updates"; the header keeps quit only. The
+Bottom: "settings / logs / DHCP / probe / check for updates"; the header keeps quit only. **DHCP** forces
+the primary NIC back to DHCP and pauses automation until the network next changes (§5); **probe** re-samples,
+re-evaluates, and runs what matches — exactly one match applies that Profile's THEN through the same chain as
+"Apply now", while a conflict or a zero match is reported without touching the NIC (the fallback stays the
+engine's own automatic business). Neither button is constrained by the DHCP hold, and neither lifts it. The
 privilege channel is **not** shown here: it is troubleshooting info, and next to an unreadable SSID it read
 as if *reading* the SSID needed authorization —— 它现在显示在软件设置窗口的「运行信息」里。
 On each focus (when opened) it auto-refreshes via `get_status`, and also passively refreshes by subscribing to the `netsense://status` event.
@@ -846,7 +859,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **521 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **525 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，

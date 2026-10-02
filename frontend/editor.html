@@ -444,6 +444,7 @@
     disabled: ["b-dim", "editor.status_disabled"],
     conflict: ["b-conflict", "editor.status_conflict"],
     error: ["b-error", "editor.status_error"],
+    suspended: ["b-dim", "editor.status_suspended"],
   };
   const badge = (key) => {
     const m = BADGE[key];
@@ -496,13 +497,18 @@
     if (!st) p1 = `<span class="empty">${esc(t("editor.loading_status"))}</span>`;
     else if (st.state === "conflict")
       p1 = `${badge("conflict")} <span class="li-name">${esc(t("status.conflict", { names: (st.ids || []).map(nameOf).join(", ") }))}</span>`;
+    else if (aid && ap && ap.status === "suspended")
+      // 「设为 DHCP」后的暂停：判定还指着它，但引擎已经住手。徽标用 PAUSED 而不是
+      // ACTIVE / 红叉，后面直接讲清楚在等什么。
+      p1 = `${badge("suspended")} <b>${esc(nameOf(aid))}</b> <span class="empty">${esc(t("status.suspended"))}</span>`;
     else if (aid) p1 = `${badge(ap && ap.status)} <b>${esc(nameOf(aid))}</b>`;
     else p1 = `${badge("not_matched")} <span>${esc(t("status.no_profile"))}</span>`;
     $("st-profile").innerHTML = p1;
 
-    // 格 2：它是靠哪些条件生效的
+    // 格 2：它是靠哪些条件生效的。暂停中没有「生效」可言，条件区留空 ——
+    // 格 1 已经在说暂停，这里再列一遍命中条件会像「它正在生效」。
     let p2 = "";
-    if (aid && ap) {
+    if (aid && ap && ap.status !== "suspended") {
       const saved = savedProfile(aid) || {};
       for (const r of (saved.rules || [])) {
         const rv = (ap.rules || []).find(x => x.id === r.id);
