@@ -569,6 +569,9 @@ fn nic_from_row(
     }
 
     let gateway = get("gw");
+    // `::` 是 VPN / 点到点适配器的 on-link 下一跳：Windows 上它的意思是「没有网关」，
+    // 与 macOS 的 `link#N` 同类，收了就会在面板上摆出一行不是地址的「网关」。
+    let gateway6 = get("gw6").filter(|g| g != "::");
     // 路由前缀：脚本那边把这张口的 IPv4 前缀用逗号拼成一串送来（见 `NIC_ROWS_PS_BODY`）。
     // 上限截在这里而不是脚本里：脚本写死的数字会和 `MAX_ROUTES_PER_IFACE` 各走各的。
     let mut routes: Vec<String> = get("routes")
@@ -607,6 +610,7 @@ fn nic_from_row(
         netmask,
         ipv6,
         gateway,
+        gateway6,
         routes,
         gateway_mac,
         dns: get("dns"),
@@ -1374,13 +1378,14 @@ foreach ($n in @(Get-NetAdapter)) {
   $ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1;
   $v6   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Link' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1;
   $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
+  $rt6  = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv6 -DestinationPrefix '::/0' | Sort-Object RouteMetric | Select-Object -First 1;
   $rts  = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 | ForEach-Object { $_.DestinationPrefix }) |
           Where-Object { $_ -and $_ -notlike "$($ip.IPAddress)/*" -and $_ -notlike '224.*' -and $_ -notlike '255.*' };
   $dns  = Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4;
   $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
   $list.Add([pscustomobject]@{
     name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status;
-    ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop;
+    ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop; gw6=$rt6.NextHop;
     routes=($rts -join ',');
     dns=(($dns | ForEach-Object { $_.ServerAddresses }) -join ',');
     ssid=$wlanSsid[[string]$prof.Name]; prof=$prof.Name;
@@ -1848,6 +1853,21 @@ mod tests {
         }), &Default::default())
         .expect("只有全局 IPv6 的网卡也是在用的");
         assert_eq!(v6only.ipv6.as_deref(), Some("2001:db8::1"));
+
+        // v6 默认网关：真地址照收，`::`（on-link 伪值）不收 —— 面板的「网关 (IPv6)」
+        // 那一行只在有真网关时才给你看。
+        let v6gw = nic_from_row(&json!({
+            "name": "Ethernet", "desc": "Realtek Gaming 2.5GbE", "status": "Up",
+            "ip": "10.0.0.2", "gw6": "fe80::1"
+        }), &Default::default())
+        .expect("带 v6 网关的网卡");
+        assert_eq!(v6gw.gateway6.as_deref(), Some("fe80::1"));
+        let onlink = nic_from_row(&json!({
+            "name": "WireGuard", "desc": "Wintun Userspace Tunnel", "status": "Up",
+            "ip": "10.30.35.2", "gw6": "::"
+        }), &Default::default())
+        .expect("on-link 默认路由的隧道");
+        assert_eq!(onlink.gateway6, None, "`::` 不是网关，别把它搬上界面");
 
         // 「网关或路由」那一格读的是 `routes`：键名两边各写一次（脚本里拼串、这里拆分），
         // 拼错了不会编译失败、只会静默变成空清单，所以这一条钉住这份契约，顺带钉住

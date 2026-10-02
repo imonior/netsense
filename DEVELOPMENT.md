@@ -689,13 +689,16 @@ nothing shows a wall of `—`):
    (the single judge is `automation::primary_nic`), so the frontend never re-implements "which NIC is mine".
    Below it, "Other active interfaces" lists the remaining non-VPN NICs as cards.
 2. **VPN / virtual adapters** — one card per VPN NIC, titled with the **owning app** (`n.app`, falling
-   back to the device name when nothing bound to it) and tagged with the generic `VPN` label. Its rows
-   run **Status → Egress → IPv4 → Gateway / routes → DNS**: Status is `popup.connected` /
-   `popup.disconnected` driven by the NIC's `up`, because this list also contains the VPN clients that
-   are installed but not connected — a card with no address at all would otherwise look like a
-   collection failure. Egress is the device the traffic actually leaves through (`utun4`, `wg0`), so it
-   is dropped for a disconnected session that owns no device; the last row shows the prefixes routed
-   through that interface and falls back to the gateway address (§9.6).
+   back to the device name when nothing bound to it) and tagged with the generic `VPN` label; the
+   connection state (`popup.connected` / `popup.disconnected`, driven by the NIC's `up`) sits at the
+   right of the title line, because this list also contains the VPN clients that are installed but not
+   connected — a card with no address at all would otherwise look like a collection failure. Rows run
+   **Interface → IPv4 → IPv6 → Gateway → Gateway (IPv6) → Gateway / routes → DNS**: the interface name
+   (`utun4`, `wg0`) is dropped for a disconnected session that owns no device; a gateway row appears
+   only when the default route's next hop is a real address (platforms write `link#N` / `::` /
+   `0.0.0.0` for on-link hops — those are not gateways) and is suffixed `(default egress)`; the routes
+   row shows the concrete prefixes routed through that interface, with the default entry itself
+   (`0.0.0.0/0`, `::/0`) filtered out.
 3. **Quick Switch** — only Profiles whose `quick` flag is set (a per-profile editor checkbox), each row **with a live status badge**
    (`ACTIVE` / `NOT MATCH` / `CONFLICT` / `DISABLED` / `ERROR`) — clicking a row calls `apply_profile({id})`,
    which re-evaluates that Profile's own conditions rather than forcing anything.
@@ -859,7 +862,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **525 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **526 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，

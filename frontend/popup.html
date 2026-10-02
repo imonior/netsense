@@ -77,6 +77,9 @@
     .nic-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .nic-tag { font-size: 9px; padding: 1px 5px; border-radius: var(--t-r-pill); background: var(--t-tint-info); color: var(--t-tint-info-fg); white-space: nowrap; }
     .nic-tag.vpn { background: var(--t-tint-vpn); color: var(--t-tint-vpn-fg); }
+    .nic-end { display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .nic-state { font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .nic-state.on { color: var(--t-ok); }
     .nic-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
     .nic-row .k { color: var(--muted); }
     .nic-row .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 66%; }
@@ -260,35 +263,52 @@
 
     /// 路由那一格：最多摆三条，剩下的写成「+N」。
     /// 面板只有几十字宽，而一条隧道的 `allowed-ips` 可以是一片 /32。
+    /// `0.0.0.0/0` / `::/0` 是「一切」而不是一条路由：默认往哪走已由网关行回答，
+    /// 这里只剩真正带信息量的前缀要摆。
     const routeText = (list) => {
-      const rs = list || [];
+      const rs = (list || []).filter((r) => r !== "0.0.0.0/0" && r !== "::/0");
       return rs.length > 3
         ? rs.slice(0, 3).join(", ") + " +" + (rs.length - 3)
         : rs.join(", ");
     };
 
-    /// 一张网卡的卡片：名称 + 类型标签 + 关键字段（取不到的字段整行不显示）。
+    /// 真正能摆出来的下一跳：`0.0.0.0` / `::` 是各平台的 on-link 伪网关，macOS 还把
+    /// 点对点隧道的下一跳写成 `link#N` —— 都不是地址，摆出来只会教人误读，整行不给看。
+    const routableGateway = (v) => {
+      const s = (v || "").trim();
+      return !s || s.startsWith("link#") || s === "0.0.0.0" || s === "::" ? null : s;
+    };
+
+    /// 一张网卡的卡片：名称 + 类型标签 + 连接状态（状态在标题行右侧）+ 关键字段
+    /// （取不到的字段整行不显示）。
     ///
-    /// VPN 卡的标题就是**归属软件名**，明细按「连接状态 → 网络出口 → 地址 → 网关或路由」
-    /// 排。这一段现在也列「装了但没连」的会话，一张不带地址的卡看着像采集失败而它其实是
-    /// 准的，所以状态必须写在卡上；没连的会话没有出口设备，那一行整个不给看（标题位置上
-    /// 是它的会话标签，那是用户自己在客户端里取的名字）。
+    /// VPN 卡的标题就是**归属软件名**，明细按「接口 → 地址 → 网关 → 路由」排：两个网关行
+    /// 只在下一跳是真地址时出现，带「(默认出口)」注记说明它来自这张卡的默认路由
+    /// （`0.0.0.0/0` / `::/0`，各平台都只从那里采它）；「网关或路由」只剩前缀表里具体的
+    /// 网段（诸如 10.30.35.0/24）。这一段现在也列「装了但没连」的会话，一张不带地址的卡
+    /// 看着像采集失败而它其实是准的，所以状态必须写在卡上；没连的会话没有出口设备，那一行
+    /// 整个不给看（标题位置上是它的会话标签，那是用户自己在客户端里取的名字）。
     /// 认不出归属软件时标题退回设备名、标签仍是通用的「VPN」：少一格信息可以，给这条隧道
     /// 安一个错牌子不行（判据见 `platform::macos::attribute_vpn`）。
     function nicCard(n) {
       const vpn = n.kind === "vpn";
       const title = vpn ? (n.app || n.name) : nicTitle(n);
       const tag = kindLabel(n.kind);
+      const state = vpn
+        ? (n.up ? t("popup.connected", "Connected") : t("popup.disconnected", "Not connected"))
+        : "";
       const rows = [];
       if (vpn) {
-        rows.push([t("popup.status", "Status"),
-          n.up ? t("popup.connected", "Connected") : t("popup.disconnected", "Not connected")]);
-        if (n.up) rows.push([t("popup.vpn_egress", "Egress"), n.name]);
+        const gw = routableGateway(n.gateway);
+        const gw6 = routableGateway(n.gateway6);
+        const egress = " " + t("popup.default_egress", "(default egress)");
+        if (n.up) rows.push([t("popup.vpn_egress", "Interface"), n.name]);
         if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
-        // 「网关或路由」：隧道通常是点到点、没有下一跳，能回答「它管哪些网」的只有前缀表；
-        // 前缀采不到时才退回网关那一个地址。
-        const via = routeText(n.routes) || n.gateway;
-        if (via) rows.push([t("popup.vpn_routes", "Gateway / routes"), via]);
+        if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
+        if (gw) rows.push([t("popup.gateway", "Gateway"), gw + egress]);
+        if (gw6) rows.push([t("popup.gateway6", "Gateway (IPv6)"), gw6 + egress]);
+        const routes = routeText(n.routes);
+        if (routes) rows.push([t("popup.vpn_routes", "Gateway / routes"), routes]);
         if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
       } else {
         if (n.ssid) rows.push([t("status.ssid", "SSID"), n.ssid]);
@@ -301,7 +321,10 @@
       return `<div class="nic-card">
         <div class="nic-head">
           <span class="nic-name">${esc(title)}</span>
-          <span class="nic-tag${vpn ? " vpn" : ""}">${esc(tag)}</span>
+          <span class="nic-end">
+            <span class="nic-tag${vpn ? " vpn" : ""}">${esc(tag)}</span>
+            ${state ? `<span class="nic-state${n.up ? " on" : ""}">${esc(state)}</span>` : ""}
+          </span>
         </div>
         ${rows.map(([k, v]) => `<div class="nic-row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("")}
       </div>`;

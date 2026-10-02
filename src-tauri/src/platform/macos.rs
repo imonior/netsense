@@ -1245,17 +1245,23 @@ fn is_noise_device(dev: &str) -> bool {
     false
 }
 
-/// 一次 `netstat -rn -f inet` 的两份产物：默认路由的网关，和每张网卡自己带着的前缀。
+/// 一次路由表采样的三份产物：两个地址族的默认网关，和每张网卡的 IPv4 前缀。
 struct RouteTables {
-    /// `设备名 -> 默认网关 IP`。只有**带网关**的 default 行才进这张表。
+    /// `设备名 -> 默认网关 IP`（IPv4）。只有**带网关**的 default 行才进这张表。
     gateway: std::collections::HashMap<String, String>,
-    /// `设备名 -> 路由前缀`（`0.0.0.0/0`、`10.30.35.0/24`），每张最多 [`MAX_ROUTES_PER_IFACE`] 条。
+    /// `设备名 -> IPv6 默认网关`。判据与 IPv4 相同，见 [`parse_gateways6`]。
+    gateway6: std::collections::HashMap<String, String>,
+    /// `设备名 -> IPv4 路由前缀`（`0.0.0.0/0`、`10.30.35.0/24`），每张最多 [`MAX_ROUTES_PER_IFACE`] 条。
     prefixes: std::collections::HashMap<String, Vec<String>>,
 }
 
-/// 读路由表（一次子进程，两份产物都要）。
+/// 读路由表（v4、v6 各一次 `netstat`）。
 fn route_tables() -> RouteTables {
-    parse_route_tables(&run("netstat", &["-rn", "-f", "inet"]).unwrap_or_default())
+    let v4 = run("netstat", &["-rn", "-f", "inet"]).unwrap_or_default();
+    let v6 = run("netstat", &["-rn", "-f", "inet6"]).unwrap_or_default();
+    let mut rt = parse_route_tables(&v4);
+    rt.gateway6 = parse_gateways6(&v6);
+    rt
 }
 
 /// 行尾那一列是设备名；`netstat` 在路由会过期时后面还跟一个秒数，那就要往前挪一列。
@@ -1302,7 +1308,35 @@ fn parse_route_tables(out: &str) -> RouteTables {
         let Some(pfx) = normalize_v4_prefix(dest) else { continue };
         push_route(&mut prefixes, dev, &pfx);
     }
-    RouteTables { gateway, prefixes }
+    RouteTables {
+        gateway,
+        gateway6: std::collections::HashMap::new(),
+        prefixes,
+    }
+}
+
+/// 解析 `netstat -rn -f inet6` 的 default 行：`设备名 -> 默认网关`。
+///
+/// 只认**下一跳是真 v6 地址**的行：点对点隧道在 v6 表里同样可能写 `link#N`，那不是网关。
+/// 地址尾巴上的 `%utun5` 作用域标记剥掉 —— 卡片自己就写着是哪条设备。
+fn parse_gateways6(out: &str) -> std::collections::HashMap<String, String> {
+    let mut gateway = std::collections::HashMap::new();
+    for line in out.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.len() < 4 || t[0] != "default" {
+            continue;
+        }
+        let dev = route_dev_col(&t);
+        let gw = t[1];
+        if !gw.contains(':') || gateway.contains_key(dev) {
+            continue;
+        }
+        gateway.insert(
+            dev.to_string(),
+            gw.split('%').next().unwrap_or(gw).to_string(),
+        );
+    }
+    gateway
 }
 
 /// 往 `dev` 的前缀表里追加一条，满了就停。
@@ -1895,6 +1929,7 @@ impl NetworkPlatform for MacPlatform {
                 }
 
                 let gateway = rt.gateway.get(&dev).cloned();
+                let gateway6 = rt.gateway6.get(&dev).cloned();
                 let route_list = rt.prefixes.get(&dev).cloned().unwrap_or_default();
                 let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
                 let dns = port.and_then(|p| dns_of_service(&p.port));
@@ -1910,6 +1945,7 @@ impl NetworkPlatform for MacPlatform {
                     netmask,
                     ipv6,
                     gateway,
+                    gateway6,
                     routes: route_list,
                     gateway_mac,
                     dns,
@@ -2853,6 +2889,28 @@ mod tests {
             rt.prefixes.get("en0").unwrap(),
             &["0.0.0.0/0".to_string(), "192.168.71.0/24".to_string()]
         );
+    }
+
+    /// v6 默认网关同一套纪律：`link#N` 不是网关（同一设备后面真地址那行才算数），
+    /// `%utun5` 作用域标记剔除，`lo0` 的 `::1` 之类的非 default 行不进来。
+    #[test]
+    fn v6_default_gateway_takes_only_real_next_hops() {
+        let out = concat!(
+            "Routing tables\n\nInternet6:\n",
+            "Destination                             Gateway                                 Flags               Netif Expire\n",
+            "default                                 fe80::%utun0                            UGcIg               utun0\n",
+            "default                                 link#22                                 UCSIg               utun5\n",
+            "default                                 fd7a:115c:a1e0::                        UGcIg               utun5\n",
+            "::1                                     ::1                                     UHL                   lo0\n",
+        );
+        let g = parse_gateways6(out);
+        assert_eq!(g.get("utun0").map(String::as_str), Some("fe80::"));
+        assert_eq!(
+            g.get("utun5").map(String::as_str),
+            Some("fd7a:115c:a1e0::"),
+            "link#N 那行不算数，同一设备先来的真地址才是网关"
+        );
+        assert_eq!(g.get("lo0"), None);
     }
 
     /// 一张 /32 一片的隧道（WireGuard 的 `allowed-ips` 常见形态）不撑爆面板：采到上限就停。

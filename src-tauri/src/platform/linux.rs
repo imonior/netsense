@@ -864,6 +864,8 @@ impl NetworkPlatform for LinuxPlatform {
                     None => (addr, None),
                 };
                 let gateway = get_field(&dev, "IP4.GATEWAY");
+                // `::` 是 on-link 伪网关（同 Windows 的判据），收了就会摆出一行不是地址的「网关」。
+                let gateway6 = get_field(&dev, "IP6.GATEWAY").filter(|g| g != "::");
                 let dns = get_field_all(&dev, "IP4.DNS");
                 // 全局 IPv6：nmcli 会连 link-local 一起列出来，而 `fe80::` 每台机器都有、
                 // 也不代表这个口能走 IPv6，故跳过它取第一条真正的全局地址（去掉 /prefix）。
@@ -908,6 +910,7 @@ impl NetworkPlatform for LinuxPlatform {
                     netmask,
                     ipv6,
                     gateway,
+                    gateway6,
                     routes,
                     gateway_mac,
                     dns: if dns.is_empty() { None } else { Some(dns.join(",")) },
