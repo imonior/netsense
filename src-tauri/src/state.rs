@@ -17,7 +17,7 @@
 //! 往引擎投消息。这是「同一时刻最多一个 Active Profile」成立的前提。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -49,6 +49,15 @@ pub struct AppState {
     /// 配置文件已观察到的 mtime；由**引擎线程**单点轮询，用于热重载。
     /// `None` = 磁盘上根本没有这个文件（首次运行），建状态时按当时的真实值播种。
     pub config_mtime: Mutex<Option<SystemTime>>,
+    /// 配置代际号：`state.config` 每被成功替换一次（保存 / 删除 / 导入 / 热重载）自增 1。
+    ///
+    /// 编辑器窗口从开机起一直活着（四座窗口都在 `tauri.conf.json` 里声明、建好放着，
+    /// 显示/隐藏不重建页面），它的表单只在自己保存成功时重读过配置。用户手改
+    /// `config.json` 走的是引擎热重载 —— 后端换了世界，编辑器却停在开机那一眼，直到
+    /// 碰巧点了某个会触发重读的控件。这个号随状态广播发出去，编辑器一比对就知道自己
+    /// 手上是旧世界的表单，可以自己重读一份。代际号在**同一个配置锁内**自增，
+    /// 与 `get_config` 读它的时刻配对，重读拿到的一定是号与内容一致的那一份。
+    pub config_rev: AtomicU64,
     /// Tauri AppHandle（setup 中填充）；用于向 popup / editor 广播状态事件。
     pub app: OnceLock<AppHandle>,
     /// SSID 监视线程句柄；重启监视或退出时用 `stop()` 停掉旧线程。
@@ -87,9 +96,16 @@ impl AppState {
             engine: Mutex::new(engine),
             engine_tx: OnceLock::new(),
             config_mtime: Mutex::new(mtime),
+            config_rev: AtomicU64::new(1),
             app: OnceLock::new(),
             watcher: Mutex::new(None),
         }
+    }
+
+    /// 记一次「`state.config` 已被成功替换」。调用点必须**正在持有配置锁**（见字段文档）：
+    /// 号与内容在同一个临界区里换，`get_config` 才不会读到「新内容配旧号」。
+    pub fn config_replaced(&self) {
+        self.config_rev.fetch_add(1, Ordering::SeqCst);
     }
 
     /// 加载状态。
@@ -248,6 +264,7 @@ pub fn status_payload(state: &Arc<AppState>, st: &platform::InterfaceStatus) -> 
         "theme": theme,
         "priv": priv_channel().code(),
         "config_path": config_path,
+        "config_rev": state.config_rev.load(Ordering::SeqCst),
     })
 }
 

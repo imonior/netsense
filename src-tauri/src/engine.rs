@@ -1172,6 +1172,7 @@ fn reload_if_changed(state: &Arc<AppState>) -> bool {
     {
         let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
         *cfg = new_cfg;
+        state.config_replaced();
     }
     {
         let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());

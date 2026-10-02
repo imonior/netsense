@@ -112,7 +112,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
   子进程，而首屏不等它，所以它先单独问一次 `get_language`，快照与广播回来时再把它对一次。
 - 编辑器首屏只等**一批三份便宜的**取数：`get_config` + `get_language` + `get_theme`
   （`Promise.all`，背后都不拉子进程：配色那一档读的是平台层里带 TTL 的缓存）。表单、语言、
-  配色在这一批里全部落地，第一帧就是能编辑的界面。
+  配色在这一批里全部落地，第一帧就是能编辑的界面；`get_config` 还顺带带回配置代际号
+  `config_rev`，编辑器留着它与广播比对（见「广播何时会重建表单」）。
 - 另外六份外部数据（`get_networks` + `get_interfaces` + `get_adapters` + `get_printers` +
   `get_installed_apps` + `get_status`）在同一时刻并发发出，但**首屏不等它们**：它们各要拉起一次系统子进程，串起来的
   代价是它们**之和**（Windows 上实测能走到几秒的空白窗口），而它们喂的是状态条、徽标与下拉候选，
@@ -129,16 +130,22 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 
 | 事件 | payload | 何时 |
 |------|---------|------|
-| `netsense://status` | `status_payload`（见下） | 每次评估结束、配置落盘/热重载、语言切换、动作完成 |
+| `netsense://status` | `status_payload`（见下） | 每次评估结束、配置落盘/热重载、语言切换、动作完成；编辑器还比对载荷里的 `config_rev`，据此决定要不要整趟重读（见「广播何时会重建表单」） |
 | `netsense://evaluation` | `EngineView` | 引擎刚做完一轮评估（编辑器据此刷新徽标），3B1 每交回**一条**动作结果，以及 3B2 worker 每报出一次**状态变化**（连续两次相同结果不会重发） |
 | `netsense://conflict` | `{ profiles: [name] }` | **每个冲突事件只发一次**（引擎按 Profile 的 **id 集合**签名去重，换了名字也不重发；payload 里给的是展示名），前端弹窗 |
 | `netsense://action` | `{ kind, ok, message }` | `kind` 为 `apply` / `dhcp` / `probe`（这三条来自手动入口 —— 命令本身只是把请求排进队列）或 `monitor`（健康度监测自动回落 DHCP，没有人点过任何按钮）。**逐条动作的进度不在这里**，在 `evaluation` 的 `last_run` |
 | `netsense://update_progress` | `{ phase, percent }` | 在线升级：`download` / `refresh` / `install` |
 
-编辑器只在**会换掉整片字段**的变化后重建表单：切换选中项、增删条目、保存成功，
-以及改动 `mode` / `v6mode` / 动作类型这几类下拉和 DNS 三态开关（THEN/ELSE 两支同时在场，
-在它们之间来回看并不触发重绘）；广播只换状态条、徽标与第 1 列的行描边，从不碰表单 DOM ——
-否则用户正在输入的框会被自己填的内容刷掉。
+**广播何时会重建表单。** 编辑器只在**会换掉整片字段**的变化后重建表单：切换选中项、增删条目、
+保存成功，以及改动 `mode` / `v6mode` / 动作类型这几类下拉和 DNS 三态开关（THEN/ELSE 两支同时在场，
+在它们之间来回看并不触发重绘）；广播只换状态条、徽标与第 1 列的行描边，
+从不碰表单 DOM —— 否则用户正在输入的框会被自己填的内容刷掉。唯一的例外是**配置代际号**：
+四座窗口都是开机就建、显示/隐藏不重建页面，编辑器的表单只在首屏与自己的保存后重读；期间
+配置在别处被换掉了（手改文件触发的热重载、导入备份），广播里的 `config_rev` 就比它手上
+那份（`get_config` 同趟带回的同名键）新 —— 此时只要用户没有未保存的改动（`dirty`），
+就整趟重读、按新内容重建，这正是他要的；有未保存改动就让画面旧着，不覆盖他的草稿。
+重读在途时到达的广播不叠趟，由这一趟收尾时按代际号补读，理由见 `editor.html` 里
+`loadAll` 的注释。
 
 ### `status_payload`（`get_status` 与 `netsense://status` 同一形状）
 
@@ -175,8 +182,11 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
     "warnings": [ "…else 分支配了 persistent 动作，这一支不会被维持…" ]
   },
   "profiles": [ { "id": "...", "name": "...", "enabled": true } ],  // 只是目录，状态看 engine
-  "language": "en", "priv": "direct|prompt|outdated", "config_path": "..."
+  "language": "en", "priv": "direct|prompt|outdated", "config_path": "...",
                                        // outdated 只有 macOS 会报：免密通道装着，但不是这一版
+  "config_rev": 7                       // 配置代际号：`state.config` 每被成功替换一次 +1。
+                                        // 与 `get_config` 里的同名键配对 —— 对不上且编辑器
+                                        // 没有未保存改动时，编辑器整趟重读（见「广播何时会重建表单」）
 }
 ```
 
@@ -206,7 +216,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `preview_match` | `payload: Profile[]`（JSON 字符串，**表单当前内容**，含未保存的草稿） | 用引擎**已采到**的那份快照把这批 Profile 跑一遍 `conditions::eval_profile`，回 `ProfileEvaluation[]`（JSON 字符串），让第 2 列的三态徽标即时跟上，不必等引擎那一轮（采样节律 + `change_delay_secs` 去抖，最坏 8 秒以上）。**不**在这里再采一次样：一次采样要拉若干子进程，那样「即时预览」反而成了最慢的一条。引擎还没跑完第一轮时答不了（快照是全空的默认值，算出来的「都不匹配」只是没测过）→ 返回 `[]`，界面继续用引擎广播的那份徽标。**只回答「条件命中」**：`active`/`conflict`/`error`/`disabled` 与行的绿框仍然只由引擎说 |
 | `get_interfaces` | — | 全部在用网卡（有线/无线/VPN）+「装了但没连」的 VPN 条目（`up:false`、不带地址），**首位＝Rust 判定的主网卡**（`automation::primary_nic`），平台层 TTL 缓存（JSON 字符串）。面板的「其他在用网卡」与「VPN/虚拟网卡」两段都来自这里。两段的口径不一样是刻意的：**连着没有**每一张都写（那是系统直接给的），**程序名**只在证据落到这张卡上时才写，认不出就不写、由面板退回通用的「VPN」标签 —— 少一格信息可以，给这台设备安一个具体到某家软件的假答案不行，那个名字接下来会被 3B2 的「维持连接」拿去当对象 |
 | `get_adapters` | — | 本机**装着**的网卡 `[{name,label,kind,up}]`（第 2 列「接口」条件值的候选）：含现在没插线、没连上的物理口，好让用户提前给另一个口配好网络；没有地址类字段，也不做 TTL 缓存（刚插上扩展坞之后那次刷新就该看到新口） |
-| `get_config` | — | 全量自动化配置 JSON（schema 1），编辑器回填用。里面**没有**界面语言 —— 那是软件配置 |
+| `get_config` | — | 全量自动化配置 JSON（schema 1），编辑器回填用。里面**没有**界面语言 —— 那是软件配置。另带一个不在 schema 里的 `config_rev`（编辑器读进来就摘掉）：与状态广播里的同名键配对，配置在别处被换掉时编辑器靠它决定重读（见「广播何时会重建表单」） |
 | `save_profile` | `payload: Profile`（JSON 字符串） | 按 `id` 新增或替换一个 Profile；**整份配置**校验通过才落盘 |
 | `save_global` | `payload: {fallback, allowed_scripts}` | 保存 Profile 之外的全局项（零命中兜底 + 脚本白名单）。兜底**不是** Profile：它没有条件，不参与匹配与冲突；但网络与 3B 动作（`one_shot` / `persistent`）和 THEN 分支同形，引擎会真跑、真起 worker。**整份替换**这两个字段，所以两侧都必须带齐 —— 白名单的编辑面在软件设置窗口，编辑器保存兜底时必须把读到的 `allowed_scripts` 原样传回去（兜底的动作同理：编辑器带着整份动作清单保存），反之亦然，否则一次保存就清空另一项 |
 | `delete_profile` | `id` | 删除并按 id 找不到时报错 |

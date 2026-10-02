@@ -119,6 +119,9 @@ pub fn get_config(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "fallback": cfg.fallback,
         "allowed_scripts": cfg.allowed_scripts,
         "config_path": state.config_path.display().to_string(),
+        // 代际号在这把锁内读（写者也在锁内自增，见 [`AppState::config_replaced`]）：
+        // 编辑器拿到的「内容 + 号」是同一代，重读后不会把旧内容当成新的。
+        "config_rev": state.config_rev.load(std::sync::atomic::Ordering::SeqCst),
     });
     serde_json::to_string(&payload).unwrap_or_default()
 }
@@ -150,6 +153,7 @@ pub fn save_profile(
         next.validate()?;
         next.save(&state.config_path)?;
         *cfg = next;
+        state.config_replaced();
     }
     // 落盘即唤醒引擎：由它统一做「重新评估 + 广播」，避免这里再广播一次
     //（两处广播会各采样一次网络状态，还会让前端看到两个先后顺序不确定的 status）。
@@ -190,6 +194,7 @@ pub fn save_global(
         next.validate()?;
         next.save(&state.config_path)?;
         *cfg = next;
+        state.config_replaced();
     }
     state::post(&state, Msg::Wake);
     Ok(())
@@ -211,6 +216,7 @@ pub fn delete_profile(
         }
         next.save(&state.config_path)?;
         *cfg = next;
+        state.config_replaced();
     }
     state::post(&state, Msg::Wake);
     Ok(())
@@ -729,8 +735,11 @@ pub fn get_backups(state: State<'_, std::sync::Arc<AppState>>) -> String {
 /// · `config` 不替换，引擎下一轮评估用的还是旧配置（而下文那次 `Wake` 会立刻按它动作）；
 /// · `settings` 不重放，界面文案与日志保留窗口就还按旧的那份走。
 ///
-/// 广播只有一条：结尾的 `Msg::Wake` 会让引擎重新评估并播报状态（带着新语言），
-/// 这里再 `publish_status` 一次就是两次网络采样。
+/// 收尾两条都发：`Msg::Wake` 让引擎按新配置重新评估（该下发的下发），再显式播报一次
+/// 状态 —— 后者是编辑器比对代际号（`config_rev`）的入口：引擎那趟播不播报取决于有
+/// 没有到期的东西，安静的系统里它收工就走，光靠它编辑器就可能一直停在旧那一份。
+/// 导入是用户点出来的稀罕事，多付一次采样可以接受；若引擎那趟也播了，编辑器按号
+/// 比较后不会重读第二遍。
 #[tauri::command(async)]
 pub fn import_backup(
     state: State<'_, std::sync::Arc<AppState>>,
@@ -740,7 +749,11 @@ pub fn import_backup(
     let r = crate::backup::import(&src, &name)?;
     let msg = crate::backup::restore_summary(&r);
     if let Some(c) = r.config {
-        *state.config.lock().unwrap_or_else(|e| e.into_inner()) = c;
+        {
+            let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+            *cfg = c;
+            state.config_replaced();
+        }
         // 配置文件刚被写过，mtime 变了；引擎的热重载会在下一轮把同一份内容再读一遍，
         // 日志里凭空多出一条「配置已重载」。内存已经是它了，就把观察值对齐到写盘之后。
         if let Ok(m) = std::fs::metadata(&state.config_path) {
@@ -765,6 +778,7 @@ pub fn import_backup(
     }
     log::info(&msg);
     state::post(&state, Msg::Wake);
+    crate::state::publish_status(state.inner());
     // 同 `export_backup`：界面上那句提示就是日志里那句，由后端一次拼好。
     Ok(msg)
 }

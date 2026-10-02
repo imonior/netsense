@@ -346,8 +346,15 @@
   /* —————————————————————— 状态 ——————————————————————
      `draft` 与磁盘上的配置刻意分成两份：引擎广播可能几秒就来一次，
      若每次都把表单重建一遍，用户正在输入的内容会被吞掉。
-     所以广播只更新状态条、徽标与按钮；表单只在切换选中项、增删条目或保存成功时重建。 */
+     所以广播只更新状态条、徽标与按钮；表单只在切换选中项、增删条目或保存成功时重建。
+     另有一种：后端说配置换代了（手改文件触发的热重载 / 导入备份），而用户手上没有
+     未保存的改动 —— 那时重建正是他要的，读的是新那一份（见广播处的代际号比对）。 */
   let cfg = { schema: 1, profiles: [], fallback: null, allowed_scripts: [] };
+  let cfgLoaded = false; // 上面这份 cfg 是否成功落地过；false 时下一次广播会自动重读（首屏某一步失败的自愈）
+  let cfgRev = null;       // 手上这份 cfg 的代际号（`get_config` 同趟带回，见 [`cfgOutdated`]）
+  let cfgSeenRev = null;   // 广播里见过的最大代际号（只往上记：迟到的旧广播不该把新世界降回去）
+  let cfgFetching = false; // loadAll 是否在途：挡住广播那边再叠一趟
+  let cfgAgain = false;    // 在途期间又来了一次重读请求：这一趟结束后自己补一趟
   let globalDraft = { fallback: null, allowed_scripts: [] };
   let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings, last_run, workers}
   let preview = null;   // 表单即时预览（preview_match）：和 EngineView.profiles 同形状，但算的是草稿
@@ -1408,10 +1415,39 @@
   }
 
   const loadFailed = (e) => {
+    // 失败也是一种「没拿到新那一份」：留着这个标记，下一次广播会把整趟重试一遍。
+    cfgLoaded = false;
     $("col-cond").innerHTML = `<div class="empty">invoke failed (run via cargo tauri dev): ${esc(String(e))}</div>`;
   };
 
+  /// 手上这份配置是不是比广播里见过的那份旧。两边不齐全时回答「不知道」= false ——
+  /// 宁可漏一次重读（下一次广播会再来），也不拿猜测去重建用户的表单。
+  function cfgOutdated() {
+    return cfgSeenRev !== null && cfgRev !== null && cfgSeenRev > cfgRev;
+  }
+
   async function loadAll(keepSelection = true) {
+    // 在途时不再叠一趟，但也不能丢：保存完等着的重读、或是配置又换代了，都得补上。
+    // 丢掉它就会出现「点了保存，表单还是保存前那一眼」—— 而那种安静的系统里，
+    // 引擎没有任何理由再广播一条来救场（见 `engine::pass` 里「没有到期的就收工」）。
+    if (cfgFetching) { cfgAgain = true; return; }
+    cfgFetching = true;
+    try {
+      await loadAllInner(keepSelection);
+    } finally {
+      cfgFetching = false;
+      // 两种情况要补一趟：显式排队过的（保存 / 删除等在手等结果的动作），或这一趟
+      // 读到的比广播里见过的旧 —— 广播在重读途中到达时会被 `cfgFetching` 挡下，
+      // 若那一趟读到的还是旧世界，就得现在补读；而那种安静的系统同样不会自己
+      // 再广播一条来救场。`cfgLoaded` 为假（这一趟失败了）不在此列：
+      // 交给下一次广播重试，不在这里紧转圈。
+      const again = cfgAgain || (cfgLoaded && !dirty && cfgOutdated());
+      cfgAgain = false;
+      if (again) loadAll(keepSelection);
+    }
+  }
+
+  async function loadAllInner(keepSelection) {
     const prevSel = sel && { ...sel };
     // 这六份**先一起发出去**，但第一帧不等它们（原因见下面第二处注释）。
     let nicsFailed = false;
@@ -1432,6 +1468,11 @@
         invoke("get_config"), invoke("get_language"), invoke("get_theme"),
       ]);
       cfg = typeof rawCfg === "string" ? JSON.parse(rawCfg) : rawCfg;
+      // 代际号必须和内容同一趟取：后端在**同一把锁**里配的对（见 `ipc::get_config`），
+      // 分两趟取就可能把「旧内容 + 新号」记成已是最新，之后广播再怎么比对也不重读。
+      // 它只服务这个比对，不留在 cfg 里冒充一个配置字段。
+      cfgRev = typeof cfg.config_rev === "number" ? cfg.config_rev : null;
+      delete cfg.config_rev;
       cfg.profiles ||= [];
       // 配置里可能留着 `__manual__`：那是某个版本的下拉把「手动输入」这个控件状态当成
       // 值写进去的结果，从来不是任何人的网络名 —— 读进来时清掉。
@@ -1444,6 +1485,7 @@
       chooseSelection(prevSel, keepSelection);
       dirty = false;
       renderAll();
+      cfgLoaded = true;
     } catch (e) {
       external.catch(() => {}); // 这一趟不等了，别让它的失败变成没人接的 rejection
       loadFailed(e);
@@ -2034,6 +2076,18 @@
         if (p.status) statusSnap = p.status;
         view = p.engine;
         refreshLive();
+      }
+      // 后端说配置换代了（保存 / 手改文件走的热重载 / 导入备份都会自增这个号）。
+      // 用户手上没有未保存的改动时，重读重画到新那一份；有改动就先不动他的表单 ——
+      // 他保存时会走到新配置上（保存是 upsert 进后端那一份，不是整份覆盖）。
+      // 四座窗口在 tauri.conf.json 里都声明好、开机就建，显示/隐藏不重建页面：
+      // 没有这一步，手改出来的 Profile 在这扇窗口里永远不出现，直到碰巧点了某个
+      // 会触发重读的控件（现场：「手改的 JYH 加载不出来，点一下兜底前面的勾才出来」）。
+      // 在途那一点时间发来的广播由 [`loadAll`] 收尾时补读，这里不叠趟。
+      if (p) {
+        const rev = typeof p.config_rev === "number" ? p.config_rev : null;
+        if (rev !== null && (cfgSeenRev === null || rev > cfgSeenRev)) cfgSeenRev = rev;
+        if (!dirty && !cfgFetching && (!cfgLoaded || cfgOutdated())) loadAll();
       }
       // 语言与配色都是在软件设置窗口里改的，这个窗口只是跟着广播换口径 ——
       // 一次改档四扇窗口同时变，才不会出现「编辑器还是深色、面板已经浅色」。

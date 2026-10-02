@@ -1460,6 +1460,24 @@ What no automated gate can reach, and therefore what needs a real machine per OS
   rows it was meant to refresh are already inside the `status` payload. What `get_interfaces` uniquely
   supplies (interface label, that NIC's own MAC) only moves with the **identity fingerprint**, so that
   is the trigger (§5's `NetworkSnapshot::fingerprint` fields).
+- **The editor re-reads its config on a generation mismatch, not on a schedule.** All four windows are
+  created at startup and show/hide never reloads the page, so a config replaced elsewhere (a hand-edit
+  picked up by the hot reload, an imported backup) used to stay invisible in a long-lived editor until
+  some unrelated click happened to re-read it — the field report where a hand-written Profile only
+  appeared after ticking another row. Every replacement of `state.config` now bumps `config_rev`
+  (`AppState::config_replaced`) **under the same lock** `get_config` reads it in, and the counter rides
+  both `netsense://status` and the `get_config` payload. The editor keeps the revision it read and the
+  highest one it has seen broadcast, and re-reads when a newer one arrives with no unsaved edits
+  (`dirty`); a dirty form is left alone because saving upserts the edited Profile onto the backend's
+  copy, so nothing typed is lost either way. A broadcast that lands while the read is in flight is not
+  queued as a second fetch: the finished fetch re-checks the counter and re-runs only if what it
+  captured is already stale. Only the *highest* seen revision is kept, so a late older broadcast cannot
+  move the form back to an older world. `import_backup` publishes a status event explicitly after its
+  wake message, because the engine's wake pass may finish without broadcasting when nothing is due —
+  and in a quiet system that event is the only carrier of the new revision. Rejected: re-reading on
+  every status broadcast (a subprocess-backed sample rides each one — the editor would re-parse its
+  config every second) and reloading the page when the window is shown (the form is the user's state;
+  reloading would also discard a dirty editor).
 - **A wake from the SSID watcher must also force one resample.** `Msg::Wake` only skips the 1 s loop beat;
   the 2 s sampling beat still decides when the new SSID enters the snapshot, and the Profile's
   `change_delay_secs` starts counting from *that* pass — so the delay the user configured was quietly

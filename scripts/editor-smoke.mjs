@@ -315,6 +315,9 @@ const strings = JSON.parse(readFileSync(join(ROOT, "src-tauri/src/i18n/en.json")
 const zhStrings = JSON.parse(readFileSync(join(ROOT, "src-tauri/src/i18n/zh.json"), "utf8"));
 /** 假后端「当前」的语言：编辑器跟着它走，测试用它来模拟软件设置里换了语言。 */
 let langCode = "en";
+/** 配置代际号（`config_rev`）：真后端每次成功替换配置就自增，替身也照这个规矩来 ——
+    编辑器那套「广播里的号比手上的新就整趟重读」的比对才有东西可对。 */
+let backendRev = 1;
 /** 系统文件选择器这一次回什么：正常是一条路径，null 是取消，错误是「它起不来」。 */
 let pickAppResult = "/Users/me/Desktop/GreenThing.app";
 let pickAppError = null;
@@ -444,7 +447,8 @@ function answerValue(cmd, args) {
       // `get_status` 里那一份：深色是 CSS 默认档，给 dark 分不清「写了属性」还是「没人写」。
       return Promise.resolve("light");
     case "get_config":
-      return Promise.resolve(JSON.stringify(configFixture));
+      // `config_rev` 与真后端一样同趟带回（见 `ipc::get_config` 里那把锁）。
+      return Promise.resolve(JSON.stringify({ ...configFixture, config_rev: backendRev }));
     case "get_networks":
       return Promise.resolve(["Office_5G", "Café"]);
     case "get_interfaces":
@@ -493,6 +497,7 @@ function answerValue(cmd, args) {
           theme: "light",
           priv: "direct",
           config_path: "/tmp/config.json",
+          config_rev: backendRev,
         }),
       );
     case "save_profile":
@@ -1383,6 +1388,64 @@ await broadcast("netsense://status", {
 await broadcast("netsense://evaluation", movedView);
 check("同一份身份再来两条广播，一次都不再多问", askedNics() === afterMove);
 check("有线口不再显示那一行空着的 SSID 值", !findById("st-net").textContent.includes("Office_5G"));
+
+// —————————————————————— 配置换代号 ——————————————————————
+
+group("配置在别处换代：没草稿就重读重画，有草稿一条 IPC 都不发");
+// 现场那句「手改的 JYH 加载不出来，点一下兜底前面的勾才出来」：四座窗口都是开机就建、
+// 显示/隐藏不重建页面，编辑器的表单只在首屏与自己的保存后重读。配置在别处被换掉
+// （手改文件触发的热重载 / 导入备份）时，广播里的 `config_rev` 是它唯一能听见的换代
+// 信号。这一组钉住编辑器这一侧的反应：对不上且没草稿 → 整趟重读并重画到新那一份；
+// 有草稿 → 什么都不动。它挡不住的是「后端忘了在换代时自增」（那是 Rust 单元测试与
+// 真机日志的事），也挡不住「广播压根没发出来」（`import_backup` 那样显式播报的路径
+// 由后端的命令文档守着）。
+const cfgCalls = () => invokeLog.filter((c) => c.cmd === "get_config").length;
+const selRows = () => findAll((e) => e.dataset?.act === "sel-profile");
+
+// 先是有草稿的情形：语言那一组刚在名字里打了字，此刻 dirty。
+check("此刻手上确有未保存的改动（否则下面那条断言是空转）", h.dirty);
+configFixture.profiles.push({ ...structuredClone(configFixture.profiles[0]), id: "jyh-1", name: "JYH" });
+backendRev += 1;
+const cfgBeforeDirty = cfgCalls();
+await broadcast("netsense://status", { language: "en", engine: h.view, config_rev: backendRev });
+eq("有草稿时一条 get_config 都不发", cfgCalls(), cfgBeforeDirty);
+eq("草稿一个字都没被冲掉", byBind("name")?.value, "打字打到一半");
+eq("手上那份配置也没换（重读没有发生）", h.cfg.profiles.length, 3);
+
+// 放下草稿（切一下选中项就是放弃草稿），再让后端换一次代 —— 这一步起才是现场那出戏。
+h.pick("profile", "office");
+check("切走之后是干净的（下面那条断言的前提）", !h.dirty);
+backendRev += 1;
+configFixture.profiles.push({ ...structuredClone(configFixture.profiles[0]), id: "later-1", name: "LaterNet" });
+const cfgBeforeClean = cfgCalls();
+await broadcast("netsense://status", { language: "en", engine: h.view, config_rev: backendRev });
+eq("没草稿时广播一到就重读一趟（正好一趟，不叠）", cfgCalls(), cfgBeforeClean + 1);
+check("第 1 列里出现了别处写进来的两条",
+  selRows().some((e) => e.textContent.includes("JYH")) &&
+  selRows().some((e) => e.textContent.includes("LaterNet")),
+  `行：${selRows().map((e) => e.textContent.slice(0, 12)).join(" | ")}`);
+eq("手上的配置也换成了新的", h.cfg.profiles.length, 5);
+const cfgAfterCatchUp = cfgCalls();
+await broadcast("netsense://status", { language: "en", engine: h.view, config_rev: backendRev });
+eq("代际号相同就不再重读（同一代只读一次）", cfgCalls(), cfgAfterCatchUp);
+await broadcast("netsense://status", { language: "en", engine: h.view, config_rev: backendRev - 1 });
+eq("迟到的旧代际号不会把界面踢回重读", cfgCalls(), cfgAfterCatchUp);
+
+// 重读途中配置又换代：那条广播会被在途的 `cfgFetching` 挡下，改由这一趟收尾时补读。
+holdCmd("get_status");
+h.loadAll();
+await settle();
+backendRev += 1;
+configFixture.profiles.push({ ...structuredClone(configFixture.profiles[0]), id: "late-1", name: "LateNet" });
+const cfgBeforeRace = cfgCalls();
+await broadcast("netsense://status", { language: "en", engine: h.view, config_rev: backendRev });
+eq("在途时广播不叠趟（这一刻没有新的一趟）", cfgCalls(), cfgBeforeRace);
+await releaseHeld();
+await settle(10);
+eq("在途那一趟收尾时补读了一趟", cfgCalls(), cfgBeforeRace + 1);
+check("补读把重读途中写进来的那条也带上了",
+  h.cfg.profiles.some((p) => p.name === "LateNet") &&
+  selRows().some((e) => e.textContent.includes("LateNet")));
 
 // —————————————————————— 条件即时预览 ——————————————————————
 
