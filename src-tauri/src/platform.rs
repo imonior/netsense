@@ -1184,16 +1184,20 @@ pub(crate) fn extract_mac_loose(line: &str) -> Option<String> {
     None
 }
 
-/// L2 DNS 解码：把 NetworkManager 老式 `Nameservers`（`au`，数组元素为**网络字节序**的 `u32`）
-/// 还原成点分十进制串。
+/// L2 DNS 解码：把 NetworkManager 老式 `Nameservers`（`au`，数组元素为每个地址的 `in_addr`）还原成点分十进制串。
 ///
-/// 关键陷阱：D-Bus 传来的 `u32` 数值本身已经是网络(大端)序，Rust std 的
-/// `Ipv4Addr::from(u32)` 正是按大端解读（`a<<24 | b<<16 | c<<8 | d`），
-/// 所以**直接** `Ipv4Addr::from(n)` 即可，无需任何字节序处理。
+/// 总线上的 `guint32` 就是 `in_addr.s_addr`：NM 写端 `g_variant_builder_add(&builder, "u", a)`
+/// 把 `NMIPAddr` 联合体首 4 字节当作本机 `guint32` 原样发出，全程没有任何 `htonl`/`ntohl`
+/// （读端 `nm_inet4_ntop_dup(array[i])` 同样不加端序宏，直接按网络序 `in_addr_t` 解读）。
+/// 而 `in_addr_t` 在内存里就是地址的 4 个八位组按网络(大端)序排列（`1.2.3.4` → 内存 `[01 02 03 04]`），
+/// 于是小端主机上把这 4 字节当成 `u32` 读出的数值反而是 `0x04030201`，并非 `0x01020304`。
 ///
-/// 切勿用 `Ipv4Addr::from(n.to_ne_bytes())`：小端机（几乎全部真实 Linux 硬件：x86_64 / ARM64）
-/// 上 `to_ne_bytes()` 会把四个字节整体反序，例如 `1.2.3.4` 被解成 `4.3.2.1`。旧实现正是这一
-/// 处写反，导致老 NM 上的 DNS 服务器地址全部错位（仅靠 `8.8.8.8` 这类回文地址巧合正确）。
+/// 因此必须先用 `to_ne_bytes()` 把总线 `u32` 还原成那 4 个网络序字节，再交给 `Ipv4Addr::from`。
+/// 这与 socket2（`src/sys/unix.rs` 的 `from_in_addr` 同样写 `Ipv4Addr::from(s_addr.to_ne_bytes())`）
+/// 以及 glibc `inet_pton` 落到 `s_addr` 上的值逐字一致——`1.2.3.4` 的总线值正是 `0x04030201`。
+///
+/// 切勿直接 `Ipv4Addr::from(n)`：`Ipv4Addr::from(u32)` 按大端解读，会把 `0x04030201` 解成 `4.3.2.1`。
+/// `8.8.8.8` 是回文（`0x08080808` 正反相同），旧写法在此地址上“碰巧正确”正是它长期没被发现的原因。
 ///
 /// 抽成 cfg 无关纯函数，是为了能在 macOS 宿主机上对这条 linux 专属解码路径直接单测
 /// （`cfg(linux)` 下的函数在 mac target 上既编不进也跑不到）。
@@ -1201,7 +1205,9 @@ pub(crate) fn extract_mac_loose(line: &str) -> Option<String> {
 // 以免 macOS 上 `cargo check`/`clippy` 报未使用——Linux 构建里它确有调用方。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn decode_nm_nameservers(ns: &[u32]) -> Vec<String> {
-    ns.iter().map(|n| Ipv4Addr::from(*n).to_string()).collect()
+    ns.iter()
+        .map(|n| Ipv4Addr::from(n.to_ne_bytes()).to_string())
+        .collect()
 }
 
 /// MAC 归一化：统一小写 + 冒号分隔，供匹配比较使用。
@@ -1510,20 +1516,32 @@ mod tests {
         assert_eq!(extract_mac_loose("no mac here"), None);
     }
 
-    /// 回归 L2 DNS 解码：D-Bus `Nameservers`（`au`）的 `u32` 已是网络字节序，
-    /// `Ipv4Addr::from(u32)` 按大端解读即正确；旧实现用 `to_ne_bytes()` 在小端机上整组反序。
-    /// 该函数在 mac 宿主机上可直接单测，恰好补足 `cfg(linux)` 下跑不到的验证面。
+    /// 回归 L2 DNS 解码：NM 老式 `Nameservers`（`au`）的总线 `guint32` 是 `in_addr.s_addr`，
+    /// 其内存字节即地址的网络序八位组；小端机上数值反序（如 `1.2.3.4` → `0x04030201`），
+    /// 须经 `to_ne_bytes()` 还原再交给 `Ipv4Addr::from`。这与 socket2 / glibc `inet_pton`
+    /// 落在 `s_addr` 上的值一致，CI（含 ubuntu-latest 真 glibc）即为裁判。
     #[test]
-    fn decode_nm_nameservers_uses_network_order() {
-        // 1.2.3.4：D-Bus u32 = 0x01020304。若被反序会得到 4.3.2.1（旧实现在 x86_64/ARM 上的错误结果）。
+    fn decode_nm_nameservers_recovers_address() {
+        // 总线值由 socket2 的 `to_in_addr` 契约求出：`s_addr = u32::from_ne_bytes(octets)`，
+        // 与 glibc/macOS `inet_pton` 实际落到 `s_addr` 的数值逐字相同，避免硬编码猜值。
+        for (ip, octets) in [
+            ("1.2.3.4", [1u8, 2, 3, 4]),
+            ("192.168.1.1", [192, 168, 1, 1]),
+            ("223.5.5.5", [223, 5, 5, 5]),
+            ("208.67.222.222", [208, 67, 222, 222]),
+        ] {
+            let bus = u32::from_ne_bytes(octets);
+            assert_eq!(
+                decode_nm_nameservers(&[bus]),
+                vec![ip.to_string()],
+                "decode {ip}: bus u32 = {bus:#x}",
+            );
+        }
+        // 8.8.8.8 是回文：to_ne_bytes 前后字节序不变，旧 bug 在此地址上"碰巧正确"，
+        // 这正是它长期没被发现的原因——保留此用例防止有人误以为只有回文需要覆盖。
         assert_eq!(
-            decode_nm_nameservers(&[0x0102_0304]),
-            vec!["1.2.3.4".to_string()]
-        );
-        // 多个服务器一并还原，且 9.9.9.9 这类回文地址不应掩盖非回文地址的错误。
-        assert_eq!(
-            decode_nm_nameservers(&[0x0102_0304, 0x0909_0909, 0xD043_DEDE]),
-            vec!["1.2.3.4".to_string(), "9.9.9.9".to_string(), "208.67.222.222".to_string()]
+            decode_nm_nameservers(&[u32::from_ne_bytes([8, 8, 8, 8])]),
+            vec!["8.8.8.8".to_string()]
         );
         // 空数组返回空
         assert!(decode_nm_nameservers(&[]).is_empty());

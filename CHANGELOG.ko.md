@@ -11,7 +11,7 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 - **Linux: 상태 조회가 더 이상 패닉하지 않는다.** 네이티브 netlink 리더가 async Tauri 명령 안에서 응답 채널을 `tokio::sync::oneshot::Receiver::blocking_recv()`로 받았는데, tokio 계약 위반으로 상태를 읽을 때마다 패닉했다. 채널은 `std::sync::mpsc` 수신측으로 바꿔 `recv_timeout`로 받고, worker 쪽에는 `tokio::time::timeout`을 걸었다. 이제 반쯤 죽은 연결이 읽기 경로 전체를 멈추게 하지 않는다.
 - **Linux: 네트워크 열거가 이제 컴파일되고 동작한다.** `list_interfaces`는 리팩터링된 `device_ip`가 `Option<DeviceIp>`를 돌려주는데 풀지 않았고, 형제 모듈 `linux_nm`을 import 없이 참조했기 때문에 컴파일되지 않았다. 둘 다 고쳤으므로 Linux 백엔드가 `cfg(linux)`로 조용히 제외되는 대신 실제로 빌드된다.
 - **macOS: 앞자리 0을 버리는 OUI의 게이트웨이 MAC이 해석된다.** `arp -n`은 `00:50:56:c0:00:08` 대신 `0:50:56:c0:0:8`을 찍는데, 기존의 행 전체 0 채우기는 앞의 IP 텍스트와 같은 그룹에 놓인 첫 바이트를 복원하지 못했다. cfg 무관하고 단위 테스트가 있는 새 `extract_mac_loose`가 규범 MAC으로 한 조씩 정규화하므로 VMware / Huawei OUI가 다시 매칭된다.
-- **Linux: 리틀 엔디언 호스트에서 DNS 서버 주소가 바이트 역순이었다.** 구식 `Nameservers`(`au`) 속성을 `Ipv4Addr::from(n.to_ne_bytes())`로 읽어 x86_64 / ARM에서 4바이트를 뒤집었다. `u32`는 이미 네트워크 순서이므로 cfg 무관한 `decode_nm_nameservers`에서 `Ipv4Addr::from(n)`을 쓰도록 바꿨고 macOS 측 단위 테스트도 추가했다.
+- **Linux: 리틀 엔디언 호스트에서 DNS 서버 주소가 바이트 역순이었다.** 구식 `Nameservers`(`au`)의 버스 `guint32`는 `in_addr` 그 자체(네트워크 순서 옥텟)이므로 `Ipv4Addr::from(n.to_ne_bytes())`로 읽어야 한다. 앞선 `Ipv4Addr::from(n)`(빅엔디언) 변경은 4바이트를 뒤집었으므로 되돌렸다. 단위 테스트는 glibc `inet_pton` / socket2와 같은 계약으로 옥텟에서 버스 값을 유도해 실제 glibc 위 CI가 판정한다.
 - **macOS: 실패한 특권 작업을 이제 관측할 수 있다.** 부트스트랩 작업 체인을 `;`(무조건 모두 실행)로 연결해서 첫 실패가 마지막 명령의 종료 코드에 가려졌다. 이제 `&&`로 연결해 첫 실패에서 멈춘다. 설치기 앞의 `;` 접두사는 의도적으로 그대로 둔다.
 - **설정: 전역 항목 저장 시 폴백이나 스크립트 화이트리스트가 사라지지 않는다.** 페이로드에 `fallback`(또는 `allowed_scripts`) 필드가 없으면 null/빈값으로 기본 처리되어 조용히 지워졌다. 이제 키가 없으면 기존 값을 유지하며 두 필드 의미가 일관된다.
 

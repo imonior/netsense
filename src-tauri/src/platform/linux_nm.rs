@@ -82,8 +82,9 @@ fn prefix_to_mask(prefix: u32) -> Option<String> {
 }
 
 // DNS 读取见 `read_ip4`：优先 `NameserverData`（`aa{sv}`，字符串地址，无字节序问题），
-// 老 NM 回落 `Nameservers`（`au`）时交给 cfg 无关的 `decode_nm_nameservers` 直接还原
-// （`u32` 已是网络序，`Ipv4Addr::from(n)` 即正确，切勿 `to_ne_bytes()`）。
+// 老 NM 回落 `Nameservers`（`au`）时交给 cfg 无关的 `decode_nm_nameservers` 还原。
+// 总线上的 `u32` 就是 `in_addr.s_addr` 的 4 字节：内存布局即网络序八位组（1.2.3.4 → [01 02 03 04]），
+// 小端机读成数值后反序（0x04030201），必须用 `to_ne_bytes()` 还原——见 `decode_nm_nameservers` 注释。
 
 /// 读单个设备的 IPv4/IPv6 配置，原生 D-Bus。失败返回 `None`（调用方回落 `nmcli`）。
 pub fn device_ip(dev: &str) -> Option<DeviceIp> {
@@ -181,9 +182,10 @@ fn read_ip4(conn: &Connection, path: &str) -> Option<Ip4Parts> {
     }
 
     // DNS：优先 `NameserverData`（`aa{sv}`，`address` 为字符串，无字节序问题）；
-    // 老 NM 没有该属性时回落 `Nameservers`（`au`）。`Nameservers` 的 `u32` 已是网络字节序，
-    // 交给 cfg 无关的 `decode_nm_nameservers` 直接 `Ipv4Addr::from(n)` 还原（见其注释：
-    // 不能用 `to_ne_bytes()`，否则小端机把四个字节反序）。
+    // 老 NM 没有该属性时回落 `Nameservers`（`au`）。总线 `u32` 即 `in_addr.s_addr`
+    // （内存 4 字节 = 网络序八位组，小端数值反序，如 1.2.3.4 → 0x04030201），
+    // 交给 cfg 无关的 `decode_nm_nameservers` 用 `to_ne_bytes()` 还原——切勿直接用
+    // `Ipv4Addr::from(n)`，否则小端机得到 4.3.2.1 这类反序地址（旧实现即此 bug）。
     if let Ok(list) = ip.get_property::<Vec<HashMap<String, OwnedValue>>>("NameserverData") {
         let parts: Vec<String> = list
             .iter()
