@@ -365,6 +365,10 @@ fn fill_ipv4(
 /// 原生应用一份网络配置：读现有 settings → 改 `ipv4`/`ipv6` → `Update` → `ActivateConnection`。
 ///
 /// 返回 `Err` 时调用方必须回落到 `nmcli con mod`（这是用户显式动作，不能静默失败）。
+// 参数超过 7 个是刻意的：后 9 个就是 NM `ipv4`/`ipv6` 两段要写的键，与 nmcli 兜底路径
+// `con_mod_props` 逐项对齐（两条路径必须对同一份配置给出同一个结果）。打包成结构体要么
+// 复制一份 `NetworkConfig`，要么让本模块反向依赖 config 类型，两种都比现在平铺更糟。
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     conn_name: &str,
     dev: &str,

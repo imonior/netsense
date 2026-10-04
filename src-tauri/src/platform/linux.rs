@@ -635,7 +635,7 @@ fn ip_link_is_up(dev: &str) -> Option<bool> {
 /// 与预期不符、或没有 system bus 时回落到这里，行为完全等价于原生改造前的实现。
 fn device_ip_nmcli(dev: &str) -> DeviceIp {
     let mut out = DeviceIp::default();
-    if let Some(addr) = get_field(&dev, "IP4.ADDRESS") {
+    if let Some(addr) = get_field(dev, "IP4.ADDRESS") {
         let (ip, prefix) = match addr.split_once('/') {
             Some((a, p)) => (
                 Some(a.to_string()),
@@ -646,20 +646,20 @@ fn device_ip_nmcli(dev: &str) -> DeviceIp {
         out.ipv4 = ip;
         out.netmask = prefix;
     }
-    out.gateway = get_field(&dev, "IP4.GATEWAY");
-    let dns = get_field_all(&dev, "IP4.DNS");
+    out.gateway = get_field(dev, "IP4.GATEWAY");
+    let dns = get_field_all(dev, "IP4.DNS");
     if !dns.is_empty() {
         out.dns = Some(dns.join(","));
     }
     // 全局 IPv6：跳过 link-local（`fe80:`），取第一条真正全局地址（与 `list_interfaces` 同判据）。
-    out.ipv6 = get_field_all(&dev, "IP6.ADDRESS")
+    out.ipv6 = get_field_all(dev, "IP6.ADDRESS")
         .into_iter()
         .find(|a| !a.trim().to_ascii_lowercase().starts_with("fe80:"))
         .map(|a| a.split('/').next().unwrap_or("").trim().to_string())
         .filter(|a| !a.is_empty());
-    out.gateway6 = get_field(&dev, "IP6.GATEWAY").filter(|g| g != "::");
-    out.mac = get_field(&dev, "GENERAL.HWADDR");
-    out.routes = route_prefixes(&get_field_all(&dev, "IP4.ROUTE"));
+    out.gateway6 = get_field(dev, "IP6.GATEWAY").filter(|g| g != "::");
+    out.mac = get_field(dev, "GENERAL.HWADDR");
+    out.routes = route_prefixes(&get_field_all(dev, "IP4.ROUTE"));
     out
 }
 
