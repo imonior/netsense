@@ -16,7 +16,8 @@
 # 操作行格式（字段以 '|' 分隔）：
 #   setdhcp|Wi-Fi
 #   setmanual|Wi-Fi|192.168.1.100|255.255.255.0|192.168.1.1
-#   setdns|Wi-Fi|192.168.1.1,8.8.8.8        (空串=清空为 Empty)
+#   setdns|Wi-Fi|192.168.1.1,8.8.8.8
+#   setdnsempty|Wi-Fi                      (清空该服务的 DNS，等于 -setdnsservers Empty)
 #   setv6off|Wi-Fi / setv6auto|Wi-Fi
 #   setv6manual|Wi-Fi|fe80::1|64|fe80::ff
 #   routeadd|10.0.0.0/8|192.168.1.1|0       (第4字段为 metric，可空)
@@ -181,17 +182,22 @@ exec_op() {
         setdns)
             need_service "$1"; [ $# -eq 2 ] || die "setdns arg count"
             is_dns_list "$2" || die "bad dns: $2"
-            if [ -z "$2" ]; then
-                networksetup -setdnsservers "$1" Empty
-            else
-                _setdns_ifs=$IFS
-                IFS=,
-                # shellcheck disable=SC2086
-                set -- "$1" $2
-                IFS=$_setdns_ifs
-                _svc=$1; shift
-                networksetup -setdnsservers "$_svc" "$@"
-            fi
+            [ -n "$2" ] || die "empty dns list: use setdnsempty"
+            _setdns_ifs=$IFS
+            IFS=,
+            # shellcheck disable=SC2086
+            set -- "$1" $2
+            IFS=$_setdns_ifs
+            _svc=$1; shift
+            networksetup -setdnsservers "$_svc" "$@"
+            ;;
+        # 「清空 DNS」单独一条动词，而不是 `setdns|<svc>|`（ servers 留空）：
+        # 行是按 IFS='|' 拆的，POSIX shell 拆分会**丢掉末尾那个空字段**，
+        # `setdns|Wi-Fi|` 到 exec_op 手里已经变成两个字段 —— 撞上上面的 arg count 就
+        # 再也分不清「你要清空」和「你写坏了」。清空是一个真实的下发意图，得有它的写法。
+        setdnsempty)
+            need_service "$1"; [ $# -eq 1 ] || die "setdnsempty arg count"
+            networksetup -setdnsservers "$1" Empty
             ;;
         setv6off)
             need_service "$1"; [ $# -eq 1 ] || die "setv6off arg count"
@@ -289,14 +295,18 @@ fi
 
 if [ "${1:-}" = "--batch" ]; then
     [ $# -eq 1 ] || die "--batch takes no args"
-    _fail=0
     while IFS= read -r _line; do
-        if ! run_line "$_line" >/dev/null 2>&1; then
-            echo "ERR failed: $_line" >&2
-            _fail=1
+        # 命令替换自带一层子 shell。少了它，`die` 里那句 `exit 1` 会直接带走整个脚本，
+        # 而 die 的输出又在旧写法里被 `>/dev/null 2>&1` 丢掉 —— 调用方只剩一个非 0 退出码
+        # 和一片空白 stderr，既不知道停在哪一条，也不知道为什么。
+        # 原因收下并报出来，然后**停在第一条失败的那一条**：一批里的几条是按
+        # 「前面那条已经落地」排的（先地址、再 DNS、再路由），越过失败继续往下写，
+        # 只会把现场搅成一半配置、一半没配置。
+        if ! _why=$( run_line "$_line" 2>&1 ); then
+            echo "ERR failed: $_line: $_why" >&2
+            exit 1
         fi
     done
-    [ "$_fail" -eq 0 ] || exit 1
     ok
     exit 0
 fi

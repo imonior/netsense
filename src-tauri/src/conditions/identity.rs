@@ -10,6 +10,34 @@
 use crate::platform::{normalize_mac, NicInfo, NicKind, NetworkPlatform};
 use serde::Serialize;
 
+/// 判定当前配置需要快照里的哪几项身份读数。
+///
+/// 它由配置反推而来（见 `Config::decision_inputs`）：只统计**启用**的 Profile 里
+/// **启用**的条件用了哪些类型。默认值取「三项都要」—— 还不知道配置要什么的时候，
+/// 宁可认作「判不动」，也不要拿一份残缺快照去拆现网。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionInputs {
+    pub ssid: bool,
+    pub gateway_mac: bool,
+    pub bssid: bool,
+}
+
+impl DecisionInputs {
+    /// 「还不知道配置要读什么」时用的那一份：三项全要。这是保守的一侧 —— 判不出
+    /// 「判得动」，引擎就不会动现网。
+    pub const EVERYTHING: Self = Self {
+        ssid: true,
+        gateway_mac: true,
+        bssid: true,
+    };
+}
+
+impl Default for DecisionInputs {
+    fn default() -> Self {
+        Self::EVERYTHING
+    }
+}
+
 /// 一次采样的结果。MAC 字段一律已归一化为小写冒号形态，下游只比字符串。
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct NetworkSnapshot {
@@ -61,14 +89,20 @@ impl NetworkSnapshot {
         }
     }
 
-    /// 这一份快照有没有读到「现在是哪个网络」的任何一项证据。
+    /// 这一份快照能不能**判得动**当前配置里的那些条件。
     ///
-    /// 三项全空**不能**读成「此刻在一个陌生网络上」：SSID 这一侧在 macOS 上只有
-    /// CoreWLAN 一个来源（命令行在 Sequoia 上全部涂黑），网关 MAC 要靠 ARP 表里恰好
-    /// 有那一条，BSSID 同理 —— 三者同时为空更常见的原因是这几次读取都没拿到东西。
+    /// 判据不是「读到过任何一项身份」，而是「条件要读的那几项都读到了」：三项身份字段
+    /// 里任何一项有值，都撑不起一个「一个 Profile 都没命中」的结论 —— Wi-Fi 打盹的那
+    /// 一轮，SSID 从 CoreWLAN 拿不到（命令行在 Sequoia 上全部涂黑），网关 MAC 却还能从
+    /// ARP 表里读到旧的那一条，于是「唯一条件是 SSID」的 Profile 被判成不匹配，兜底当场
+    /// 把正在工作的静态 IP 改成自动获取。反过来，纯有线的机器上 SSID 恒为空，那也确实
+    /// 判不出任何 SSID 型条件 —— 由 `Engine` 那边连续 N 轮之后再放行。
+    ///
     /// 引擎用它拦住「零命中 → 撤掉现网」那条处置，见 `engine::decide_plan`。
-    pub fn has_identity(&self) -> bool {
-        self.ssid.is_some() || self.gateway_mac.is_some() || self.bssid.is_some()
+    pub fn can_decide(&self, needs: DecisionInputs) -> bool {
+        (!needs.ssid || self.ssid.is_some())
+            && (!needs.gateway_mac || self.gateway_mac.is_some())
+            && (!needs.bssid || self.bssid.is_some())
     }
 
     /// 变化检测用的指纹。
@@ -118,14 +152,18 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_without_any_identity_field_is_not_an_observation() {
+    fn a_sample_without_any_identity_field_cannot_decide_anything() {
         // 现场在线（en0 仍在网卡集合里），但 SSID / 网关 MAC / BSSID 一个都没读到。
         // 这一份不是「换到了一个陌生网络」的观察，而是身份读取失败 —— 拿它判零命中，
         // 兜底就会把正在工作的静态配置拆掉（回落 DHCP、清空 DNS）。
         let s = snap(None, None, &["en0"]);
         assert!(
-            !s.has_identity(),
-            "三项身份字段全空时，这份快照不该被当成读到了网络身份"
+            !s.can_decide(DecisionInputs {
+                ssid: true,
+                gateway_mac: false,
+                bssid: false
+            }),
+            "条件要读 SSID，而这份快照里没有它"
         );
         assert!(
             s.fingerprint().contains("en0"),
@@ -134,12 +172,61 @@ mod tests {
     }
 
     #[test]
-    fn any_single_identity_field_counts_as_read() {
-        assert!(snap(Some("Office"), None, &["en0"]).has_identity());
-        assert!(snap(None, Some("aa:bb:cc:dd:ee:ff"), &["en0"]).has_identity());
-        let mut b = snap(None, None, &["en0"]);
-        b.bssid = Some("11:22:33:44:55:66".into());
-        assert!(b.has_identity(), "BSSID 单独有值也算读到了身份");
+    fn an_unread_ssid_does_not_become_a_strange_network_just_because_the_arp_table_has_one() {
+        // Wi-Fi 打盹的那一轮：CoreWLAN 报不出 SSID，ARP 表里旧网关的 MAC 却还挂着。
+        // 「读到过任何一项身份」在这里成立，而它根本判不动一条 SSID 型条件 —— 这正是
+        // 现网被误拆的那条路，所以判据按条件要读的那几项来。
+        let s = snap(None, Some("aa:bb:cc:dd:ee:ff"), &["en0"]);
+        assert!(
+            !s.can_decide(DecisionInputs {
+                ssid: true,
+                gateway_mac: false,
+                bssid: false
+            }),
+            "只有 SSID 型条件在场时，读不到 SSID 就是判不动"
+        );
+        // 同网关 MAC 才是网关 MAC 型条件要的证据，那份证据这里确实读到了
+        assert!(s.can_decide(DecisionInputs {
+            ssid: false,
+            gateway_mac: true,
+            bssid: false
+        }));
+    }
+
+    #[test]
+    fn each_identity_condition_type_needs_its_own_reading() {
+        let only_ssid = DecisionInputs {
+            ssid: true,
+            gateway_mac: false,
+            bssid: false,
+        };
+        let only_gateway = DecisionInputs {
+            ssid: false,
+            gateway_mac: true,
+            bssid: false,
+        };
+        let only_bssid = DecisionInputs {
+            ssid: false,
+            gateway_mac: false,
+            bssid: true,
+        };
+
+        // 缺的那一项只让「要读它」的配置判不动，其余两项齐全时照常放行。
+        let partial = snap(Some("Office"), Some("aa:bb:cc:dd:ee:ff"), &["en0"]);
+        assert!(partial.can_decide(only_ssid));
+        assert!(partial.can_decide(only_gateway));
+        assert!(
+            !partial.can_decide(only_bssid),
+            "BSSID 型条件要的读数，SSID 与网关 MAC 替不了"
+        );
+        assert!(
+            !partial.can_decide(DecisionInputs::EVERYTHING),
+            "三项都要时，缺 BSSID 就判不动"
+        );
+
+        let mut complete = partial.clone();
+        complete.bssid = Some("11:22:33:44:55:66".into());
+        assert!(complete.can_decide(DecisionInputs::EVERYTHING));
     }
 
     #[test]

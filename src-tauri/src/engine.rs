@@ -48,7 +48,7 @@ use serde::Serialize;
 
 use crate::automation::{self, one_shot, persistent, AllowedScripts};
 use crate::conditions::{
-    evaluate_all, eval_profile, Evaluation, NetworkSnapshot, ProfileEvaluation,
+    evaluate_all, eval_profile, DecisionInputs, Evaluation, NetworkSnapshot, ProfileEvaluation,
 };
 use crate::config::{Branch, Config, FallbackConfig, NetworkConfig, Profile, FALLBACK_ID};
 use crate::detection::{self, Scheduler};
@@ -314,10 +314,15 @@ pub struct Engine {
     /// 到期、这一轮什么都不广播，界面上挂着的仍是下发前那份快照。
     resample_wanted: bool,
     first_pass_done: bool,
-    /// 连续多少轮采样都没读到任何身份字段（SSID / 网关 MAC / BSSID 全空）。
+    /// 连续多少轮采样**判不动**当前配置的那些条件（条件要读的身份字段没读到）。
     /// 零命中要拆现网之前，用它确认「真的是一个陌生网络」而不是「这几轮什么都没读到」，
-    /// 见 `NetworkSnapshot::has_identity` 与 `Engine::no_match_is_actionable`。
-    identity_misses: usize,
+    /// 见 `NetworkSnapshot::can_decide` 与 `Engine::no_match_is_actionable`。
+    undecidable_rounds: usize,
+    /// 当前配置的判定需要快照里的哪几项读数（[`Config::decision_inputs`]）。
+    ///
+    /// 每轮评估时刷新；首份配置还没读进来时是 [`DecisionInputs::EVERYTHING`]，也就是
+    /// 「先按最严的那一侧拦着」—— 还不知道条件要读什么的时候，不拿残缺快照去拆现网。
+    decision_inputs: DecisionInputs,
     /// 当前生效的 Profile id
     active_id: Option<String>,
     /// 上次成功下发的 Profile 内容指纹（内容没变就别再弹一次授权框）
@@ -368,7 +373,8 @@ impl Default for Engine {
             last_sample: None,
             resample_wanted: false,
             first_pass_done: false,
-            identity_misses: 0,
+            undecidable_rounds: 0,
+            decision_inputs: DecisionInputs::default(),
             active_id: None,
             applied_fp: None,
             hold: false,
@@ -405,10 +411,10 @@ impl Engine {
 
     pub fn note_sampled(&mut self, snap: NetworkSnapshot, now: Instant) {
         self.last_sample = Some(now);
-        self.identity_misses = if snap.has_identity() {
+        self.undecidable_rounds = if snap.can_decide(self.decision_inputs) {
             0
         } else {
-            self.identity_misses + 1
+            self.undecidable_rounds + 1
         };
         self.snapshot = snap;
         if self.scheduler.observe(&self.snapshot, now) && self.hold {
@@ -421,17 +427,18 @@ impl Engine {
 
     /// 零命中这一判定能不能落成处置（撤销 Active、跑兜底）。
     ///
-    /// 判据不是「命中数为 0」，而是「命中数为 0，**且**这一份快照确实读到了此刻在哪个
-    /// 网络上」。三项身份字段全空时，更常见的解释是那几次读取都没拿到东西：macOS 的
-    /// SSID 只有 CoreWLAN 一个来源（命令行在 Sequoia 上全部涂黑），网关 MAC 要靠 ARP
-    /// 表里恰好有默认路由那一条，BSSID 同理。把「没读到」当成「到了一个陌生网络」的
-    /// 代价是当场拆掉现网 —— 静态 IP 变自动获取、指定 DNS 变自动，而界面上看不出是
-    /// 谁改的。
+    /// 判据不是「命中数为 0」，而是「命中数为 0，**且**这一份快照读到了判定所需要的那
+    /// 几项身份」。只要有一项没读到，「都没命中」就只是「什么都没读到」的形状：macOS 的
+    /// SSID 只有 CoreWLAN 一个来源（命令行在 Sequoia 上全部涂黑），网关 MAC 要靠 ARP 表
+    /// 里恰好有默认路由那一条，BSSID 同理 —— 而 Wi-Fi 打盹的那一轮，SSID 读不出来、旧的
+    /// 网关 MAC 还挂在表里，此时按零命中处置就是**当着正常工作的网络**拆掉现网：静态 IP
+    /// 变自动获取、指定 DNS 被清空，界面上还看不出是谁改的。
     ///
-    /// 连续空到 `UNIDENTIFIED_CONFIRMS` 轮之后就放行：那时候它已经是「这个网络读不出
-    /// 身份」的稳定事实（网线拔了、纯有线且 ARP 表空着），兜底必须照常起作用。
+    /// 判不动持续到 `UNIDENTIFIED_CONFIRMS` 轮之后就放行：那时候它已经是「这个网络给不出
+    /// 这些条件所要的证据」的稳定事实（网线拔了、纯有线却没有 SSID），兜底必须照常起作用。
     pub fn no_match_is_actionable(&self) -> bool {
-        self.snapshot.has_identity() || self.identity_misses >= UNIDENTIFIED_CONFIRMS
+        self.snapshot.can_decide(self.decision_inputs)
+            || self.undecidable_rounds >= UNIDENTIFIED_CONFIRMS
     }
 
     /// 进入「设为 DHCP」后的手动暂停：引擎不再自动评估与下发，直到下一次网络变化。
@@ -488,6 +495,10 @@ impl Engine {
 
     /// 走一轮评估并推进节律。
     pub fn evaluate(&mut self, cfg: &Config, now: Instant) {
+        // 判定需要什么证据，是**配置**决定的：只有一条 SSID 型条件的配置，读不到 SSID
+        // 就是判不动；只有网关 MAC 型条件的配置，同一份快照照样能出结论。放在这里刷新
+        // 而不是在加载配置时做，是因为采样早于评估 —— 首份配置进来之前先按最严的判。
+        self.decision_inputs = cfg.decision_inputs();
         let due = self.due(cfg, now);
         // 每重算一次判定就翻一代（审计 B2）：放锁跑 I/O 的「下发阶段」靠它辨认
         // 「我放锁前算出的计划，放锁后还是不是当前该执行的那个」。
@@ -1665,7 +1676,13 @@ fn commit_plan(
         }
         Plan::Fallback { fb, fp, fingerprint, .. } => {
             if let Some(Stage3A::Failed { reason }) = &three_a {
-                log::error(&i18n::tf("engine.fallback_failed", &[("error", reason)]));
+                let msg = i18n::tf("engine.fallback_failed", &[("error", reason)]);
+                log::error(&msg);
+                // 兜底也要出声：这一支没有 Profile 的红叉可挂，而「零命中 + 兜底没落地」
+                // 意味着现场仍是上一个网络的配置 —— 用户看不出任何名堂，只觉得网络莫名能用。
+                // Profile 那一支的「重下失败不弹」在这里不成立：兜底没有 staying 的概念，
+                // 走到这一支就说明它本该改而没改成。
+                crate::state::emit_action(state, "apply", false, msg);
                 // 3A 失败 = 3B 一条都不跑（与分支同一道硬屏障）；记档不写，
                 // 下一轮（网络或配置一变）会自动重试。
                 eng.record_fallback_failure(fp, fingerprint);
@@ -1971,6 +1988,7 @@ fn publish_status_now(state: &Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Condition, ConditionType, Rule};
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -2021,6 +2039,29 @@ mod tests {
         Profile {
             id: id.to_string(),
             name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// 一个 Profile、一条 Rule、一条**启用**的条件 —— 用来把
+    /// [`Config::decision_inputs`] 缩到「这一种证据」，判定闸门的测试只需要这个形状。
+    fn one_condition_cfg(kind: ConditionType, value: &str) -> Config {
+        Config {
+            profiles: vec![Profile {
+                id: "office".to_string(),
+                name: "office".to_string(),
+                rules: vec![Rule {
+                    id: "r1".to_string(),
+                    enabled: true,
+                    conditions: vec![Condition {
+                        id: "c1".to_string(),
+                        enabled: true,
+                        kind,
+                        value: value.to_string(),
+                    }],
+                }],
+                ..Default::default()
+            }],
             ..Default::default()
         }
     }
@@ -2303,44 +2344,70 @@ mod tests {
         );
     }
 
-    /// 一份读不到身份的快照不构成「零命中」的证据，`decide_plan` 的 NoActiveProfile
-    /// 那一支第一件事就是这个闸门：闸门不放行时既不撤销 Active，也不下发兜底。
+    /// 一份「一个 Profile 都没命中」的判定，得先由快照给出**配置里那些条件所要的**
+    /// 那几项证据，才能落成处置（撤销 Active、下发兜底）。
     ///
-    /// 不加这道判据时会发生什么：macOS 上 SSID 只有 CoreWLAN 一个来源，网关 MAC 要靠
-    /// ARP 表里恰好有默认路由那一条 —— 重连过程中的某一轮它们可以同时为空。那一份
-    /// 快照判出来就是「一个 Profile 都没命中」，于是兜底把正在工作的静态 IP 改成
-    /// 自动获取、把配置好的 DNS 清空成系统自动，而界面上一切看起来都正常。
+    /// 不加这道判据时会发生什么：macOS 的 SSID 只有 CoreWLAN 一个来源，网关 MAC 要靠
+    /// ARP 表里恰好有默认路由那一条 —— Wi-Fi 打盹的那一轮 SSID 读不出来、旧网关 MAC 还
+    /// 挂在表里，于是「唯一条件是 SSID」的 Profile 被判成不匹配，兜底当着正常工作的网络
+    /// 把静态 IP 改成自动获取、把配置好的 DNS 清空成系统自动，而界面上看不出是谁改的。
     ///
-    /// 放行条件刻意不是「永远别动」：连续空到 `UNIDENTIFIED_CONFIRMS` 轮之后必须照常
-    /// 兜底，否则真遇上读不出身份的网络（拔网线、纯有线且 ARP 空表）就再也没有落点。
+    /// 「任一项身份读到过」撑不起这个闸门（上面那一份快照恰恰读到过一项），
+    /// 「永远拦着」也不行：真遇上给不出证据的网络（拔网线、纯有线且 ARP 空表）时，
+    /// 拦住它等于兜底永久失效。所以连续判不动到 `UNIDENTIFIED_CONFIRMS` 轮就放行。
     #[test]
-    fn a_zero_match_needs_an_observed_identity_before_it_can_teardown() {
+    fn a_zero_match_needs_the_evidence_its_own_conditions_ask_for() {
         let mut eng = Engine::new();
         let t0 = Instant::now();
-        let blank = |ssid: Option<&str>| NetworkSnapshot {
-            ssid: ssid.map(|s| s.to_string()),
+        // 只有一条 SSID 型条件的配置：判不判得动，只看 SSID 读到没有。
+        eng.evaluate(&one_condition_cfg(ConditionType::WifiSsid, "Office"), t0);
+        let flap = NetworkSnapshot {
+            ssid: None,
+            // 打盹轮里网关 MAC 往往还是「上一次连通」时那一条：它有值，但它不是 SSID
+            // 条件所要的证据，拿它放行就是拿旧现场判新网络。
+            gateway_mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
             ..Default::default()
         };
 
-        // 第一项读到就够：有线网络本来就没有 SSID，网关 MAC 就是它的身份。
-        eng.note_sampled(blank(None), t0);
-        assert_eq!(eng.identity_misses, 1);
+        eng.note_sampled(flap.clone(), t0);
+        assert_eq!(eng.undecidable_rounds, 1);
         assert!(
             !eng.no_match_is_actionable(),
-            "单轮读空是读取失败的形状，不是「换了个陌生网络」的形状"
+            "单轮判不动是读取抖动的形状，不是「换了个陌生网络」的形状"
         );
-        eng.note_sampled(blank(Some("Office")), t0 + std::time::Duration::from_secs(2));
-        assert_eq!(eng.identity_misses, 0, "读到身份就要立刻清零计数");
+
+        eng.note_sampled(
+            NetworkSnapshot {
+                ssid: Some("Office".to_string()),
+                ..flap.clone()
+            },
+            t0 + std::time::Duration::from_secs(2),
+        );
+        assert_eq!(eng.undecidable_rounds, 0, "读到条件要的证据就要立刻清零计数");
         assert!(eng.no_match_is_actionable());
 
-        // 连续读空到第 `UNIDENTIFIED_CONFIRMS` 轮：认了，兜底必须还能起作用。
+        // 连续判不动到第 `UNIDENTIFIED_CONFIRMS` 轮：认了，兜底必须还能起作用。
         for i in 0..UNIDENTIFIED_CONFIRMS {
-            eng.note_sampled(blank(None), t0 + std::time::Duration::from_secs(4 + i as u64 * 2));
+            eng.note_sampled(
+                flap.clone(),
+                t0 + std::time::Duration::from_secs(4 + i as u64 * 2),
+            );
         }
         assert!(
             eng.no_match_is_actionable(),
-            "稳定读不出身份是既成事实，拦住它等于让兜底永久失效"
+            "稳定给不出 SSID 是既成事实，拦住它等于让兜底永久失效"
         );
+
+        // 反过来：条件只要网关 MAC 时，同一份「没有 SSID」的快照本来就能判 ——
+        // 纯有线机器上 SSID 恒为空，闸门若比配置所需更严，现网就永远拆不掉了。
+        let mut wired = Engine::new();
+        wired.evaluate(
+            &one_condition_cfg(ConditionType::GatewayMac, "aa:bb:cc:dd:ee:ff"),
+            t0,
+        );
+        wired.note_sampled(flap, t0);
+        assert_eq!(wired.undecidable_rounds, 0, "网关 MAC 型判定不缺证据");
+        assert!(wired.no_match_is_actionable());
     }
 
     /// 暂停里的 Profile 展示成 Suspended（前端 PAUSED），不是 ERROR：

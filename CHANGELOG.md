@@ -16,17 +16,36 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Fixed
 
-- **A polling pass can no longer dismantle a working network.** When one sample reads no network
-  identity at all — SSID, gateway MAC and BSSID all empty — the engine used to read that as "not one
-  Profile matches" and run the zero-match fallback, so a static address became DHCP-assigned and the
-  configured DNS servers were cleared to automatic, while the UI showed nobody doing it. All three being
-  empty is far more often "these reads returned nothing" than "we are on an unknown network": macOS has
-  exactly one SSID source (CoreWLAN; the CLI reads are blacked out on Sequoia), and the gateway MAC only
-  appears when that entry happens to be in the ARP table — which is precisely the shape of a sample taken
-  mid-reconnect. An uncorroborated zero match now leaves the Active profile, its health monitor and the
-  fallback untouched; two consecutive empty samples are taken as an unreadable network, and the fallback
-  works as before. Polling also waits out `change_delay_secs` when the fingerprint has just changed, so it
-  can no longer jump ahead of the settle window the event path already respects.
+- **A polling pass can no longer dismantle a working network.** A sample that had not read the network
+  identity its configured conditions ask for — SSID, gateway MAC or BSSID — used to be taken at face value
+  as "not one Profile matches", and a zero match runs the fallback: a static address became DHCP-assigned
+  and the configured DNS servers were cleared to automatic, while the UI showed nobody doing it. The check
+  is now derived from the configuration rather than fixed: a Profile whose only condition is an SSID is not
+  decided by a sample that read a gateway MAC and no SSID, which is exactly the shape of a Wi-Fi adapter
+  that has just dropped and come back — macOS has one SSID source (CoreWLAN; the CLI reads are blacked out on
+  Sequoia) and the ARP entry for the *previous* gateway tends to outlive it. An uncorroborated zero match
+  leaves the Active profile, its health monitor and the fallback untouched; rounds that keep failing to
+  decide count up to two (≈4 s at the 2 s cadence) and the fallback then works as before, so a genuinely
+  unreadable network still lands somewhere, and a wired network with no SSID to report is never held up.
+  Conditions that are disabled — and disabled Profiles — ask for nothing. Polling also waits out
+  `change_delay_secs` when the fingerprint has just changed, so it can no longer jump ahead of the settle
+  window the event path already respects.
+
+- **The editor no longer offers "DHCP-provided DNS" where it cannot happen.** A branch that pins a static
+  IPv4 address has no DHCP client to ask for nameservers, so `dns: ""` on that branch never meant
+  "automatic" — it meant "no resolver at all". `Config::validate()` now rejects that combination and
+  names the branch and the field, and the DNS select **hides** its **DHCP-provided** entry whenever that
+  branch's Configuration Type is **Manual (Static)**, so there is no ambiguity about what will be delivered.
+  A DHCP branch keeps the option: there, clearing the servers really is the state the platform displays as
+  automatic.
+
+- **macOS: "clear the DNS servers" now reaches the network service, and a refused operation says why.** The
+  passwordless channel sends one line per operation with `|` between the fields, and a POSIX shell split
+  drops a **trailing empty field** — `setdns|Wi-Fi|` (an empty server list) therefore arrived as two
+  arguments and failed its argument count, while the wrapper aborted the rest of the batch with a discarded
+  stderr: the log recorded a failure with no reason, and the operations that had already run stayed applied.
+  Clearing DNS is now its own subcommand, and a refused line is reported as the line plus the reason before
+  the batch stops there — the remaining operations are ordered on the assumption the earlier one landed.
 
 - **Linux: the status query no longer panics.** The native netlink reader resolved its answer channel with `tokio::sync::oneshot::Receiver::blocking_recv()` inside an async Tauri command, which violates the tokio contract and panicked on every status read. The channel is now a `std::sync::mpsc` receiver polled with `recv_timeout`, and the worker is guarded by `tokio::time::timeout` so a half-dead connection cannot hang the whole read path.
 - **Linux: network enumeration now compiles and runs.** `list_interfaces` failed to compile because the refactored `device_ip` returns `Option<DeviceIp>` (left unwrapped) and the sibling module `linux_nm` was referenced without an import. Both are fixed, so the Linux backend actually builds instead of being silently excluded by `cfg(linux)`.

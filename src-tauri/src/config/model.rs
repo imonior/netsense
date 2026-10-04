@@ -274,7 +274,11 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
     /// 逗号分隔的 IPv4 DNS。**三态**：缺失 = 不下发任何 DNS 操作（沿用系统现在的），
-    /// 空串 = 显式清空、交回系统自动获取，非空 = 就用这几台。
+    /// 空串 = 交回自动获取，非空 = 就用这几台。
+    ///
+    /// 「自动获取」的前提是有人在跑 DHCP 并递 DNS 过来，所以空串只在 `mode: dhcp` 那条分支里
+    /// 是一个可达成的状态；静态地址下它变成「一个 nameserver 都没有」，`validate()` 因此拒绝
+    /// `mode: manual` + 空 `dns` 的组合（三平台同构，见各 `platform::*::apply_ops`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<String>,
     #[serde(default, rename = "v6mode", skip_serializing_if = "Option::is_none")]

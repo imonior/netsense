@@ -109,6 +109,12 @@ impl PrivOp {
                 netmask,
                 gateway,
             } => format!("setmanual|{}|{}|{}|{}", svc, ip, netmask, gateway),
+            // 空列表是「清空」这条真实意图，不是「少写了几个服务器」：行格式里必须换一条
+            // 动词。`setdns|<svc>|` 那种写法过不去 —— shell 按 `|` 拆字段时会丢掉末尾的
+            // 空字段，落到脚本手里就成了 arg count 失败（见 netsense-priv.sh 的 setdnsempty）。
+            PrivOp::SetDns { svc, servers } if servers.is_empty() => {
+                format!("setdnsempty|{}", svc)
+            }
             PrivOp::SetDns { svc, servers } => format!("setdns|{}|{}", svc, servers.join(",")),
             PrivOp::SetV6Off { svc } => format!("setv6off|{}", svc),
             PrivOp::SetV6Auto { svc } => format!("setv6auto|{}", svc),
@@ -1950,6 +1956,14 @@ impl NetworkPlatform for MacPlatform {
         exec_ops(&apply_ops(&svc, p)?)
     }
 
+    /// 切回 DHCP，**并**把 DNS 交回自动获取。
+    ///
+    /// 那第二条不是重复劳动，也不能省：在 macOS 的配置库里 `DNS` 与 `IPv4` 是**平级**的两份
+    /// 设置（`NetworkServices.<uuid>` 下同时有 `IPv4` 和 `DNS` 两个字典，实测结构如此），
+    /// 所以 `-setdhcp` 只重写 `IPv4.ConfigMethod`，上一个环境钉下去的那台
+    /// `DNS.ServerAddresses` 会原样留着。省掉这条的后果是「人已离开公司网络，
+    /// 解析还打着公司内网的 DNS」，而这恰好是超时而不是报错，最难查。
+    /// 反过来，`dns` 缺失时 `apply_ops` 不产生任何 DNS 操作 —— 两者在信令上必须可区分。
     fn set_dhcp(&self) -> Result<(), String> {
         let svc = wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?;
         exec_ops(&[
@@ -2670,6 +2684,118 @@ mod tests {
                 "{name} is encoded by Rust but not whitelisted by the wrapper"
             );
         }
+    }
+
+    /// 「清空 DNS」这个意图从 Rust 的 `encode()` 一路走到 root 那一条命令：把烤进二进制的
+    /// 包装脚本落到临时文件、用一个记账用的假 `networksetup` 顶掉真命令，`--batch` 真跑一遍。
+    ///
+    /// 这条压的是**线上格式**，不是校验规则：`setdns|<svc>|` 里那个「服务器列表留空」的写法，
+    /// 在 shell 按 `|` 拆字段时会把末尾的空字段整个丢掉，落到 `exec_op` 只剩两个参数 ——
+    /// 清空在通道里根本没有写法。旧写法连原因都传不出来（那一条 `die` 被 `>/dev/null 2>&1`
+    /// 吞掉，还把整批带走），现场表现就是「配置应用了一半、失败了、没人说得清为什么」。
+    ///
+    /// 四组断言各挡一种回归：清空确实以 `Empty` 到达 `networksetup`（折回 `setdns|svc|`、或
+    /// 干脆省掉这条都会红）；非空列表逐个参数照到（新动词抢了老路）；`setdns|svc|` 仍被拒且
+    /// **原因回得来**（把 `die` 改回静默，这条红）；失败之后的操作不再执行（把停在第一条失败
+    /// 改成越过失败继续写，这条红）。
+    ///
+    /// 它挡不住真 `networksetup` 的语义，也挡不住这台机器的 sudo 策略让不让免密。
+    #[test]
+    fn the_dns_clear_survives_the_wire_format_of_the_privileged_batch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "netsense-batch-dryrun-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("no temp dir for the batch dry run");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).expect("no temp bin dir for the stub");
+        let log = dir.join("networksetup.log");
+        let stub = bin.join("networksetup");
+        std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$NETSENSE_TEST_LOG\"\n")
+            .expect("cannot stage the networksetup stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("cannot make the stub executable");
+        // 脚本把 PATH 钉死在系统目录（那是它的安全约束之一），所以只有改这一行才塞得进假
+        // 命令；其余文本与 root 那边执行的一字不差。
+        let script = dir.join("priv.sh");
+        std::fs::write(
+            &script,
+            PRIV_SCRIPT_SRC.replace(
+                "PATH=/usr/sbin:/sbin:/usr/bin:/bin",
+                &format!("PATH={}:/usr/bin:/bin", bin.display()),
+            ),
+        )
+        .expect("cannot stage the wrapper for the dry run");
+
+        // 跑一批，返回 (是否成功, stderr, 假命令记到的参数)。
+        let run = |lines: &str| -> (bool, String, String) {
+            std::fs::write(&log, "").expect("cannot reset the stub log");
+            let mut child = Command::new("/bin/sh")
+                .arg(&script)
+                .arg("--batch")
+                .env("NETSENSE_TEST_LOG", &log)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("no /bin/sh to run the batch with");
+            child
+                .stdin
+                .take()
+                .expect("no stdin for the batch")
+                .write_all(lines.as_bytes())
+                .expect("cannot feed the batch");
+            let out = child.wait_with_output().expect("batch never finished");
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+                std::fs::read_to_string(&log).unwrap_or_default(),
+            )
+        };
+
+        let clear = PrivOp::SetDns {
+            svc: "Wi-Fi".into(),
+            servers: vec![],
+        }
+        .encode();
+        let servers = PrivOp::SetDns {
+            svc: "Wi-Fi".into(),
+            servers: v(&["1.1.1.1", "8.8.8.8"]),
+        }
+        .encode();
+
+        let (ok, err, seen) = run(&format!("{clear}\n{servers}\n"));
+        assert!(ok, "clear + list batch failed: {err}");
+        assert_eq!(
+            seen,
+            "-setdnsservers\nWi-Fi\nEmpty\n-setdnsservers\nWi-Fi\n1.1.1.1\n8.8.8.8\n",
+            "清空要到达为 Empty，列表要逐个到达"
+        );
+
+        // 旧写法不是清空的替身：它得被拒，而且拒的原因要传得回来（前面垫一条正常操作，
+        // 证明报出来的那一条就是出问题的那一条）。
+        let (ok, err, seen) = run("setdhcp|Wi-Fi\nsetdns|Wi-Fi|\nsetv6off|Wi-Fi\n");
+        assert!(!ok, "`setdns|<svc>|` must not pass as a clear");
+        assert!(
+            err.contains("setdns|Wi-Fi|"),
+            "失败要点名出问题的那一行: {err}"
+        );
+        assert!(
+            err.contains("arg count"),
+            "失败原因要传回调用方，只剩一个退出码等于什么都不知道: {err}"
+        );
+        assert!(
+            !seen.contains("-setdnsservers"),
+            "被拒的那一条不许碰过 networksetup: {seen}"
+        );
+        assert!(
+            !seen.contains("-setv6off"),
+            "后面的操作是按「前面那条已落地」排的，越过失败继续写就把现场搅成一半: {seen}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// VPN 隧道在 `ifconfig` 里长得跟以太网口不一样：有的只有 `inet6`，有的干脆没地址。

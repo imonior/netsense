@@ -799,16 +799,22 @@ check("每条规则与条件都带 id（校验要求唯一）", (p?.rules || [])
 
 group("DNS 三态：缺省 ≠ 空串");
 resetSaves();
+/* 「交回系统」在静态分支上是一条后端会拒绝的组合（下一组），而保存以后编辑器会 `loadAll()`
+   重读后端那一份（office 的 THEN 是静态的）—— 所以每一次保存前都要把这一支改回 DHCP，
+   否则送出去的就是那条注定被 `validate()` 挡下的组合，payload 契约也就没在测的那条路上了。 */
+choose(byBind("then.network.mode"), "dhcp");
 choose(byActPre("dns-tri", "then."), "keep");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 check("选「不改」= 整个 dns 字段消失", p && !("dns" in p.then.network), JSON.stringify(p?.then?.network));
 resetSaves();
+choose(byBind("then.network.mode"), "dhcp");
 choose(byActPre("dns-tri", "then."), "auto");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 eq("选「交回系统」= 显式写 dns: \"\"", p?.then?.network?.dns, "");
 resetSaves();
+choose(byBind("then.network.mode"), "dhcp");
 choose(byActPre("dns-tri", "then."), "set");
 type(byBind("then.network.dns"), "192.168.1.1, 8.8.8.8");
 await h.$("btn-save").onclick();
@@ -816,6 +822,23 @@ p = saveOf("save_profile")?.payload;
 eq("选「指定」= 按输入框的值下发", p?.then?.network?.dns, "192.168.1.1, 8.8.8.8");
 eq("另一分支的三态不被牵连：else 的 dns 仍是「交回系统」",
   byActPre("dns-tri", "else.")?.children.find((c) => c.selected)?.value, "auto");
+
+group("静态地址这一支没有「DHCP 提供」这个选项");
+resetSaves();
+// 静态地址没有 DHCP 客户端可以问，`dns:""` 下发下去的结果是「一个 nameserver 都没有」，
+// 不是「自动」：所以这个选项在 mode=manual 的分支上完全不出现。后端那一半由 Rust 测试
+// config::tests::automatic_dns_is_only_an_option_on_the_dhcp_branch 守着，两边口径一致。
+const hasDhcpOption = (pre) => {
+  const sel = byActPre("dns-tri", pre);
+  if (!sel) return false;
+  return Array.from(sel.children).some((c) => c.value === "auto");
+};
+check("THEN 是静态地址：「DHCP 提供」这项不出现", !hasDhcpOption("then."));
+check("ELSE 向 DHCP 要地址：同一项照旧存在（存不存在只看这条分支自己的 mode）", hasDhcpOption("else."));
+// 换回 DHCP 以后必须重新出现，否则这道门就成了「静态分支再也改不回去」的死路。
+choose(byBind("then.network.mode"), "dhcp");
+check("把 IPv4 换回 DHCP，同一项立刻出现", hasDhcpOption("then."));
+choose(byBind("then.network.mode"), "manual");
 
 group("THEN / ELSE 同时呈现，改一支不会牵动另一支");
 check("ELSE 的那一块里没有 THEN 的动作卡", byBind("else.one_shot.0.action.app") === null);
@@ -827,11 +850,17 @@ type(byBind("else.network.ip"), "10.10.0.20");
 // 证明不了任何契约。
 type(byBind("else.network.netmask"), "255.255.255.0");
 type(byBind("else.network.gateway"), "10.10.0.1");
+// 同理，ELSE 原本带着 `dns: ""`（向 DHCP 交回），改成静态地址以后这一项就不成立了，
+// 留着它整份配置会被 `validate()` 拒绝 —— 这一句是界面上要用户做的那个选择。
+choose(byActPre("dns-tri", "else."), "set");
+type(byBind("else.network.dns"), "10.10.0.1");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 eq("ELSE 改成了静态地址",
   [p?.else?.network?.mode, p?.else?.network?.ip, p?.else?.network?.netmask, p?.else?.network?.gateway],
   ["manual", "10.10.0.20", "255.255.255.0", "10.10.0.1"]);
+eq("静态分支的 DNS 换成明确指定的服务器（不再是交回自动的那个空串）",
+  p?.else?.network?.dns, "10.10.0.1");
 eq("ELSE 分支保留自己的删除路由", p?.else?.network?.routes, [{ dest: "10.0.0.0/8", metric: 0, delete: true }]);
 eq("THEN 的动作一条没少（改 ELSE 不会把 THEN 挤掉）",
   p?.then?.one_shot?.map((a) => a.id), ["a1", "a2", "a3", "a4"]);

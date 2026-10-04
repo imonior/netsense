@@ -103,6 +103,34 @@ impl Config {
         self.profiles.iter_mut().find(|p| p.id == id)
     }
 
+    /// 判定这份配置需要身份快照里的哪几项读数。
+    ///
+    /// 只统计**启用**的 Profile 里**启用**的条件 —— 禁用的条件本来就参与不了判定。
+    /// `network_interface` 不在这里出现：它比的是「在用的网卡集合」，那是个列表而不是
+    /// 一项可能读空的身份证据，读空本身就是「没有网卡在用」这个结论。
+    pub fn decision_inputs(&self) -> crate::conditions::identity::DecisionInputs {
+        use crate::conditions::identity::DecisionInputs;
+        use crate::config::model::ConditionType;
+        let mut need = DecisionInputs {
+            ssid: false,
+            gateway_mac: false,
+            bssid: false,
+        };
+        for p in self.profiles.iter().filter(|p| p.enabled) {
+            for r in p.rules.iter().filter(|r| r.enabled) {
+                for c in r.conditions.iter().filter(|c| c.enabled) {
+                    match c.kind {
+                        ConditionType::WifiSsid => need.ssid = true,
+                        ConditionType::GatewayMac => need.gateway_mac = true,
+                        ConditionType::Bssid => need.bssid = true,
+                        ConditionType::NetworkInterface => {}
+                    }
+                }
+            }
+        }
+        need
+    }
+
     /// 结构性校验：把「加载后必然出错」的配置项在落盘前就拦住。
     ///
     /// 注意它**不**判断「能不能匹配上」—— 没有有效条件的 Profile 是合法的，
@@ -398,11 +426,20 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
         }
     }
     if let Some(dns) = &n.dns {
-        for part in dns.split(',') {
-            let t = part.trim();
-            if t.is_empty() {
-                continue;
-            }
+        let servers: Vec<&str> = dns
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // 「自动获取 DNS」只有在这条分支本身就问 DHCP 要地址时才是一个真状态：静态地址下
+        // 没有任何一方会递来 nameserver，清空的结果是**一个都拿不到**，而不是「自动」。
+        // 三平台同构 —— macOS 的 `-setdnsservers … Empty` 就是系统设置里的「自动」，但它依赖
+        // DHCP 客户端在跑；Windows 的 `source=dhcp` 同样要有租约可跟；NetworkManager 清掉
+        // `ipv4.dns` 之后也只有 `method=auto` 才从租约里收 DNS。
+        if servers.is_empty() && n.mode == Mode::Manual {
+            return Err(i18n::tf("cfg.net_manual_auto_dns", &what1));
+        }
+        for t in servers {
             if !is_ipv4(t) {
                 return Err(i18n::tf("cfg.net_bad_dns", &[("what", what), ("dns", t)]));
             }
@@ -508,6 +545,39 @@ mod tests {
         assert!(err.contains("c1"), "报错要指向出问题的那条条件: {}", err);
     }
 
+    /// 「判定需要哪几项身份读数」是从配置**反推**出来的，反推时只数启用的那些 ——
+    /// 和求值侧同一条「禁用 ≠ 通配」。停用的条件要是也算进需求，闸门就会被一份根本不读的
+    /// 条件武装起来：零命中每次都要多等 `UNIDENTIFIED_CONFIRMS` 轮才落成处置，而这份配置
+    /// 什么时候都不需要那一项证据。
+    #[test]
+    fn decision_inputs_only_count_enabled_conditions() {
+        dicts_ready();
+        let cfg = Config::from_json(
+            r#"{"schema":1,"profiles":[
+              {"id":"a","name":"A","rules":[
+                {"id":"r1","conditions":[
+                  {"id":"c1","type":"wifi_ssid","value":"X"},
+                  {"id":"c2","type":"gateway_mac","value":"AA:BB:CC:DD:EE:FF","enabled":false},
+                  {"id":"c3","type":"network_interface","value":"en0"}]},
+                {"id":"r2","enabled":false,"conditions":[
+                  {"id":"c4","type":"bssid","value":"11:22:33:44:55:66"}]}]},
+              {"id":"b","name":"B","enabled":false,"rules":[{"id":"r3","conditions":[
+                  {"id":"c5","type":"gateway_mac","value":"11:22:33:44:55:66"}]}]}]}"#,
+        )
+        .unwrap();
+        let need = cfg.decision_inputs();
+        assert!(need.ssid, "启用条件里唯一要的读数就是 SSID");
+        assert!(!need.gateway_mac, "停用条件与停用 Profile 都不构成需求");
+        assert!(!need.bssid, "停用 Rule 里的条件同样不算");
+
+        // 没有任何条件在场时，什么都判得动 —— 闸门不许变成「永远拦着」。
+        let none = Config::default().decision_inputs();
+        assert!(
+            !none.ssid && !none.gateway_mac && !none.bssid,
+            "没有启用条件时不得要求任何身份读数"
+        );
+    }
+
     #[test]
     fn manual_network_needs_full_ipv4_settings() {
         dicts_ready();
@@ -517,6 +587,63 @@ mod tests {
         let cfg = Config::from_json(raw).unwrap();
         let err = cfg.validate().expect_err("manual 缺 netmask/gateway 必须报错");
         assert!(err.contains("netmask"), "报错内容: {}", err);
+    }
+
+    /// 「自动获取 DNS」要有 DHCP 客户端在跑才有东西可跟，所以它只在 `mode: dhcp` 那条分支上是
+    /// 一个可达成的状态。静态地址 + 空 `dns` 下发出去是「一个 nameserver 都没有」，而现场长得
+    /// 像网络坏了 —— 这种配置不该等到跑起来才发现。
+    #[test]
+    fn automatic_dns_is_only_an_option_on_the_dhcp_branch() {
+        dicts_ready();
+        let manual_auto = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
+          "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
+          "then":{"network":{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
+            "gateway":"10.0.0.254","dns":""}}}]}"#;
+        let err = Config::from_json(manual_auto)
+            .unwrap()
+            .validate()
+            .expect_err("静态地址 + 自动 DNS 必须被拒绝");
+        // 断言用两个字面量而不是整句英文：报错要在五语下都指得出「是 dns 这一半和 manual 这一半
+        // 撞了」，而这条配置其余字段都齐全，别的规则都不会先响。
+        assert!(
+            err.contains("dns") && err.contains("mode=manual"),
+            "报错要同时点名 dns 与 mode=manual: {}",
+            err
+        );
+
+        // 只剩分隔符的值在拆分后同样是空的，走的是同一条清空路径，就得撞同一道闸。
+        let noisy = manual_auto.replace("\"dns\":\"\"", "\"dns\":\" , \"");
+        assert!(
+            Config::from_json(&noisy).unwrap().validate().is_err(),
+            "只剩分隔符的 dns 也是一次清空，同样要拦"
+        );
+
+        // 反面必须放行，否则这条闸门就是在拦掉正确写法：
+        // 兜底用的就是 `mode: dhcp` + `dns: ""`（`-setdhcp` 不会自己带走上一个环境的 DNS）。
+        let dhcp_auto = r#"{"schema":1,"profiles":[],
+          "fallback":{"network":{"mode":"dhcp","dns":""}}}"#;
+        Config::from_json(dhcp_auto)
+            .unwrap()
+            .validate()
+            .expect("dhcp + 空 dns 才是「交回自动获取」的写法");
+
+        // 静态 + 明确指定 / 静态 + 键缺失（别碰 DNS）都照旧合法。两份都在上面那份已被接受的
+        // 配置上改一处得来，避免手抄括号数把「合法用例」测成解析失败。
+        for (raw, why) in [
+            (
+                manual_auto.replace("\"dns\":\"\"", "\"dns\":\"10.0.0.53\""),
+                "静态 + 指定 DNS",
+            ),
+            (
+                manual_auto.replace(",\"dns\":\"\"", ""),
+                "静态 + 键缺失（不动 DNS）",
+            ),
+        ] {
+            Config::from_json(&raw)
+                .unwrap_or_else(|e| panic!("{why} 必须能解析: {e}"))
+                .validate()
+                .unwrap_or_else(|e| panic!("{why} 必须通过校验: {e}"));
+        }
     }
 
     #[test]

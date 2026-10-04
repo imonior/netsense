@@ -936,7 +936,10 @@
     }
     html += `<div class="group-title">${esc(t("editor.dns_config"))}</div>` +
       row("editor.config_type", `<select data-act="dns-tri" data-pre="${pre}">` +
-        [["keep", t("editor.keep_unchanged")], ["auto", t("editor.system_auto")], ["set", t("editor.dns_servers")]]
+        (manual
+          ? [["keep", t("editor.keep_unchanged")], ["set", t("editor.dns_servers")]]
+          : [["keep", t("editor.keep_unchanged")], ["auto", t("editor.dhcp_provided")], ["set", t("editor.dns_servers")]]
+        )
           .map(([v, l]) => `<option value="${v}" ${dnsState === v ? "selected" : ""}>${esc(l)}</option>`).join("") +
         `</select>`) +
       /* 输入框在 auto/set 两态都画出来：数据上「指定但还没填」就是 `""`，

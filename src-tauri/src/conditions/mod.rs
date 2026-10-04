@@ -10,4 +10,4 @@ pub mod identity;
 pub use evaluator::{
     eval_profile, evaluate_all, Evaluation, ProfileEvaluation, RuleReport,
 };
-pub use identity::NetworkSnapshot;
+pub use identity::{DecisionInputs, NetworkSnapshot};

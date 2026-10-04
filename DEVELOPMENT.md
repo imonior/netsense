@@ -285,18 +285,25 @@ Rule    = (all *enabled* Conditions ANDed)
   regression test `engine::tests::conflict_never_picks_a_winner` is there to keep it that way.
 - Manual "Apply now" (`engine::manual_apply`) re-evaluates *that Profile's own* conditions — it is not a
   bypass. It refuses a disabled Profile, and refuses during a conflict with `engine.conflict_blocked`.
-- **A zero match only tears the network down once the snapshot has actually identified a network**
-  (`NetworkSnapshot::has_identity` → `Engine::no_match_is_actionable`, checked first thing in the
-  `NoActiveProfile` arm of `engine::decide_plan`). All three identity fields empty is much more often
-  "this round of reads returned nothing" than "we are on an unknown network": on macOS the SSID has exactly
-  one source (CoreWLAN — the CLI reads are blacked out on Sequoia), the gateway MAC needs that one entry to
-  happen to be in the ARP table, and the BSSID likewise. Acting on a single such round leaves the user
-  connected to a working network whose static address has been replaced by DHCP and whose DNS has been
-  cleared to automatic, with nothing in the UI saying who did it. So an uncorroborated zero match neither
-  deactivates the Active profile nor stops its health monitor nor applies `fallback`. It stops being
-  protective if it blocks forever, so `UNIDENTIFIED_CONFIRMS` consecutive empty samples (≈4 s at the 2 s
-  sampling cadence) are treated as established fact and `fallback` runs as before. Pinned by
-  `a_zero_match_needs_an_observed_identity_before_it_can_teardown`. The detection layer closes the same door
+- **A zero match only tears the network down once the snapshot has read what the enabled conditions ask
+  for** (`Config::decision_inputs` → `NetworkSnapshot::can_decide` → `Engine::no_match_is_actionable`,
+  checked first thing in the `NoActiveProfile` arm of `engine::decide_plan`). The requirement is derived
+  from the config rather than fixed: a Profile whose only condition is an SSID is *not* decided by a sample
+  that read a gateway MAC. That shape is much more often "this round of reads returned nothing" than "we are
+  on an unknown network": on macOS the SSID has exactly one source (CoreWLAN — the CLI reads are blacked out
+  on Sequoia), the gateway MAC needs that one entry to happen to be in the ARP table, and the BSSID likewise
+  — and mid-reconnect the SSID can go missing while the **previous** network's gateway MAC is still in the
+  table, which is a sample that carries an identity and still decides nothing. Acting on one such round
+  leaves the user connected to a working network whose static address has been replaced by DHCP and whose
+  DNS has been cleared to automatic, with nothing in the UI saying who did it. So an undecided zero match
+  neither deactivates the Active profile nor stops its health monitor nor applies `fallback`. It stops being
+  protective if it blocks forever — a wired network never reports an SSID — so
+  `UNIDENTIFIED_CONFIRMS` consecutive rounds that cannot decide (≈4 s at the 2 s sampling cadence) are
+  treated as established fact and `fallback` runs as before, and a config whose conditions ask for no
+  identity reading at all (interface-only) is never held back. Pinned by
+  `engine::tests::a_zero_match_needs_the_evidence_its_own_conditions_ask_for`,
+  `config::tests::decision_inputs_only_count_enabled_conditions` and the `can_decide` cases in
+  `conditions::identity`. The detection layer closes the same door
   from the other side: a due **poll** now waits out `change_delay_secs` when the fingerprint changed
   recently (`a_due_poll_yields_while_the_network_is_still_flapping`) — the event path already settled, and
   polling must not be the back door around it.
@@ -427,11 +434,24 @@ Key modelling points, each of which is easy to get wrong:
   deliberate exception: the fallback path clears DNS explicitly, because there "no longer pin anything"
   *is* the desired state — and that visible, hard-to-explain consequence is exactly why the zero-match
   gate in §5 has to be sure the network was really read before it runs this line.
+- **"Cleared" and "automatic" are the same wire operation, but "automatic" is only a state where some
+  client is supplying the servers.** All three platforms express "ask the system" the same way as "none
+  pinned": macOS `-setdnsservers <svc> Empty`, Windows `source=dhcp`, Linux `ipv4.dns ""`. On a
+  `mode: dhcp` branch that is exactly true — the DHCP client hands back whatever the lease carries. On a
+  `mode: manual` branch there is no client to ask, and the same three commands produce **zero**
+  nameservers: the reading "automatic" is a fiction, and the state the user picked is the one state the
+  configuration cannot deliver. So `validate()` refuses `manual` + empty `dns` (`cfg.net_manual_auto_dns`),
+  and the editor greys that option out on the static branch for the same reason — a config that loads and
+  then silently has no resolver is worse than one that is refused on save.
+  The flip side is why `set_dhcp()` keeps its explicit clear: macOS keeps `DNS` and `IPv4` as **sibling**
+  dictionaries on a NetworkService, so `-setdhcp` rewrites the IPv4 dict and leaves a pinned server list
+  standing — every DHCP service on a healthy host reads back `DNS = None`, which is what "automatic" looks
+  like from the outside.
 - **Routes live in 3A**, not in the automation list: a route that failed to land must not let the rest of
   the automation run. Inside 3A it is covered by Apply+Verify and blocks 3B when it fails.
 - `Config::validate()` rejects structurally-broken configs before they reach disk (empty/duplicate ids,
   a Profile with no Rule, an empty Rule, a condition with an empty value, `manual` without ip/netmask/gateway,
-  non-IPv4 DNS, routes without a gateway unless `delete`). It also checks the 3B/health **payloads**, because a
+  non-IPv4 DNS, `dns: ""` on a `manual` branch (the modelling point above), routes without a gateway unless `delete`). It also checks the 3B/health **payloads**, because a
   half-filled action fails as "nothing happened" rather than as an error: action `id`s must be unique across a
   branch's `one_shot` **and** `persistent` together (`EngineView.last_run` and `EngineView.workers` find their
   card by id, so a collision would report two actions as one), `launch_app.app` / `run_script.path` / `set_default_printer.printer` / `periodic_script.path` /
@@ -595,7 +615,9 @@ GUI process (unprivileged) ──sudo -n──▶ /usr/local/libexec/netsense-pr
 
 - **Structured operations**: the Rust side only constructs `PrivOp` (`SetManual/SetDhcp/SetDns/SetV6*/RouteAdd/RouteDelete`), encodes it via `PrivOp::encode()` into an `op|arg1|arg2` line, and feeds the script's `--batch` mode over stdin in one shot.
   **User input is never interpolated into a shell command** under any circumstance, eliminating command injection.
+- **The line format cannot carry an empty last field, so an empty value gets its own verb.** `run_line` splits on `|` with `IFS`, and a POSIX shell split **drops a trailing empty field**: `setdns|Wi-Fi|` arrives at `exec_op` as two arguments, indistinguishable from a malformed line. "Clear the DNS servers" is therefore its own subcommand (`setdnsempty|<svc>` → `-setdnsservers <svc> Empty`) rather than an empty server list, and `setdns` rejects an empty list with its own reason. The same trap applies to any future verb whose last argument may be empty. `platform::macos::tests::the_dns_clear_survives_the_wire_format_of_the_privileged_batch` runs the embedded script end-to-end against a recording stub.
 - **Script-side second check**: `scripts/netsense-priv.sh` validates the shape of each argument (IPv4 octet 0–255 and rejects leading zeros, prefix 0–128, route target `a.b.c.d[/len]`, DNS as comma-separated IPv4 set, service name non-empty and not starting with `-`); unknown subcommands are rejected outright.
+- **A rejected line reports its reason and stops the batch.** Each line runs inside a command substitution, so the `die` on a bad argument ends *that line* instead of exiting the script with an empty stderr, and the loop prints `ERR failed: <line>: <why>` before exiting non-zero. The two halves answer two different failures: a swallowed reason turns "the batch failed" into a log line that says nothing about which operation or why, and continuing past a failure would apply operations that were ordered on the assumption the earlier one landed — address first, then DNS, then routes — leaving the interface half-configured.
 - **One read-only query, same allow-list discipline**: `tunowner <dev>` prints the executable path of the process currently holding `/var/run/wireguard/<dev>.sock`, which is how a tray card can name the *software* behind a tunnel instead of stopping at "WireGuard" (§16). Unprivileged processes can see the socket file (the run directory is world-readable) but never who holds it: the socket itself is `0700` and the holder is a root process, whose fds an unprivileged `lsof` cannot enumerate — and it prints nothing but an empty list rather than an error, so "no holder" and "I am not allowed to look" are indistinguishable from below. The subcommand writes nothing, takes one argument, and validates it as an interface name (`[A-Za-z0-9]{1,16}`) before touching the filesystem — `/`, `.` and whitespace are excluded so no caller can steer the path anywhere else — and exits non-zero when there is no socket or no holder, because the caller's only contract is "no answer beats a guessed one". It is deliberately **not** reachable through `--batch` (that path returns `OK` and drops stdout). On the Rust side `tunnel_owner()` returns `None` without spawning anything unless the channel is ready, and caches per device for 30 s — both the answer and the absence of one — so a 2 s NIC-refresh rhythm never puts a root subprocess behind every repaint.
 - **Readiness means "the script that is installed is the script this binary shipped"**: `priv_channel()` compares the bytes at `/usr/local/libexec/netsense-priv.sh` against the embedded copy and only reports *direct* on an exact match. Existence alone would be enough for the write operations, but not for this: `allow_list_takes()` mirrors **one version** of the argument rules, and a new whitelisted subcommand would never arrive on machines that installed the old one. The cost is stated plainly: after an upgrade that changed the wrapper, the first configuration apply shows the same one auth prompt a fresh install shows, and that prompt swaps the channel for the current version; every later apply stays passwordless.
 - **A script that is there but is not this one reports *outdated*, and the settings window says so separately** (`PrivChannel`, `platform.rs`). Executing does not branch on it — `exec_ops` sends both `prompt` and `outdated` through the bootstrap path, which is the one prompt that also swaps the script. What differs is what the user is told and what they can act on: "each change asks for authorization" is false in this state (the sudoers line is still there, so it is one prompt and then passwordless again), and there is a netsense rule on the machine worth a remove button. The button appears for `direct` **and** `outdated` — waiting for the next apply would replace the script and close that window. Windows and Linux never report it: their passwordlessness is "am I elevated" and "does `sudo -n` work", neither of which is a versioned file to compare against.
@@ -880,7 +902,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **530 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **531 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1137,19 +1159,23 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   slightly per OS because a handful of PAL tests are `#[cfg]`-gated, so it is deliberately not pinned here:
   `config` (example config loads & validates, an unrecognised schema is rejected with an actionable
   message, serde tags the editor
-  emits, validation rules — including action payloads and health timing — and the else-branch persistent
-  warning),
+  emits, validation rules — including action payloads, health timing and the rule that "hand DNS back to
+  the system" is only a state on a branch whose address comes from DHCP — the else-branch persistent
+  warning, and the identity readings `decision_inputs` derives from the **enabled** conditions only),
   `conditions::evaluator` (Rules OR / enabled-Conditions AND / disabled Profile still reports rule states /
   MAC normalization / interface condition checks **all** live NICs / `evaluate_all` collects every match
   without choosing), `conditions::identity` (fingerprint notices gateway & interface changes, and a sample
-  whose SSID / gateway MAC / BSSID are all empty is **not** an observation of "some other network"),
+  decides only when it carries the readings its conditions ask for — an all-empty sample is **not** an
+  observation of "some other network", and an unread SSID does not become one just because the ARP table
+  still has the previous gateway MAC),
   `detection` (per-Profile delay isolation, events-only vs events+polling vs polling-only cadence,
   a due poll yielding while the fingerprint is still inside `change_delay_secs`, first pass always due,
   timer reset),
   `engine::decide` (0 / 1 / 2+ → `no_active_profile` / `active` / `conflict`, **conflict never picks a
   winner**, stable tagged serialization),
-  `engine` zero-match corroboration (an unread identity blocks the teardown for exactly as many samples as
-  `UNIDENTIFIED_CONFIRMS` allows, and one field read flips it back),
+  `engine` zero-match corroboration (a sample that cannot decide the enabled conditions blocks the teardown
+  for exactly as many rounds as `UNIDENTIFIED_CONFIRMS` allows, one needed reading flips it back, and a
+  gateway-MAC-only config is never blocked by the missing SSID of a wired machine),
   `engine` run attribution + **layering** (a `Partial`/`Failed` run leaves Active untouched, only a 3A
   failure clears Active and yields ERROR, and an ERROR never bleeds into a Conflict on another Profile),
   `engine` resample handover (a forced resample governs **exactly one** pass: nothing is owed one when no
@@ -1181,7 +1207,10 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   OS token, architecture never traded for a package that cannot install), `i18n` (parity / fallback chain / placeholder substitution).
 - **Frontend**: `scripts/editor-smoke.mjs` loads `editor.html`'s script into a `vm` context with a stubbed
   DOM and a fake `window.__TAURI__`, then drives render → input → click and asserts the binding rules that
-  are invisible to every other layer (absent ≠ empty for the tri-state `dns`, disabled actions must drop out
+  are invisible to every other layer (absent ≠ empty for the tri-state `dns`, and the "hand it back to the
+  system" entry of that select is greyed out exactly when the branch pins a static address — the same
+  combination `validate()` refuses, so the two halves of the gate are held to each other here),
+  disabled actions must drop out
   of the pre-apply plan while the rest keep the order they are listed in, a card's ↑/↓ buttons rewrite only
   that array order and cannot reach across branches or between the
   one-shot and persistent lists, a status broadcast must not rebuild
@@ -1197,7 +1226,13 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   `save_profile` / `save_global` payloads it sent; CI runs the assertions in the `validate` job and
   re-runs the script in each build leg to produce that dump, which the config test
   `config::tests::payloads_the_editor_actually_sends_are_the_ones_serde_accepts` replays through the
-  same upsert + `validate()` path `ipc.rs` uses. That receiving end is the point: serde accepts
+  same upsert + `validate()` path `ipc.rs` uses. **A new rule in `validate()` therefore re-opens every
+  payload this harness ever emits**, so regenerate the dump and run that one test locally before pushing
+  (`node scripts/editor-smoke.mjs --write-fixtures <absolute path>`, then
+  `NS_EDITOR_FIXTURES=<same absolute path> cargo test payloads_the_editor`): that is precisely where a
+  save the browser renders happily reads as a rejected config on the receiving side. (The harness's save
+  path then calls `loadAll()` and re-reads the stub backend's untouched copy, so a field set before a save
+  does not survive it — set it again for each save.) That receiving end is the point: serde accepts
   unknown fields and its action enums are internally tagged, so a mistyped `type`
   on the frontend breaks the whole config at load time instead of surfacing a validation warning.
 - **Lints**: `cargo clippy --all-targets -- -D warnings`, run in **each build leg** rather than once in

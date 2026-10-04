@@ -17,7 +17,9 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 编辑器的界面结构是**有意的**，改动前先读 `DEVELOPMENT.md` §5–§8：Rules 之间 OR、Rule 内
 **已启用** Conditions 之间 AND、禁用条件永不算命中、`""` 与「字段缺失」含义不同
 （DNS 因此是三态下拉而不是一个输入框：「保持不变」= 删掉 `dns` 键，「自动获取」= 空串，
-两端都按这个口径解释，见 §6）。
+两端都按这个口径解释，见 §6）。**「系统自动获取」只在这条分支向 DHCP 要地址时才是一个真状态**：
+静态地址没有任何东西会递 nameserver 过来，下发下去得到的是「一个都拿不到」，所以这一项在该分支的
+「配置类型」选了 `Manual (静态绑定)` 时置灰，`Config::validate()` 用同一句理由拒绝这条组合。
 把这些语义「简化」掉是本项目最容易复发的一类倒退。
 
 另有五条是版面，但同样是有意的取舍：
@@ -98,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 530 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 531 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
