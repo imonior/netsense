@@ -12,6 +12,7 @@
 
 use crate::config::NetworkConfig;
 use serde::Serialize;
+use std::net::Ipv4Addr;
 use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -134,9 +135,10 @@ type NicCacheEntry = (Instant, Vec<NicInfo>);
 ///
 /// 传进来的 `sample` 只在缓存缺失/过期时才被调用，因此各平台实现可以放心地在里面
 /// 做 I/O。
+static NIC_CACHE: OnceLock<Mutex<Option<NicCacheEntry>>> = OnceLock::new();
+
 pub(crate) fn cached_nics<F: FnOnce() -> Vec<NicInfo>>(sample: F) -> Vec<NicInfo> {
-    static C: OnceLock<Mutex<Option<NicCacheEntry>>> = OnceLock::new();
-    let cell = C.get_or_init(|| Mutex::new(None));
+    let cell = NIC_CACHE.get_or_init(|| Mutex::new(None));
     {
         let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, list)) = guard.as_ref() {
@@ -148,6 +150,96 @@ pub(crate) fn cached_nics<F: FnOnce() -> Vec<NicInfo>>(sample: F) -> Vec<NicInfo
     let fresh = sample();
     let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
+/// 丢掉 [`cached_nics`] 的快照。
+///
+/// 本机网卡集合被本进程改动（接/断隧道、开关 Wi-Fi 接口）之后调用，使下一次 `list_interfaces`
+/// 立刻重新采样，而不是在 [`NIC_LIST_TTL`] 内一直用旧名单（旧名单会让「主网卡」「隧道归属」
+/// 这类判据对着过时的接口做决定）。
+pub(crate) fn invalidate_nics() {
+    if let Some(cell) = NIC_CACHE.get() {
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// 静态枚举类读取的缓存 TTL。
+///
+/// 与 [`NIC_LIST_TTL`]（几秒量级）刻意不是一个量级：已装程序、打印机、已知网络这三项
+/// 在几分钟内不会因为用户的任何操作而变化，而它们各自的代价是**一整个子进程的冷启动**
+/// —— Windows 上尤其明显，PowerShell 5.1 的启动叠上 CIM / 模块加载，单项就到一两秒。
+/// 编辑器开屏把这几项和状态快照一起并发拉出去，那几秒全部落在用户「点开窗口到能用」
+/// 的等待里，而它们回答的是几分钟内不会变的问题。
+///
+/// 取两分钟而不是更长：装一个新程序、接一台新打印机之后，用户有理由期望下一次刷新就
+/// 看到它；超过两分钟还看不到，第一反应会是「软件坏了」而不是「再等等」。
+const ENUM_CACHE_TTL: Duration = Duration::from_secs(120);
+
+/// 三个枚举缓存各自的存储单元。抽出来只是为了不让 `static` 声明处挂一串嵌套泛型 ——
+/// 与 `NicCacheEntry` 同一个理由。
+type AppCacheCell = Mutex<Option<(Instant, Vec<AppEntry>)>>;
+type PrinterCacheCell = Mutex<Option<(Instant, Vec<PrinterInfo>)>>;
+type SsidCacheCell = Mutex<Option<(Instant, Vec<String>)>>;
+
+/// 带 TTL 的已装程序清单。
+///
+/// **空结果不进缓存**：它既可能是「这台机器真的一条都没有」，也可能是脚本没起来 ——
+/// `list_installed_apps` 把后者同样收敛成空数组（那条路径只记日志）。缓存一次失败，
+/// 之后两分钟里每次下拉都是空的，而界面因此说的是「这台机器没装东西」，错得更彻底。
+pub(crate) fn cached_apps(plat: &Platform) -> Vec<AppEntry> {
+    static C: OnceLock<AppCacheCell> = OnceLock::new();
+    let cell = C.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = guard.as_ref() {
+            if at.elapsed() < ENUM_CACHE_TTL {
+                return v.clone();
+            }
+        }
+    }
+    let fresh = plat.list_installed_apps();
+    if !fresh.is_empty() {
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+/// 带 TTL 的打印机清单。空结果不进缓存，理由同 [`cached_apps`]。
+pub(crate) fn cached_printers(plat: &Platform) -> Vec<PrinterInfo> {
+    static C: OnceLock<PrinterCacheCell> = OnceLock::new();
+    let cell = C.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = guard.as_ref() {
+            if at.elapsed() < ENUM_CACHE_TTL {
+                return v.clone();
+            }
+        }
+    }
+    let fresh = plat.list_printers();
+    if !fresh.is_empty() {
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+/// 带 TTL 的已知网络（SSID）清单。空结果不进缓存，理由同 [`cached_apps`]。
+pub(crate) fn cached_known_ssids(plat: &Platform) -> Vec<String> {
+    static C: OnceLock<SsidCacheCell> = OnceLock::new();
+    let cell = C.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = guard.as_ref() {
+            if at.elapsed() < ENUM_CACHE_TTL {
+                return v.clone();
+            }
+        }
+    }
+    let fresh = plat.list_known_ssids().unwrap_or_default();
+    if !fresh.is_empty() {
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), fresh.clone()));
+    }
     fresh
 }
 
@@ -185,11 +277,15 @@ pub(crate) fn cached_status<F: FnOnce() -> InterfaceStatus>(sample: F) -> Interf
 }
 
 /// 丢掉 [`cached_status`] 里的快照（网络被本进程改动之后）。
+///
+/// 同时清掉 [`cached_nics`]：隧道起停、接口开关这类改动如果只清状态缓存，网卡名单还会在
+/// [`NIC_LIST_TTL`] 内用旧的，于是 3A 读回、主网卡判据都对着过时的接口做决定。
 #[allow(dead_code)] // 调用方同上
 pub(crate) fn invalidate_status() {
     if let Some(cell) = STATUS_CACHE.get() {
         *cell.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
+    invalidate_nics();
 }
 
 /// 网卡名是否属于典型的隧道/VPN 设备。
@@ -1034,6 +1130,80 @@ pub(crate) fn extract_mac(line: &str) -> Option<String> {
     None
 }
 
+/// 宽松 MAC 提取：在任意文本行里找出第一个「6 组、每组 1~2 个十六进制数字、以 `:` 或 `-`
+/// 分隔」的串，并归一化成标准 `XX:XX:XX:XX:XX:XX`（小写、每组 2 位）。
+///
+/// 比 [`extract_mac`] 多处理一种情形：macOS `arp -n` 会把每组的前导零吞掉
+/// （`00:50:56:c0:00:08` 打印成 `0:50:56:c0:0:8`），而那种 MAC 的首字节 `0` 往往跟在前
+/// 面的 `? (192.168.1.1) at ` 文本里、和 IP 数字同处一个 `:` 分组，那种「按整行 `:` 分段
+/// 补零」的做法补不到它，于是 `gateway_mac` 条件对这一类 OUI 永远解析不出来。这里用字节
+/// 窗口扫描，MAC 的 6 组形态独立成串即可命中，不受周围文本干扰；每组各自补到 2 位，
+/// 因此 `0:50:56:c0:0:8` 稳定还原成 `00:50:56:c0:00:08`。
+pub(crate) fn extract_mac_loose(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let n = bytes.len();
+    for i in 0..n {
+        if !bytes[i].is_ascii_hexdigit() {
+            continue;
+        }
+        let mut j = i;
+        let mut groups: Vec<&[u8]> = Vec::with_capacity(6);
+        let mut ok = true;
+        for k in 0..6 {
+            let start = j;
+            while j < n && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            let g = &bytes[start..j];
+            if g.is_empty() {
+                ok = false;
+                break;
+            }
+            groups.push(g);
+            if k < 5 {
+                if j >= n || (bytes[j] != b':' && bytes[j] != b'-') {
+                    ok = false;
+                    break;
+                }
+                j += 1;
+            }
+        }
+        if ok && groups.len() == 6 && groups.iter().all(|g| g.len() <= 2) {
+            let mut out = String::with_capacity(17);
+            for (idx, g) in groups.iter().enumerate() {
+                if idx > 0 {
+                    out.push(':');
+                }
+                // 每组 1~2 位十六进制，一定能解析成 u8。
+                let val = u8::from_str_radix(std::str::from_utf8(g).unwrap_or("0"), 16).unwrap_or(0);
+                out.push_str(&format!("{val:02x}"));
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// L2 DNS 解码：把 NetworkManager 老式 `Nameservers`（`au`，数组元素为**网络字节序**的 `u32`）
+/// 还原成点分十进制串。
+///
+/// 关键陷阱：D-Bus 传来的 `u32` 数值本身已经是网络(大端)序，Rust std 的
+/// `Ipv4Addr::from(u32)` 正是按大端解读（`a<<24 | b<<16 | c<<8 | d`），
+/// 所以**直接** `Ipv4Addr::from(n)` 即可，无需任何字节序处理。
+///
+/// 切勿用 `Ipv4Addr::from(n.to_ne_bytes())`：小端机（几乎全部真实 Linux 硬件：x86_64 / ARM64）
+/// 上 `to_ne_bytes()` 会把四个字节整体反序，例如 `1.2.3.4` 被解成 `4.3.2.1`。旧实现正是这一
+/// 处写反，导致老 NM 上的 DNS 服务器地址全部错位（仅靠 `8.8.8.8` 这类回文地址巧合正确）。
+///
+/// 抽成 cfg 无关纯函数，是为了能在 macOS 宿主机上对这条 linux 专属解码路径直接单测
+/// （`cfg(linux)` 下的函数在 mac target 上既编不进也跑不到）。
+// 非 linux 宿主构建里只有单测会用到它（`cargo check` 不编测试），故在此放行 dead_code，
+// 以免 macOS 上 `cargo check`/`clippy` 报未使用——Linux 构建里它确有调用方。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn decode_nm_nameservers(ns: &[u32]) -> Vec<String> {
+    ns.iter().map(|n| Ipv4Addr::from(*n).to_string()).collect()
+}
+
 /// MAC 归一化：统一小写 + 冒号分隔，供匹配比较使用。
 /// 各平台/各命令返回的 MAC 大小写与分隔符可能不一致（`AA-BB-...` / `aa:bb:...`）。
 pub fn normalize_mac(s: &str) -> String {
@@ -1188,6 +1358,10 @@ mod windows;
 pub(crate) mod win_helper;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_netlink;
+#[cfg(target_os = "linux")]
+mod linux_nm;
 
 #[cfg(target_os = "macos")]
 pub use macos::{priv_channel, request_location_authorization, MacPlatform as Platform};
@@ -1199,9 +1373,9 @@ pub use linux::{priv_channel, LinuxPlatform as Platform};
 #[cfg(test)]
 mod tests {
     use super::{
-        app_letters, prefers_dark_from_defaults, prefers_dark_from_gsettings,
-        prefers_dark_from_reg, printer_label, printers_from_lpstat, provider_in, sh_q,
-        tunnel_name_eq, vpn_app_for, TunnelTarget,
+        app_letters, decode_nm_nameservers, extract_mac_loose, prefers_dark_from_defaults,
+        prefers_dark_from_gsettings, prefers_dark_from_reg, printer_label, printers_from_lpstat,
+        provider_in, sh_q, tunnel_name_eq, vpn_app_for, TunnelTarget,
     };
 
     #[test]
@@ -1298,6 +1472,61 @@ mod tests {
         ] {
             assert_eq!(super::extract_mac(bad), None, "should not match: {:?}", bad);
         }
+    }
+
+    /// 回归 #3：macOS `arp -n` 吞掉 MAC 每段的前导零，旧实现整行补零也救不回
+    /// （首字节 `0` 与前面 IP 文本同处一个 `:` 分组）。VMware / 华为 / 部分 OUI 的
+    /// 网关 MAC 因此永远为 `None`，导致 `gateway_mac` 匹配条件形同虚设。
+    /// `extract_mac_loose` 逐组把 1~2 位十六进制归一成规范 MAC，恰好匹配该形态。
+    #[test]
+    fn extract_mac_loose_restores_leading_zero_ouis() {
+        // VMware OUI 00:50:56 —— arp 打印成 0:50:56:c0:0:8
+        assert_eq!(
+            extract_mac_loose("? (192.168.1.1) at 0:50:56:c0:0:8 on en0 ifscope [ethernet]")
+                .as_deref(),
+            Some("00:50:56:c0:00:08")
+        );
+        // 华为云 / 部分虚拟网卡 OUI 00:16:3e
+        assert_eq!(
+            extract_mac_loose("? (10.0.0.1) at 0:16:3e:ab:cd:ef").as_deref(),
+            Some("00:16:3e:ab:cd:ef")
+        );
+        // 另一常见 OUI 00:1b:77（Apple 历史分配）
+        assert_eq!(
+            extract_mac_loose("? (172.16.0.1) at 0:1b:77:01:02:03").as_deref(),
+            Some("00:1b:77:01:02:03")
+        );
+        // 既有「每段恰 2 位」的规范形态仍照常工作（不能因为宽松而退化）
+        assert_eq!(
+            extract_mac_loose("   ? (192.168.1.1) at e8:84:c6:93:ad:eb").as_deref(),
+            Some("e8:84:c6:93:ad:eb")
+        );
+        // 短横线分隔同样支持
+        assert_eq!(
+            extract_mac_loose("00-50-56-c0-00-08").as_deref(),
+            Some("00:50:56:c0:00:08")
+        );
+        // 非 MAC 文本依旧返回 None
+        assert_eq!(extract_mac_loose("no mac here"), None);
+    }
+
+    /// 回归 L2 DNS 解码：D-Bus `Nameservers`（`au`）的 `u32` 已是网络字节序，
+    /// `Ipv4Addr::from(u32)` 按大端解读即正确；旧实现用 `to_ne_bytes()` 在小端机上整组反序。
+    /// 该函数在 mac 宿主机上可直接单测，恰好补足 `cfg(linux)` 下跑不到的验证面。
+    #[test]
+    fn decode_nm_nameservers_uses_network_order() {
+        // 1.2.3.4：D-Bus u32 = 0x01020304。若被反序会得到 4.3.2.1（旧实现在 x86_64/ARM 上的错误结果）。
+        assert_eq!(
+            decode_nm_nameservers(&[0x0102_0304]),
+            vec!["1.2.3.4".to_string()]
+        );
+        // 多个服务器一并还原，且 9.9.9.9 这类回文地址不应掩盖非回文地址的错误。
+        assert_eq!(
+            decode_nm_nameservers(&[0x0102_0304, 0x0909_0909, 0xD043_DEDE]),
+            vec!["1.2.3.4".to_string(), "9.9.9.9".to_string(), "208.67.222.222".to_string()]
+        );
+        // 空数组返回空
+        assert!(decode_nm_nameservers(&[]).is_empty());
     }
 
     #[test]

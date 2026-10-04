@@ -43,7 +43,7 @@
 │   3B1 automation/one_shot: 过滤 disabled → 按排列顺序逐条执行（跑完一条才下一条）
 │   3B2 automation/persistent: 期望状态 worker，随 Active 的 THEN 起停（automation/provider 出语义）
 ├─────────────────────────────────────────────┤
-│ PAL  platform.rs: trait NetworkPlatform（20 方法）+ 编译期选平台
+│ PAL  platform.rs: trait NetworkPlatform（23 方法）+ 编译期选平台
 ├───────────────────┬────────────────┬────────────┤
 │ macOS             │ Windows        │ Linux      │
 │ networksetup      │ PowerShell CIM │ nmcli      │
@@ -104,7 +104,9 @@ netsense/
 │       │   ├── macos.rs       # macOS: networksetup / arp / airport / route / osascript + the one-time sudoers channel install
 │       │   ├── windows.rs     # Windows: PowerShell(CIM) read + netsh read/write + UAC elevation
 │       │   ├── win_helper.rs  # Windows 常驻提权 helper：同一 exe 的 `--netsense-helper` + 命名管道 RPC（一次授权/会话）
-│       │   └── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec
+│       │   ├── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec（原生失败时的兜底实现）
+│       │   ├── linux_netlink.rs # Linux 读路径原生实现：rtnetlink 替 `ip link` / `ip neigh`（`ip` 兜底）
+│       │   ├── linux_nm.rs    # Linux NM 写/读路径原生实现：zbus 直连 NetworkManager D-Bus 替 `nmcli`（`nmcli` 兜底）
 │       ├── update.rs          # 在线升级：check_update / run_update（下载 + 校验 + 安装）
 │       ├── win_dialog.rs      # Windows 原生对话框桥
 │       ├── log.rs             # daily-rotating log (keep 7 days)
@@ -862,7 +864,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **526 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **529 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1090,14 +1092,17 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   in **both** directions (a cited key must exist; an existing key must be cited — see §10.1), the PAL
   boundary (no concrete platform type outside `platform*`), trait
   coverage on all three platforms (by method name), `tauri.conf.json` field sanity, version consistency
-  across VERSION / `tauri.conf.json` / `Cargo.toml` / the CHANGELOG's first numbered section (§13),
+  across VERSION / `tauri.conf.json` / `Cargo.toml` / `Cargo.lock` (netsense's own entry) / the CHANGELOG's
+  first numbered section (§13),
   **docs ↔ code** (§3's repository tree against the disk in both directions, every repo path a doc
   quotes, the command table in `frontend/README.md` against `main.rs`, event names both ways),
   **docs ↔ docs** (every number a doc states — key count, command count, language count, check count —
   equals its source, and the five README / CHANGELOG language copies stay structurally identical with
-  their technical tokens intact), **UI text** (every string the interface can render comes from the
+  their technical tokens intact),   **UI text** (every string the interface can render comes from the
   dictionary: a `data-i18n` reference must resolve, an unbound prose node is a failure, the English
-  markup must equal `en.json` byte for byte, backend `log::*` / `win_dialog::*` calls must not carry a
+  markup must equal `en.json` byte for byte — for `data-i18n-<attr>` bindings that means the
+  `placeholder` / `title` attribute the key is bound to, not just the element body — backend
+  `log::*` / `win_dialog::*` calls must not carry a
   literal, and no CJK literal may sit in backend source — both rules accept an `i18n-exempt` marker) and
   **theme** (each foreground/background `--t-*` pair the windows actually paint is recomputed against
   WCAG AA — 4.5:1, 3.0:1 for the placeholder — in *both* the dark and the light block, and every

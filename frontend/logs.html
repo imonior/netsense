@@ -231,7 +231,7 @@
       el("v-status").textContent = q
         ? tf("logs.showing", "{shown} of {total} lines", { shown: kept.length, total: shown })
         : tf("logs.read", "{total} lines", { total: shown })
-          + (truncated ? " · " + t("logs.truncated", "older lines not shown") : "");
+          + (truncated ? " · " + t("logs.truncated", "older lines not read") : "");
       // 「跟随」的整个意义就是看见最新一行，所以只有本来就贴着底部时才自动滚。
       if (el("chk-auto").checked || atBottom) pre.scrollTop = pre.scrollHeight;
     }
@@ -245,12 +245,30 @@
     el("btn-dir").onclick = () => invoke("open_logs").catch(e => toast(String(e)));
     el("btn-close").onclick = () => invoke("close_log_viewer").catch(() => {});
 
-    // 每 2.5 秒问一次，但只在窗口真的看得见时问：关掉窗口只是隐藏（这个进程会一直
-    // 活着），一个藏在后台每两秒读一次磁盘的定时器是纯浪费。
-    setInterval(() => {
-      if (!el("chk-auto").checked || document.hidden) return;
-      loadFiles(true).then(readBody);
-    }, 2500);
+    // 每 2.5 秒问一次，但只在窗口真的看得见、且用户勾了「自动」时才问。关掉窗口
+    // 只是隐藏（这个进程会一直活着），所以看不见的时候把定时器**停掉**，而不是
+    // 留它每两秒醒一次再 return —— 一个常年挂在后台的日志窗口那样白烧 CPU，
+    // 十几个标签页开着就是十几个。回到前台时立刻补读一次：停摆的这段时间里
+    // 日志已经长出新行了，让用户盯着旧内容等下一个 2.5 秒没有意义。
+    let pollTimer = null;
+    const stopPolling = () => {
+      if (pollTimer == null) return;
+      clearInterval(pollTimer);
+      pollTimer = null;
+    };
+    const startPolling = () => {
+      if (pollTimer != null) return;
+      pollTimer = setInterval(() => {
+        if (!el("chk-auto").checked || document.hidden) return;
+        loadFiles(true).then(readBody);
+      }, 2500);
+    };
+    startPolling();
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { stopPolling(); return; }
+      startPolling();
+      if (el("chk-auto").checked) loadFiles(true).then(readBody);
+    });
 
     // 语言在软件设置里改；这个窗口开着的时候改了，就得当下跟着换口径。
     // 配色同理，但它还要多防一手：选了「跟随系统」时操作系统可能自己换档（日落后），

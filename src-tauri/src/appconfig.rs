@@ -54,6 +54,58 @@ const AUTOSTART_LABEL: &str = "com.netsense.app";
 const AUTOSTART_REGISTRY_NAME: &str = "NetSense";
 const AUTOSTART_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
+/// 各窗口上次关闭时的**客户区尺寸**（逻辑像素，宽×高）。缺省 = 用 `tauri.conf.json` 里的声明值。
+///
+/// 只记尺寸、不记位置，是刻意的：位置要跟着「窗口在哪块屏、那块屏还在不在」走 —— 外接屏
+/// 拔掉之后照着旧坐标摆，窗口会落在所有屏幕之外，用户只能靠改分辨率或删配置把它救回来。
+/// 尺寸没有这个病史：它唯一的约束是**当前这块屏**的工作区，而那正是打开时要实时收敛的
+/// 东西（见 `popup::apply_geometry`）。所以这里存的是用户调过的那一部分，与屏幕有关的
+/// 收敛一律留到打开时算。
+///
+/// 存逻辑像素而非物理像素：同一份配置在 100% 与 200% 缩放的显示器之间搬动时，物理值会
+/// 还原出一个两倍大的窗口，逻辑值在任何缩放比下都是同一个「看起来这么大」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WindowSizes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main: Option<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<(u32, u32)>,
+}
+
+impl WindowSizes {
+    /// 三个窗口都没记过尺寸。
+    ///
+    /// 序列化用它做跳过条件：用户从来没拖过窗口的配置文件里不该出现一个空的
+    /// `window_sizes` —— 它既不是配置也不是诊断信息，写进去只是噪声，还让人分不清
+    /// 「没调过」和「调过又清掉了」。
+    fn is_empty(&self) -> bool {
+        self.main.is_none() && self.settings.is_none() && self.logs.is_none()
+    }
+
+    /// 把越界的尺寸收进允许区间。
+    pub fn clamped(self) -> Self {
+        Self {
+            main: self.main.map(clamp_size),
+            settings: self.settings.map(clamp_size),
+            logs: self.logs.map(clamp_size),
+        }
+    }
+}
+
+/// 窗口尺寸的允许区间。下限取「还看得见内容」的值，上限挡住手写配置里的荒谬数字 ——
+/// 真正起约束作用的始终是显示器的工作区，那一步在打开时实时收敛。
+const MIN_WINDOW_SIZE: u32 = 320;
+const MAX_WINDOW_SIZE: u32 = 16384;
+
+fn clamp_size(s: (u32, u32)) -> (u32, u32) {
+    (
+        s.0.clamp(MIN_WINDOW_SIZE, MAX_WINDOW_SIZE),
+        s.1.clamp(MIN_WINDOW_SIZE, MAX_WINDOW_SIZE),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -78,6 +130,11 @@ pub struct AppConfig {
     /// [`crate::netproxy`] 里，这里只管存什么。
     #[serde(default)]
     pub proxy: crate::netproxy::ProxySetting,
+    /// 三个主窗口上次关闭时的尺寸（见 [`WindowSizes`]）。
+    ///
+    /// 它改变的是界面怎么显示，不改任何下发内容 —— 与上面几个字段同一条判据。
+    #[serde(default, skip_serializing_if = "WindowSizes::is_empty")]
+    pub window_sizes: WindowSizes,
 }
 
 fn default_retention() -> u32 {
@@ -95,6 +152,7 @@ impl Default for AppConfig {
             theme: DEFAULT_THEME.to_string(),
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
             proxy: crate::netproxy::ProxySetting::default(),
+            window_sizes: WindowSizes::default(),
         }
     }
 }
@@ -142,6 +200,7 @@ impl AppConfig {
             },
             other => other.clone(),
         };
+        self.window_sizes = self.window_sizes.clamped();
         self
     }
 
@@ -152,7 +211,17 @@ impl AppConfig {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
             }
         }
-        std::fs::write(path, s).map_err(|e| e.to_string())
+        // 原子写：先写 `.part` 临时文件再 `rename` 覆盖，避免崩溃/掉电把 settings.json 截成半截。
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "settings".to_string());
+        let tmp = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{file_name}.part"));
+        std::fs::write(&tmp, &s).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     }
 }
 
@@ -503,6 +572,7 @@ mod tests {
             proxy: ProxySetting::Manual {
                 url: "http://127.0.0.1:7890".into(),
             },
+            window_sizes: WindowSizes::default(),
         };
         cfg.save(&p).unwrap();
         assert_eq!(AppConfig::load(&p).unwrap(), cfg);
@@ -532,6 +602,7 @@ mod tests {
             proxy: ProxySetting::Manual {
                 url: "file:///etc/passwd".into(),
             },
+            window_sizes: WindowSizes::default(),
         }
         .clamped();
         assert_eq!(bad.proxy, ProxySetting::Direct);
@@ -542,6 +613,7 @@ mod tests {
             proxy: ProxySetting::Manual {
                 url: "SOCKS5://10.0.0.1:1080".into(),
             },
+            window_sizes: WindowSizes::default(),
         }
         .clamped();
         assert_eq!(
@@ -550,6 +622,38 @@ mod tests {
                 url: "socks5://10.0.0.1:1080".into()
             }
         );
+    }
+
+    /// 手改出来的窗口尺寸在加载时就收住：0 会让窗口缩到看不见，而一个荒谬的大值会在
+    /// 下次打开时把窗口撑到工作区之外（真正的收敛发生在打开时，这里挡的是配置文件里
+    /// 那些连「看起来像个尺寸」都算不上的值）。
+    #[test]
+    fn window_sizes_are_clamped_on_load() {
+        let sizes = WindowSizes {
+            main: Some((0, 999_999)),
+            settings: Some((640, 480)),
+            logs: None,
+        }
+        .clamped();
+        assert_eq!(sizes.main, Some((MIN_WINDOW_SIZE, MAX_WINDOW_SIZE)));
+        assert_eq!(sizes.settings, Some((640, 480)));
+        assert_eq!(sizes.logs, None);
+    }
+
+    /// 从来没调过窗口大小的配置里不出现 `window_sizes`：它是偏好而不是配置，写进去
+    /// 只会让每一份 settings.json 多一块噪声，也让「用户到底调过没有」看不出来。
+    #[test]
+    fn window_sizes_stay_out_of_the_file_until_a_window_is_resized() {
+        let s = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!s.contains("window_sizes"), "unexpected key in: {s}");
+
+        let mut with = AppConfig::default();
+        with.window_sizes.main = Some((1180, 700));
+        let s = serde_json::to_string(&with).unwrap();
+        assert!(s.contains("window_sizes"), "size was dropped: {s}");
+        // 读回来还是同一个值 —— 尺寸走的是同一份文件、同一条 serde 链路
+        let back: AppConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.window_sizes.main, Some((1180, 700)));
     }
 
     #[test]
@@ -564,6 +668,7 @@ mod tests {
                 theme: DEFAULT_THEME.into(),
                 log_retention_days: 0,
                 proxy: ProxySetting::default(),
+                window_sizes: WindowSizes::default(),
             }
             .clamped()
             .log_retention_days,

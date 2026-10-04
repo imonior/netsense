@@ -23,6 +23,28 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter};
 
+/// 让子进程**不分配控制台窗口**。
+///
+/// 本进程是 GUI 子系统（`windows_subsystem = "windows"`，自身没有控制台）。这种进程去拉
+/// `curl` / `powershell` / `taskkill` 这类**控制台子系统**的子进程时，Windows 会给它现开
+/// 一个可见控制台 —— 表现为升级时屏幕上闪出一个黑窗（curl 的那条甚至什么都不显示，因为
+/// 我们只把 stderr 接走了）。`CREATE_NO_WINDOW` 让子进程无窗口运行，管道照样能读。
+///
+/// `platform::run` 里早就有同一行（那里是 `.output()` 的路径），而 `update.rs` 这条下载链
+/// 走的是 `spawn()` 轮询进度，绕开了 `run`，于是漏掉了它。其余平台没有控制台这个概念，
+/// 退化成原样返回。
+#[cfg(windows)]
+fn hide_console(c: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    c
+}
+
+#[cfg(not(windows))]
+fn hide_console(c: &mut Command) -> &mut Command {
+    c
+}
+
 /// 前端从 `check_update` 拿到后原样回传给 `run_update` 的最小描述。
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateTarget {
@@ -68,14 +90,16 @@ fn native_update(
     t: &UpdateTarget,
     choice: &crate::netproxy::ProxyChoice,
 ) -> Result<(), String> {
-    // `UpdateTarget` 是前端回传的，按外部输入对待：scheme 只认 https。
-    require_https(&t.download_url)?;
+    // `UpdateTarget` 是前端回传的，按外部输入对待：scheme 只认 https，且必须落在
+    // 本项目自己的 Release 锚点上 —— 否则「自己托管二进制 + 自己给 SHA256SUMS」
+    // 能让校验一步都不落地（见 require_release_asset）。
+    require_release_asset(&t.download_url)?;
     let cu = t
         .checksum_url
         .as_ref()
         .filter(|u| !u.trim().is_empty())
         .ok_or_else(|| i18n::t("upd.no_sums"))?;
-    require_https(cu)?;
+    require_release_asset(cu)?;
 
     emit_progress(app, "download", 0);
     let tmp = download_file(app, &t.download_url, &t.asset_name, t.size, choice)?;
@@ -135,7 +159,9 @@ fn download_file(
     // **故意不加** `--proto-redir`：它要 curl 7.65.2，而 Windows 10 1803 —— 也就是 `main.rs`
     // 承诺的下限 —— 自带 curl 7.60.1，认不出的选项会让 curl 直接退出，把「能更新」变成「下载失败」，
     // 换来的是 `--proto` 已经覆盖不到的零额外约束。
-    let mut child = Command::new("curl")
+    let mut cmd = Command::new("curl");
+    hide_console(&mut cmd);
+    let mut child = cmd
         .args([
             "-fsSL",
             "--proto",
@@ -223,6 +249,54 @@ pub(crate) fn require_https(url: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(i18n::tf("upd.non_https", &[("url", url)]))
+    }
+}
+
+/// 自更新的信任锚：升级资产必须来自**本项目自己的** GitHub Release 目录。
+///
+/// [`UpdateTarget`] 整个由前端回传，而校验值又来自同一个 `checksum_url` ——
+/// 两者是同一条输入。只查 scheme 等于「攻击者自己托管一个 https 站点，同时给出
+/// 二进制与配套的 SHA256SUMS」，`parse_hash` 逐字节对上，校验步骤形同虚设。
+/// 真正的信任只能来自「这个 URL 是不是我们自己仓库的 Release 资产」，
+/// 那需要攻陷本仓库的发布权限才能伪造。
+///
+/// 锚点取 `https://github.com/<owner>/<repo>/releases/download/`：GitHub 的
+/// `browser_download_url` 一律是这个形状（`check_update` 读的就是它）。
+/// 资产字节经 302 落到 `objects.githubusercontent.com`，但那是 `curl -L` 自己
+/// 跟过去的落点、我们既不提供也不校验它，因此**不**把它列进可接受的输入 host ——
+/// 放行它等于放行任意仓库的任意资产。
+///
+/// 比较用 `eq_ignore_ascii_case`：scheme 与 host 大小写不敏感，GitHub 的
+/// owner / repo 也是。资产名（`<tag>/<asset>`）只要求非空、不含 `..` 段。
+fn release_asset_pinned(url: &str) -> bool {
+    const ANCHOR: &str = "https://github.com/imonior/netsense/releases/download/";
+    let u = url.trim();
+    let Some(rest) = u.get(..ANCHOR.len()) else {
+        return false;
+    };
+    if !rest.eq_ignore_ascii_case(ANCHOR) {
+        return false;
+    }
+    let asset = &u[ANCHOR.len()..];
+    // 非空、无前导 `/`（tag 段不能为空）、无路径回退、无空段、无空白 ——
+    // 剩下的交给 GitHub 自己判。
+    !asset.is_empty()
+        && !asset.starts_with('/')
+        && !asset.contains("..")
+        && !asset.contains("//")
+        && !asset.contains(char::is_whitespace)
+}
+
+/// 升级来源的完整准入：https + 落在本项目 Release 锚点内。
+///
+/// 比 [`require_https`] 严一档，**这一档才是 `run_update` 该用的**：前者只回答
+/// 「加密通道有没有」，后者回答「对面是不是我们自己」。
+pub(crate) fn require_release_asset(url: &str) -> Result<(), String> {
+    require_https(url)?;
+    if release_asset_pinned(url) {
+        Ok(())
+    } else {
+        Err(i18n::tf("upd.bad_origin", &[("url", url)]))
     }
 }
 
@@ -754,7 +828,9 @@ fn run_elevated(exe: &str, args: &[String]) -> Result<(), String> {
         ps_args.push(joined);
     }
     let ps = ps_args.join(" ");
-    let out = Command::new("powershell")
+    let mut cmd = Command::new("powershell");
+    hide_console(&mut cmd);
+    let out = cmd
         .args(["-NoProfile", "-Command", &ps])
         .output()
         .map_err(|e| i18n::tf("upd.win_elevated_start", &[("error", &e.to_string())]))?;
@@ -1017,7 +1093,9 @@ impl OutputTimeout for Command {
 
 #[cfg(windows)]
 fn kill_pid(pid: u32) -> std::io::Result<()> {
-    Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output().map(|_| ())
+    let mut cmd = Command::new("taskkill");
+    hide_console(&mut cmd);
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"]).output().map(|_| ())
 }
 
 #[cfg(not(windows))]
@@ -1050,6 +1128,54 @@ mod tests {
         }
         // 非 ASCII 前缀必须是 Err，而不是切片 panic。
         assert!(require_https("～https://a").is_err());
+    }
+
+    #[test]
+    fn release_assets_are_pinned_to_this_repository() {
+        // 真身：GitHub 的 browser_download_url 就是这个形状。
+        assert!(release_asset_pinned(
+            "https://github.com/imonior/netsense/releases/download/v1.0.6/NetSense-1.0.6.dmg"
+        ));
+        assert!(release_asset_pinned(
+            "https://github.com/imonior/netsense/releases/download/v1.0.6/SHA256SUMS"
+        ));
+        // scheme / host / owner / repo 大小写不敏感。
+        assert!(release_asset_pinned(
+            "HTTPS://GitHub.com/Imonior/NetSense/releases/download/v1/x.dmg"
+        ));
+    }
+
+    #[test]
+    fn a_foreign_release_or_cdn_cannot_pass_as_our_own() {
+        for bad in [
+            // 攻击者自建站点：二进制与 SUMS 都由他控制，校验形同虚设。
+            "https://evil.invalid/imonior/netsense/releases/download/v1/x.dmg",
+            // 看着像、其实换成了别人的仓库。
+            "https://github.com/attacker/netsense/releases/download/v1/x.dmg",
+            // 仓库名带后缀骗过前缀。
+            "https://github.com/imonior/netsense-evil/releases/download/v1/x.dmg",
+            // 用户信息段伪造 host。
+            "https://github.com.evil.invalid/imonior/netsense/releases/download/v1/x.dmg",
+            // 302 的落点：放行它等于放行任意仓库的任意资产。
+            "https://objects.githubusercontent.com/github-production-release-asset/x",
+            // 路径回退，锚点只是前缀。
+            "https://github.com/imonior/netsense/releases/download/../../../evil/x.dmg",
+            // 空资产名 / 空段。
+            "https://github.com/imonior/netsense/releases/download/",
+            "https://github.com/imonior/netsense/releases/download//x.dmg",
+            "",
+        ] {
+            assert!(!release_asset_pinned(bad), "should reject {bad:?}");
+            assert!(require_release_asset(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_anchor_is_stricter_than_https_alone() {
+        // 同一串输入：https 放行、锚点拒绝 —— 这正是本次要堵的那道口子。
+        let hostile = "https://evil.invalid/x.dmg";
+        assert!(require_https(hostile).is_ok());
+        assert!(require_release_asset(hostile).is_err());
     }
 
     #[test]

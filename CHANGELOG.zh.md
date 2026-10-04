@@ -4,6 +4,17 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.0.7] - 2026-10-04
+
+### 修复
+
+- **Linux：状态查询不再崩溃。** 原生 netlink 读取在 async Tauri 命令里用 `tokio::sync::oneshot::Receiver::blocking_recv()` 取应答通道，违反 tokio 契约，每次读状态都 panic。现改为 `std::sync::mpsc` 接收端加 `recv_timeout`，worker 侧再套 `tokio::time::timeout`，半死连接不会挂死整条读路径。
+- **Linux：网卡枚举现在能编译也能跑。** `list_interfaces` 编不过：重构后的 `device_ip` 返回 `Option<DeviceIp>` 却没解包，且兄弟模块 `linux_nm` 裸名引用却没导入。两处都修了，Linux 后端不再被 `cfg(linux)` 静默剔除，而是真正参与编译。
+- **macOS：网关 MAC 现在能匹配吞前导零的 OUI。** `arp -n` 打出 `0:50:56:c0:0:8` 而非 `00:50:56:c0:00:08`，旧的整体补零救不回与前面 IP 文本同分组的首字节。新加的 `extract_mac_loose`（cfg 无关、有单测）逐组归一成规范 MAC，VMware / 华为 OUI 重新被匹配。
+- **Linux：小端机上 DNS 服务器地址整组反序的 bug 修了。** 老式 `Nameservers`（`au`）属性用 `Ipv4Addr::from(n.to_ne_bytes())` 读取，在 x86_64 / ARM 上把四个字节整体反过来。现抽成 cfg 无关的 `decode_nm_nameservers`，直接用 `Ipv4Addr::from(n)`（`u32` 本就是网络序），并补了 macOS 侧单测。
+- **macOS：特权操作链早失败现在可观测。** 自举操作链此前用 `;`（全部照跑）拼接，首失败被最后一条命令的退出码掩盖；现改用 `&&`，在第一个失败处停下。安装器前缀那个 `;` 故意保留不动。
+- **设置：保存全局项不再清空保底与脚本白名单。** 负载里缺 `fallback`（或 `allowed_scripts`）字段时，以前默认成 null/空、静默清空。现在缺键保留既有值，两个字段语义一致。
+
 ## [1.0.6] - 2026-10-02
 
 ### 新增

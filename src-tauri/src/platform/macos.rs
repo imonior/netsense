@@ -30,8 +30,8 @@
 //! 本版本 —— 白名单加一条只读子命令，否则老机器上永远等不到它。
 
 use super::{
-    dedupe_sort_apps, extract_mac, parse_kv, poll_ssid_watch, prefers_dark_from_defaults,
-    printers_from_lpstat, run, run_env,
+    dedupe_sort_apps, extract_mac, extract_mac_loose, parse_kv, poll_ssid_watch,
+    prefers_dark_from_defaults, printers_from_lpstat, run, run_env,
     sh_q, timeout_secs, AppEntry, C_LOCALE, Health, InterfaceStatus, MAX_ROUTES_PER_IFACE, NetworkPlatform, PrinterInfo, PrivChannel,
     ProbeTarget,
     TunnelTarget, WatcherHandle,
@@ -253,6 +253,21 @@ fn ipv4(s: &str) -> bool {
     })
 }
 
+/// 取路由行末尾的「设备名」列。
+///
+/// `netstat -rn` 的设备名列位不固定：当某条路由带 `Expire` 列时，行尾会多出一格。
+/// `Expire` 的取值有两种形态 —— 数字（如 `0`，表示剩余秒数）或 `!`（netstat 对
+/// 「永久」路由打的标记，例如本机子网 `10.20.20/24 link#11 UCS en0 !`）。两者都意味着
+/// 真正的设备名在倒数第二列，而不是最后一列。
+fn route_dev_col<'b>(t: &[&'b str]) -> &'b str {
+    let last = t[t.len() - 1];
+    let expire_like = last.chars().all(|c| c.is_ascii_digit()) || last == "!";
+    if t.len() >= 5 && expire_like {
+        t[t.len() - 2]
+    } else {
+        last
+    }
+}
 /// 路由目标：`a.b.c.d` 或 `a.b.c.d/len`（len 为十进制且 ≤32）—— 包装脚本的 `is_route_dest`。
 fn route_dest_ok(s: &str) -> bool {
     match s.split_once('/') {
@@ -313,6 +328,26 @@ fn allow_list_takes(ops: &[PrivOp]) -> bool {
         } => slot_ok(svc) && ipv6_loose_ok(addr) && prefix_ok(prefix) && ipv6_loose_ok(gateway),
         PrivOp::RouteAdd { dest, gateway, .. } => route_dest_ok(dest) && ipv4(gateway),
         PrivOp::RouteDelete { dest } => route_dest_ok(dest),
+    })
+}
+
+/// osascript（授权框）路径的形状校验。
+///
+/// 与 [`allow_list_takes`] 同一套判据 —— 授权框路径直接把命令拼给 `root` 的
+/// `networksetup` / `route`，没有脚本白名单二次把关，所以下发的每一个值都必须先在这里
+/// 过形状关，绝不能让 `-interface` 这种写法冒充成「值」被工具当成选项吃掉。
+///
+/// 唯一和 [`allow_list_takes`] 不同的地方：`default` 路由在这里放行。那条路由走不了
+/// sudoers 白名单（脚本的 `is_route_dest` 不收 `default`），只能借授权框直接 `route -n
+/// add -net default <gw>`；如果也按 allow-list 卡死，用户在「通道已装好」的机器上反而
+/// 加不了默认路由。其它所有值字段（IP / 网关 / 前缀 / DNS）照旧严卡。
+fn osascript_takes(ops: &[PrivOp]) -> bool {
+    ops.iter().all(|o| match o {
+        PrivOp::RouteAdd { dest, gateway, .. } => {
+            (dest == "default" || route_dest_ok(dest)) && ipv4(gateway)
+        }
+        PrivOp::RouteDelete { dest } => dest == "default" || route_dest_ok(dest),
+        _ => allow_list_takes(std::slice::from_ref(o)),
     })
 }
 
@@ -392,11 +427,16 @@ fn exec_ops_sudoers(ops: &[PrivOp]) -> Result<(), String> {
 }
 
 fn exec_ops_osascript(ops: &[PrivOp]) -> Result<(), String> {
+    // 授权框路径没有脚本白名单兜底，形状校验必须在这里先过一遍 —— 任何值字段不合规
+    // （例如 IP 写成了 `-interface`）一律不发，直接报错，绝不让它冒充成 root 命令的选项。
+    if !osascript_takes(ops) {
+        return Err(i18n::t("pal.invalid_op"));
+    }
     let chain = ops
         .iter()
         .map(|o| o.legacy_shell())
         .collect::<Vec<_>>()
-        .join(" ; ");
+        .join(" && ");
     run_via_osascript(&chain).map(|_| ())
 }
 
@@ -523,7 +563,7 @@ fn exec_ops_bootstrap(ops: &[PrivOp]) -> Result<(), String> {
         .iter()
         .map(|o| o.legacy_shell())
         .collect::<Vec<_>>()
-        .join(" ; ");
+        .join(" && ");
     let installer = current_user_name().and_then(|u| write_priv_installer(&u).ok());
     let cmd = match &installer {
         Some(p) => format!("/bin/sh {} ; {}", sh_q(&p.display().to_string()), chain),
@@ -723,6 +763,12 @@ fn default_gateway() -> Option<String> {
 }
 
 /// 由网关 IP 解析其 MAC（arp -n）。
+///
+/// macOS `arp -n` 会吞掉 MAC 每段的前导零（`0:50:56:c0:0:8` 而非 `00:50:56:c0:00:08`），
+/// 旧实现用 `pad_mac_colons` 整行补零，但首字节 `0` 与前面的 IP 文本（`(192.168.1.1) at`）
+/// 同处一个 `:` 分组，整行分段补零根本补不到它，导致诸如 VMware / 华为 OUI（`00:50:56`、
+/// `00:16:3e`、`00:1b:77`）的网关 MAC 全部解析失败。改用 [`super::extract_mac_loose`]——
+/// 它不强求每段恰 2 位、逐组把 1~2 位十六进制归一成规范 MAC，恰好匹配 arp 的真实输出形态。
 fn gateway_mac_for(gw: &str) -> Option<String> {
     let out = run("arp", &["-n", gw]).ok()?;
     for line in out.lines() {
@@ -730,7 +776,8 @@ fn gateway_mac_for(gw: &str) -> Option<String> {
         if line.contains("(incomplete)") || line.contains("no entry") {
             continue;
         }
-        if let Some(m) = extract_mac(line) {
+        // 宽松 MAC 提取：直接交给 `extract_mac_loose`，不再整行补零。
+        if let Some(m) = extract_mac_loose(line) {
             return Some(m);
         }
     }
@@ -825,9 +872,18 @@ fn probe_http(target: Option<&str>, timeout_ms: u64) -> bool {
 /// `networksetup -listallhardwareports | awk '/Wi-Fi|AirPort/{getline; print $NF}'`
 fn wifi_iface() -> String {
     static IFACE: OnceLock<String> = OnceLock::new();
-    IFACE
-        .get_or_init(|| discover_wifi_device().unwrap_or_else(|| "en0".to_string()))
-        .clone()
+    // 只有在真实发现到 Wi-Fi 设备时才缓存；一次性的 `networksetup` 瞬断不能把 en0
+    // 永久锁死（文档 §macOS 明确：绝不能硬编码 en0）。
+    if let Some(s) = IFACE.get() {
+        return s.clone();
+    }
+    match discover_wifi_device() {
+        Some(dev) => {
+            let _ = IFACE.set(dev.clone());
+            dev
+        }
+        None => "en0".to_string(),
+    }
 }
 
 /// 从 `networksetup -listallhardwareports` 中取 Wi-Fi 的设备名：
@@ -1114,6 +1170,10 @@ struct HwPort {
     port: String,
     dev: String,
     mac: Option<String>,
+    /// 网络服务名（`networksetup -setdhcp` 等写入命令要的名字），由 `-listnetworkserviceorder`
+    /// 解析；`-listallhardwareports` 给的 `port` 是 Hardware Port 标签，二者在 USB/雷雳网卡上
+    /// 不一致，写路径与 DNS/v6 读取都必须用 `service` 而非 `port`。
+    service: Option<String>,
 }
 
 /// 全部硬件端口（含设备名与网卡 MAC）。
@@ -1127,12 +1187,12 @@ fn hardware_ports() -> Vec<HwPort> {
     let mut mac: Option<String> = None;
     // 每条记录以 `Hardware Port:` 开头；遇到下一条或 `VLAN Configurations` 之类的
     // 分隔段落（缩进的 `*` 列表）时收口。用「下一条 Hardware Port」作为边界即可。
-    let flush = |list: &mut Vec<HwPort>, port: &mut Option<String>, dev: &mut Option<String>, mac: &mut Option<String>| {
-        if let (Some(p), Some(d)) = (port.take(), dev.take()) {
-            list.push(HwPort { port: p, dev: d, mac: mac.take() });
-        }
-        *mac = None;
-    };
+        let flush = |list: &mut Vec<HwPort>, port: &mut Option<String>, dev: &mut Option<String>, mac: &mut Option<String>| {
+            if let (Some(p), Some(d)) = (port.take(), dev.take()) {
+                list.push(HwPort { port: p, dev: d, mac: mac.take(), service: None });
+            }
+            *mac = None;
+        };
     for raw in out.lines() {
         let l = raw.trim();
         if let Some(rest) = l.strip_prefix("Hardware Port:") {
@@ -1148,11 +1208,56 @@ fn hardware_ports() -> Vec<HwPort> {
         }
     }
     flush(&mut list, &mut port, &mut dev, &mut mac);
-    list
-}
+    // 解析设备名 → 网络服务名（见 `service_map`）：写路径与 DNS/v6 读取都用它，
+    // 不再误用 Hardware Port 标签。
+    let svc = service_map();
+    for hp in &mut list {
+        hp.service = svc.get(&hp.dev).cloned();
+    }
+        list
+    }
 
-/// 全部网络服务名（含 VPN 这类软件创建的服务）。
-fn network_services() -> Vec<String> {
+    /// 设备名 → 网络服务名（`networksetup -listnetworkserviceorder`）。
+    ///
+    /// 这才是 `networksetup -setdhcp` / `-setdnsservers` 等写入命令要的名字；
+    /// `-listallhardwareports` 的 Hardware Port 标签在多数机器上一致，但插着 USB/雷雳网卡时
+    /// 往往不同（本机实测 en5 的 Hardware Port 标签不在服务名表里），错配会让写入静默落到另一张卡。
+    fn service_map() -> std::collections::HashMap<String, String> {
+        use std::collections::HashMap;
+        let Ok(out) = run("networksetup", &["-listnetworkserviceorder"]) else {
+            return HashMap::new();
+        };
+        let mut map = HashMap::new();
+        let mut pending: Option<String> = None;
+        for raw in out.lines() {
+            let l = raw.trim();
+            if l.is_empty() {
+                continue;
+            }
+            if let Some(rest) = l.strip_prefix('(') {
+                if rest.starts_with("Hardware Port:") {
+                    // 形如 `(Hardware Port: Wi-Fi, Device: en0)`
+                    if let Some(d) = rest.split("Device:").nth(1) {
+                        let d = d.trim_end_matches(')').trim().to_string();
+                        if let Some(name) = pending.take() {
+                            if !d.is_empty() {
+                                map.insert(d, name);
+                            }
+                        }
+                    }
+                    pending = None;
+                } else if let Some(name) = rest.split_once(')').map(|x| x.1) {
+                    pending = Some(name.trim().to_string());
+                } else {
+                    pending = None;
+                }
+            }
+        }
+        map
+    }
+
+    /// 全部网络服务名（含 VPN 这类软件创建的服务）。
+    fn network_services() -> Vec<String> {
     let Ok(out) = run("networksetup", &["-listallnetworkservices"]) else {
         return Vec::new();
     };
@@ -1262,16 +1367,6 @@ fn route_tables() -> RouteTables {
     let mut rt = parse_route_tables(&v4);
     rt.gateway6 = parse_gateways6(&v6);
     rt
-}
-
-/// 行尾那一列是设备名；`netstat` 在路由会过期时后面还跟一个秒数，那就要往前挪一列。
-fn route_dev_col<'b>(t: &[&'b str]) -> &'b str {
-    let last = t[t.len() - 1];
-    if t.len() >= 5 && last.chars().all(|c| c.is_ascii_digit()) {
-        t[t.len() - 2]
-    } else {
-        last
-    }
 }
 
 /// 解析 `netstat -rn -f inet`。default 行形如
@@ -1656,11 +1751,15 @@ fn idle_vpn_rows(nc_rows: &[(String, String)], live: &[super::NicInfo]) -> Vec<s
 }
 
 /// 设备名 → 网络服务名（供 `networksetup -setdhcp` 等写入操作定位）。
+///
+/// 服务名来自 `-listnetworkserviceorder`（见 `service_map`），不再误用 Hardware Port 标签；
+/// 找不到对应关系就返回 `None`，由调用方如实报错，绝不回落到 Wi-Fi 那一路（否则会把改动
+/// 静默落到另一张卡上）。
 fn service_for_dev(dev: &str, hw_ports: &[HwPort]) -> Option<String> {
     hw_ports
         .iter()
         .find(|p| p.dev == dev)
-        .map(|p| p.port.clone())
+        .and_then(|p| p.service.clone())
 }
 
 // —————————————————————————— macOS 实现 ——————————————————————————
@@ -1798,13 +1897,16 @@ fn read_status() -> InterfaceStatus {
     if let Some(svc) = wifi_service() {
         if let Ok(o) = run("networksetup", &["-getdnsservers", &svc]) {
             let dns = o.trim();
-            // 未设置时输出英文提示语（"There aren't any DNS Servers set on ..."）或 "Empty"
-            if !dns.starts_with("There") && dns != "Empty" {
+            // 未设置时输出英文提示语（"There aren't any DNS Servers set on ..."）或 "Empty"，
+            // 与 `dns_of_service` 同一套判据；空输出同样视为无 DNS，绝不填 Some("")。
+            if !dns.starts_with("There") && dns != "Empty" && !dns.is_empty() {
                 st.dns = Some(dns.split_whitespace().collect::<Vec<_>>().join(","));
             }
         }
         if let Ok(o) = run("networksetup", &["-getinfo", &svc]) {
-            st.v6mode = parse_kv(&o, "IPv6:").or(Some("automatic".into()));
+            // 取不到「IPv6:」行就如实留 None —— 绝不伪造 "automatic"（那是配置编辑器的事，
+            // 不是读路径能替系统下结论的）。
+            st.v6mode = parse_kv(&o, "IPv6:");
         }
     }
     if let Some(gw) = default_gateway() {
@@ -1868,7 +1970,7 @@ impl NetworkPlatform for MacPlatform {
             return Err(i18n::tf("pal.vpn_iface_not_switchable", &[("dev", dev)]));
         }
         let hw = hardware_ports();
-        let svc = service_for_dev(dev, &hw).or_else(wifi_service).ok_or_else(|| {
+        let svc = service_for_dev(dev, &hw).ok_or_else(|| {
             i18n::tf("pal.no_service_for_iface", &[("dev", dev)])
         })?;
         exec_ops(&[
@@ -1932,8 +2034,8 @@ impl NetworkPlatform for MacPlatform {
                 let gateway6 = rt.gateway6.get(&dev).cloned();
                 let route_list = rt.prefixes.get(&dev).cloned().unwrap_or_default();
                 let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
-                let dns = port.and_then(|p| dns_of_service(&p.port));
-                let ipv6 = port.and_then(|p| v6_of_service(&p.port));
+                let dns = port.and_then(|p| p.service.as_deref()).and_then(dns_of_service);
+                let ipv6 = port.and_then(|p| p.service.as_deref()).and_then(v6_of_service);
                 out.push(super::NicInfo {
                     name: dev,
                     label: port.map(|p| p.port.clone()),
@@ -2062,7 +2164,15 @@ impl NetworkPlatform for MacPlatform {
             .map(|_| ())
             .map_err(|e| {
                 i18n::tf("pal.scutil_start_failed", &[("name", name), ("error", &e)])
-            })
+            })?;
+        // 隧道起停改动了本机网络拓扑，必须让状态与网卡名单快照立刻失效，否则 3A 读回
+        // 与「主网卡 / 隧道归属」判据会拿着旧接口做决定；归属缓存也一并清掉（这条隧道
+        // 现在的持有者就是我们，旧条目会在 30s 内误导 owner 着色）。
+        super::invalidate_status();
+        if let Some(cache) = TUN_OWNER_CACHE.get() {
+            cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+        Ok(())
     }
 
     fn add_route(&self, dest: &str, gw: &str, metric: u32) -> Result<(), String> {
@@ -2871,6 +2981,7 @@ mod tests {
             "224.0.0/4          link#22            UmCSI               utun5\n",
             "255.255.255.255/32 link#22            UCSI                utun5\n",
             "192.168.71.0/24    link#4             UCS                 en0       0\n",
+            "10.20.20/24        link#11            UCS                 en0       !\n",
         );
         let rt = parse_route_tables(out);
         assert_eq!(rt.gateway.get("en0").map(String::as_str), Some("192.168.71.1"));
@@ -2887,7 +2998,12 @@ mod tests {
         // 行尾带 Expire 数字时设备名在倒数第二列
         assert_eq!(
             rt.prefixes.get("en0").unwrap(),
-            &["0.0.0.0/0".to_string(), "192.168.71.0/24".to_string()]
+            &[
+                "0.0.0.0/0".to_string(),
+                "192.168.71.0/24".to_string(),
+                "10.20.20.0/24".to_string()
+            ],
+            "Expire 列既可能是数字也可能是 !（永久路由），两者都要让设备名退到倒数第二列"
         );
     }
 

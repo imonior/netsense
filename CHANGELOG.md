@@ -4,6 +4,17 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.7] - 2026-10-04
+
+### Fixed
+
+- **Linux: the status query no longer panics.** The native netlink reader resolved its answer channel with `tokio::sync::oneshot::Receiver::blocking_recv()` inside an async Tauri command, which violates the tokio contract and panicked on every status read. The channel is now a `std::sync::mpsc` receiver polled with `recv_timeout`, and the worker is guarded by `tokio::time::timeout` so a half-dead connection cannot hang the whole read path.
+- **Linux: network enumeration now compiles and runs.** `list_interfaces` failed to compile because the refactored `device_ip` returns `Option<DeviceIp>` (left unwrapped) and the sibling module `linux_nm` was referenced without an import. Both are fixed, so the Linux backend actually builds instead of being silently excluded by `cfg(linux)`.
+- **macOS: gateway MAC resolves for OUIs that drop leading zeros.** `arp -n` prints `0:50:56:c0:0:8` instead of `00:50:56:c0:00:08`, and the old whole-line padding could not restore the first byte fused with the preceding IP text. A new `extract_mac_loose` (cfg-agnostic, unit-tested) restores the canonical MAC, so VMware / Huawei OUIs are matched again.
+- **Linux: DNS servers were decoded with reversed octets on little-endian hosts.** The legacy `Nameservers` (`au`) property was read with `Ipv4Addr::from(n.to_ne_bytes())`, which swaps the four bytes on x86_64 / ARM. It is now decoded by a cfg-agnostic `decode_nm_nameservers` using `Ipv4Addr::from(n)` (the `u32` is already in network order). Covered by a macOS-side unit test.
+- **macOS: a failed privileged operation is now observable.** The bootstrap op chain joined with `;` (run all regardless) masked the first failure behind the last command's exit status; it now joins with `&&` and stops at the first failure. The installer prefix `;` is intentionally left unchanged.
+- **Settings: saving global options no longer wipes the fallback or script whitelist.** When the payload omitted the `fallback` (or `allowed_scripts`) field, it was defaulted to null/empty and silently cleared. Missing keys now preserve the existing value, consistent across both fields.
+
 ## [1.0.6] - 2026-10-02
 
 ### Added

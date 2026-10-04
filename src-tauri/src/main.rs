@@ -262,6 +262,9 @@ fn main() {
                     || window.label() == popup::SETTINGS_LABEL
                     || window.label() == popup::LOGS_LABEL =>
             {
+                // 关掉 = 收回托盘常驻（不是退出），此刻把窗口尺寸记下来 —— 下次打开照原样
+                // 恢复并收敛到工作区，见 `popup::apply_geometry`。
+                popup::remember_size(window);
                 api.prevent_close();
                 let _ = window.hide();
             }

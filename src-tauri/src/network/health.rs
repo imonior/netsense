@@ -54,6 +54,11 @@ impl HealthMonitor {
                     fails = 0;
                 }
                 if fails >= retries {
+                    // 阻塞探测刚返回，离开循环前再确认一次有没有被叫停（stop_monitor 会置位）：
+                    // 否则切 Profile / 手动停用时，旧环境的监测线程仍会触发回落，拆掉新现场。
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
                     if do_fallback {
                         on_fallback();
                     }

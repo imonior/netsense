@@ -98,7 +98,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 526 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 529 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -184,6 +184,11 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
   "profiles": [ { "id": "...", "name": "...", "enabled": true } ],  // 只是目录，状态看 engine
   "language": "en", "priv": "direct|prompt|outdated", "config_path": "...",
                                        // outdated 只有 macOS 会报：免密通道装着，但不是这一版
+  "theme": "light|dark",               // 配色**当下该渲染**的那一套（`light` / `dark`），
+                                       // 不是 `settings.json` 里存的档位（那一档可能是
+                                       // `system`）：四座窗口拿它直接写 `<html data-theme>`，
+                                       // 不必各自再问一次系统；「跟随系统」被操作系统自己
+                                       // 换档时，这个值最迟一个缓存周期（60s）跟着变
   "config_rev": 7                       // 配置代际号：`state.config` 每被成功替换一次 +1。
                                         // 与 `get_config` 里的同名键配对 —— 对不上且编辑器
                                         // 没有未保存改动时，编辑器整趟重读（见「广播何时会重建表单」）

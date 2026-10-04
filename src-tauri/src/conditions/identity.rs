@@ -80,7 +80,7 @@ impl NetworkSnapshot {
     }
 }
 
-fn nic_is_up(n: &NicInfo) -> bool {
+pub(crate) fn nic_is_up(n: &NicInfo) -> bool {
     n.up || n.ipv4.is_some()
 }
 

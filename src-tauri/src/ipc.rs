@@ -173,10 +173,17 @@ pub fn save_global(
     payload: String,
 ) -> Result<(), String> {
     let patch: serde_json::Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-    let fallback: Option<FallbackConfig> = serde_json::from_value(
-        patch.get("fallback").cloned().unwrap_or(serde_json::Value::Null),
-    )
-    .map_err(|e| format!("fallback: {}", e))?;
+    // 缺字段即保留既有值：fallback 与 allowed_scripts 语义必须一致，绝不能因为一份
+    // 不含某字段的保存就悄悄清掉用户之前的配置（否则保存全局项时会无声撤销零命中兜底
+    // 或脚本白名单）。
+    let (existing_fallback, existing_scripts) = {
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        (cfg.fallback.clone(), cfg.allowed_scripts.clone())
+    };
+    let fallback: Option<FallbackConfig> = match patch.get("fallback") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("fallback: {}", e))?,
+        None => existing_fallback,
+    };
     let scripts: Vec<String> = patch
         .get("allowed_scripts")
         .and_then(|v| v.as_array())
@@ -185,7 +192,7 @@ pub fn save_global(
                 .filter_map(|x| x.as_str().map(|s| s.to_string()))
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or(existing_scripts);
     {
         let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = cfg.clone();
@@ -340,7 +347,9 @@ pub fn close_log_viewer(state: State<'_, std::sync::Arc<AppState>>) {
 /// 编辑器一打开就会把主线程按住几百毫秒（见 DEVELOPMENT.md §9.6 第 5 条）。
 #[tauri::command(async)]
 pub fn get_networks(state: State<'_, std::sync::Arc<AppState>>) -> Vec<String> {
-    state.plat.list_known_ssids().unwrap_or_default()
+    // 走 TTL 缓存：这份清单只在用户连过新网络之后才会变，而枚举它要拉一次子进程。
+    // 详见 `platform::cached_known_ssids`。
+    crate::platform::cached_known_ssids(&state.plat)
 }
 
 /// 本机**装着**的网卡（含现在没插线、没连上的），填充编辑器的接口条件下拉。
@@ -363,7 +372,9 @@ pub fn get_adapters(state: State<'_, std::sync::Arc<AppState>>) -> Vec<NicInfo> 
 /// 留成可手输，而不是转成「加载失败」。`async` 的理由同 `get_networks` —— 枚举要拉子进程。
 #[tauri::command(async)]
 pub fn get_printers(state: State<'_, std::sync::Arc<AppState>>) -> Vec<PrinterInfo> {
-    state.plat.list_printers()
+    // 走 TTL 缓存：接一台新打印机是分钟级的事，而枚举它（Windows 上是 CIM 查询）要
+    // 一次完整的子进程冷启动。详见 `platform::cached_printers`。
+    crate::platform::cached_printers(&state.plat)
 }
 
 /// 本机已装程序清单（编辑器里启动程序动作的候选）。
@@ -374,7 +385,9 @@ pub fn get_printers(state: State<'_, std::sync::Arc<AppState>>) -> Vec<PrinterIn
 /// `async` 的理由同 `get_networks` —— 枚举要拉子进程或遍历目录。
 #[tauri::command(async)]
 pub fn get_installed_apps(state: State<'_, std::sync::Arc<AppState>>) -> Vec<AppEntry> {
-    state.plat.list_installed_apps()
+    // 走 TTL 缓存：这是开屏最贵的那一项（Windows 上要递归遍历两个开始菜单目录找 .lnk），
+    // 而它的答案在装新程序之前不会变。详见 `platform::cached_apps`。
+    crate::platform::cached_apps(&state.plat)
 }
 
 /// 弹系统自己的文件选择器挑一个程序，返回其路径；用户取消 → `None`。

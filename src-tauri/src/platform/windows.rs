@@ -69,7 +69,7 @@ pub(crate) fn ps(script: &str) -> Result<String, String> {
 }
 
 /// PowerShell 单引号字符串字面量（内部 `'` 翻倍转义）。
-fn psq(s: &str) -> String {
+pub(crate) fn psq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
@@ -154,14 +154,21 @@ pub(crate) fn encode_command(script: &str) -> String {
 
 /// 以管理员身份执行一段 PowerShell 脚本（弹 UAC），失败返回可读错误。
 fn run_elevated_ps(body: &str) -> Result<(), String> {
-    let inner = format!("$ErrorActionPreference='Stop';\r\n{}\r\n", body);
+    let inner = format!(
+        "$ErrorActionPreference='Stop';\r\n[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\r\n{}\r\n",
+        body
+    );
     let b64 = encode_command(&inner);
-    // ExitCode 1223 = ERROR_CANCELLED（用户点了"否"）
+    // ExitCode 1223 = ERROR_CANCELLED（用户点了"否"）。只有 UAC 真的被取消才落这个码；
+    // 脚本/目标本身起不来（文件缺失、路径错）走 catch 但属于别的失败，必须退出非 1223，
+    // 否则上层会把它也报成「用户点了否」，误导排查（审计 W6）。
     let outer = format!(
         "$ErrorActionPreference='Stop';\
          try {{ $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
          -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand','{}'); \
-         exit $p.ExitCode }} catch {{ exit 1223 }}",
+         exit $p.ExitCode }} \
+         catch {{ $ex = $_.Exception; \
+         if ($ex.HResult -eq -2147023673 -or ($ex.Message -match 'cancel')) {{ exit 1223 }} else {{ exit 1 }} }}",
         b64
     );
     match run(
@@ -200,7 +207,9 @@ fn run_elevated_target(file: &str, args: &[&str]) -> Result<(), String> {
     let script = format!(
         "$ErrorActionPreference='Stop';\
          try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru; \
-         exit $p.ExitCode }} catch {{ exit 1223 }}",
+         exit $p.ExitCode }} \
+         catch {{ $ex = $_.Exception; \
+         if ($ex.HResult -eq -2147023673 -or ($ex.Message -match 'cancel')) {{ exit 1223 }} else {{ exit 1 }} }}",
         psq(file),
         ps_exec_arr(args)
     );
@@ -269,12 +278,17 @@ fn parse_ssid_values(raw: &str) -> Vec<String> {
 }
 
 /// 当前无线适配器名。`MediaType = 'Native 802.11'` 是 Wi-Fi 的语言无关判据。
+///
+/// 多张 Wi-Fi 网卡时优先挑**已连上**的那张（`Status -eq 'Up'`），否则会把下发落到一张
+/// 没在用的卡上、看起来像「点了没反应」。没有已连接的再退回第一张 Wi-Fi 适配器（尽力而为）。
 fn wifi_iface() -> Option<String> {
     let out = ps("$ErrorActionPreference='SilentlyContinue';\
-         $a = Get-NetAdapter -Physical | Where-Object { $_.MediaType -eq 'Native 802.11' } | Select-Object -First 1;\
+         $a = Get-NetAdapter -Physical | Where-Object { $_.MediaType -eq 'Native 802.11' -and $_.Status -eq 'Up' } | Select-Object -First 1;\
+         if (-not $a) { $a = Get-NetAdapter -Physical | Where-Object { $_.MediaType -eq 'Native 802.11' } | Select-Object -First 1 };\
+         if (-not $a) { $a = Get-NetAdapter | Where-Object { $_.Name -match 'Wi-?Fi|WLAN|Wireless' -and $_.Status -eq 'Up' } | Select-Object -First 1 };\
          if (-not $a) { $a = Get-NetAdapter | Where-Object { $_.Name -match 'Wi-?Fi|WLAN|Wireless' } | Select-Object -First 1 };\
          if ($a) { $a.Name }")
-    .ok()?;
+        .ok()?;
     let name = out.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
     Some(name.to_string())
 }
@@ -341,6 +355,57 @@ if (Test-Path -LiteralPath $wlanDir) {
 /// 归属按每段接口块里**第一个** MAC 形态的串（`Physical address` 行）算，不是按顺序猜：
 /// BSSID 行带着 `BSSID` 字样会被跳过，GUID 行不是六个两字符的组也匹配不上。
 /// 这样多张 Wi-Fi 网卡同时在用时，各自的 SSID 不会串到对方头上。
+/// 在 `netsh wlan show interfaces` 的文本里，只取**当前这张卡所在接口块**的 BSSID 与信号。
+///
+/// 多张 Wi-Fi 网卡同时在线时，文本里会有多个接口块；BSSID / 信号必须跟着 SSID 同一套
+/// 纪律 —— 按本机 MAC 认领，绝不能像原来那样取「全文最后一个 BSSID / 第一个 `%`」（审计
+/// W5：那样 BSSID 可能来自另一张卡，而 BSSID 既是一个匹配条件、又进指纹）。
+///
+/// 块边界是空行；每块第一个非 BSSID 的 MAC 形态串就是「Physical address」，命中本机 MAC
+/// 才把该块内的 BSSID / Signal 收进来。
+fn netsh_bssid_rssi_for_mac(text: &str, mac: &str) -> (Option<String>, Option<i32>) {
+    let mac = super::normalize_mac(mac);
+    let mut cur_mac: Option<String> = None;
+    let mut bssid: Option<String> = None;
+    let mut rssi: Option<i32> = None;
+    let mut matched = false;
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if matched {
+                break; // 目标块已收完
+            }
+            cur_mac = None;
+            bssid = None;
+            rssi = None;
+            continue;
+        }
+        let t = line.trim_start();
+        if cur_mac.is_none() && !t.contains("BSSID") {
+            if let Some(m) = super::extract_mac(line) {
+                let m = super::normalize_mac(&m);
+                if m == mac {
+                    matched = true;
+                }
+                cur_mac = Some(m);
+            }
+        }
+        if matched {
+            if t.starts_with("BSSID") {
+                if let Some((_, v)) = t.split_once(':') {
+                    if let Some(m) = super::extract_mac(v) {
+                        bssid = Some(super::normalize_mac(&m));
+                    }
+                }
+            } else if t.starts_with("Signal") {
+                if let Some(pct) = percent_in(t) {
+                    rssi = Some(pct / 2 - 100);
+                }
+            }
+        }
+    }
+    (bssid, rssi)
+}
+
 fn netsh_ssids_by_mac(text: &str) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     let mut mac: Option<String> = None;
@@ -447,20 +512,13 @@ $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix
             {
                 st.ssid = Some(name);
             }
-            for line in text.lines() {
-                // BSSID 行：字段名保持英文
-                if line.contains("BSSID") {
-                    if let Some(m) = super::extract_mac(line) {
-                        st.bssid = Some(m);
-                    }
-                }
-                // 信号行：取行内第一个 `NN%`
-                if st.rssi.is_none() {
-                    if let Some(pct) = percent_in(line) {
-                        // 百分比 → dBm 近似：dBm ≈ pct/2 - 100（微软官方给出的换算关系）
-                        st.rssi = Some(pct / 2 - 100);
-                    }
-                }
+            // BSSID / 信号按本机 MAC 认领：多无线网卡时绝不能用「全文最后一个 BSSID /
+            // 第一个 %」（审计 W5——那样 BSSID 会串到另一张卡上，而它既是一个匹配条件
+            // 又进指纹）。这里用本机 MAC 定位接口块，只收那一块里的 BSSID 与 Signal。
+            if let Some(mac) = get("mac").as_ref().map(|m| super::normalize_mac(m)) {
+                let (bssid, rssi) = netsh_bssid_rssi_for_mac(&text, &mac);
+                st.bssid = bssid;
+                st.rssi = rssi;
             }
         }
         // 先算成 owned 值再赋值，避免同时借用 st.gateway 与写 st.gateway_mac
@@ -755,8 +813,8 @@ impl WinOp {
                 psq(iface)
             ),
             WinOp::SetV6Auto { iface } => format!(
-                "Enable-NetAdapterBinding -Name {} -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue;\
-                 Set-NetIPInterface -InterfaceAlias {} -AddressFamily IPv6 -Dhcp Enabled -ErrorAction SilentlyContinue;",
+                "Enable-NetAdapterBinding -Name {} -ComponentID ms_tcpip6 -ErrorAction Stop;\
+                 Set-NetIPInterface -InterfaceAlias {} -AddressFamily IPv6 -Dhcp Enabled -ErrorAction Stop;",
                 psq(iface),
                 psq(iface)
             ),
@@ -816,9 +874,10 @@ fn exec_ops(ops: &[WinOp]) -> Result<(), String> {
         return Ok(());
     }
     let body: String = ops.iter().map(|o| o.render()).collect::<Vec<_>>().join("\r\n");
-    // 优先交给常驻 helper（见 `super::win_helper`）：授权从「每批一次」降到「每会话一次」，
-    // 执行的本就是同一份 PowerShell。够不着 helper 才退回原来的逐批 `run_elevated_ps`，
-    // 而且退回的那一刻在日志里留下原因（`win_helper::log_fallback`）。
+    // 优先交给常驻 helper（见 `super::win_helper`）：授权从「每批一次」降到「helper 的一生
+    // 只弹一次」—— helper 按登录用户命名、跨应用重启存活，所以正常用法下整个下午都只弹
+    // 一次，而不是每启动一次应用弹一次。执行的本就是同一份 PowerShell。够不着 helper 才退回
+    // 原来的逐批 `run_elevated_ps`，而且退回的那一刻在日志里留下原因（`win_helper::log_fallback`）。
     // 已是管理员（Direct）时 -Verb RunAs 本就不弹窗，不必多绕一条管道。
     let r = if matches!(priv_channel(), PrivChannel::Prompt) {
         match super::win_helper::run_batch(&body) {
@@ -2069,6 +2128,37 @@ BSSID              : 60-32-B9-00-AA-CC
             "值里出现 U+FFFD 说明 OEM 解码可能已解坏：整条丢掉，让调用方退回 XML"
         );
         assert_eq!(map.len(), 2);
+    }
+
+    /// 多张 Wi-Fi 网卡时，BSSID / 信号必须跟着本机 MAC 走，不能取「全文最后一个 BSSID /
+    /// 第一个 %」—— 否则 BSSID 会串到另一张卡上（审计 W5）。
+    #[test]
+    fn bssid_rssi_follow_the_same_mac_block_not_the_last_in_text() {
+        let text = "\
+接口名称           : Wi-Fi
+物理地址           : F0-2F-74-1A-2B-3C
+状态               : 已连接
+SSID               : MyWiFi
+BSSID              : E8-84-C6-93-AD-EB
+信号               : 87%
+
+接口名称           : Wi-Fi 2
+物理地址           : 10-7B-44-9E-0F-A1
+状态               : 已连接
+SSID               : Lab:5G
+BSSID              : 60-32-B9-00-AA-BB
+信号               : 41%
+
+";
+        let (b1, r1) = netsh_bssid_rssi_for_mac(text, "f0:2f:74:1a:2b:3c");
+        assert_eq!(b1.as_deref(), Some("e8:84:c6:93:ad:eb"));
+        assert_eq!(r1, Some(87 / 2 - 100));
+        // 第二张卡：BSSID / 信号取它自己那一块，而不是全文最后一个
+        let (b2, r2) = netsh_bssid_rssi_for_mac(text, "10:7b:44:9e:0f:a1");
+        assert_eq!(b2.as_deref(), Some("60:32:b9:00:aa:bb"));
+        assert_eq!(r2, Some(41 / 2 - 100));
+        // 不存在的 MAC：两样都拿不到
+        assert_eq!(netsh_bssid_rssi_for_mac(text, "de:ad:be:ef:00:00"), (None, None));
     }
 
     /// `list_known_ssids` 交回来的 JSON 有两种形状（只有一条记录时 PowerShell 不吐数组），

@@ -58,6 +58,15 @@ GROUPS = 12
 _mark: tuple[int, int] = (0, 0)
 _label = ""
 _group_scores: list[tuple[str, float]] = []
+# 因环境缺工具而**没跑成**的断言：它们既不是通过也不是失败，但如果不单独记一笔，
+# 一台没装 rustc 的机器会拿到一个干干净净的 100/100 —— 看起来像全查过了，其实
+# 三份平台实现里两份的语法一次都没解析。跳过项在结尾单列，总分照算但不冒充「全绿」。
+_skips: list[str] = []
+
+
+def skip(msg: str) -> None:
+    _skips.append(msg)
+    print(f"  SKIP {msg}")
 
 
 def group(label: str) -> None:
@@ -256,7 +265,8 @@ def parse_platform_files() -> None:
     多出来的引号就足够让对应的 CI 构建腿跑完依赖才失败。
     """
     if not shutil.which("rustc"):
-        print("  未找到 rustc，跳过平台实现的语法解析（其余断言照常）")
+        skip("未找到 rustc：三份平台实现的语法解析本次未执行"
+             "（macOS 之外的另两份要等 CI 对应构建腿才暴露）")
         return
     for plat in ("macos", "windows", "linux"):
         p = os.path.join(SRC, "platform", f"{plat}.rs")
@@ -374,12 +384,12 @@ def _read_trim(path: str) -> str | None:
 
 def check_version() -> None:
     """VERSION / tauri.conf.json.version / Cargo.toml [package].version /
-    CHANGELOG.md 顶部条目版本 必须一致。
+    Cargo.lock 里 netsense 那条 / CHANGELOG.md 顶部条目版本 必须一致。
 
     否则打 tag 前很容易漏改某处，发出版本号错乱的安装包。
 
     顶部允许是 `[Unreleased]`（写好的发布说明还没对应的 tag）：这时拿它下面第一条带版本号的小节
-    来比对。一条带版本号的小节都没有时只校验三处代码版本号，并显式说明 CHANGELOG 跳过了本次比对
+    来比对。一条带版本号的小节都没有时只校验四处代码版本号，并显式说明 CHANGELOG 跳过了本次比对
     —— 那种状态下 CHANGELOG 本来就没有可比的东西，让它报成不一致只会把注意力引向错误的方向。
     """
     group("[8] 版本号一致性")
@@ -398,6 +408,16 @@ def check_version() -> None:
         v["Cargo.toml"] = m.group(1) if m else None
     else:
         v["Cargo.toml"] = None
+
+    # Cargo.lock 是第五个记着版本号的地方。改了 Cargo.toml 的版本却没让 cargo 重新
+    # 解析依赖，打出来的包元数据仍写着旧版本 —— 装到用户机器上的「关于」窗口于是
+    # 报着一个和文件名对不上的号。取 netsense 自己那条 [[package]]，不碰依赖的版本。
+    lock = _read_trim(os.path.join(ROOT, "src-tauri", "Cargo.lock"))
+    if lock is not None:
+        m = re.search(r'\[\[package\]\]\s*\nname\s*=\s*"netsense"\s*\nversion\s*=\s*"([^"]+)"', lock)
+        v["Cargo.lock"] = m.group(1) if m else None
+    else:
+        v["Cargo.lock"] = None
 
     headings = [ln for ln in (_read_trim(os.path.join(ROOT, "CHANGELOG.md")) or "").splitlines()
                 if ln.startswith("## [")]
@@ -421,7 +441,7 @@ def check_version() -> None:
     if len(set(present.values())) > 1:
         bad("版本号不一致: " + ", ".join(f"{k}={val}" for k, val in present.items()))
     elif present:
-        n = "三处" if "CHANGELOG.md(顶部)" not in present else "四处"
+        n = f"{len(present)}处"
         ok(f"{n}版本号一致 = " + next(iter(present.values())))
 
 
@@ -780,12 +800,22 @@ class _MarkupParser(HTMLParser):
             self.exempt.update(range(line + 1, line + 9))
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        line = self.getpos()[0]
         key = next((v for k, v in attrs if k == "data-i18n"), None)
-        self.stack.append([tag, key is not None, key, self.getpos()[0], [], False])
+        # `data-i18n-<attr>` 把 key 绑到**属性**上（placeholder / title / aria-label…），
+        # 静态标记里那一版英文就写在被翻译的那个属性本身。属性翻译不经过 textContent，
+        # 所以兜底文本不在 `handle_data` 的射程内 —— 这里单独收进同一份对照，
+        # 让「属性里的英文 ≠ 字典」也能被查出来，和元素正文一个等式。
+        for aname, aval in attrs:
+            if aname.startswith("data-i18n-"):
+                suffix = aname[len("data-i18n-"):]
+                fallback = next((v for k, v in attrs if k == suffix), None)
+                self.defaults.append((line, aval, (fallback or "").strip()))
+        self.stack.append([tag, key is not None, key, line, [], False])
         if len(self.stack) > 1:
             self.stack[-2][5] = True  # 有子元素：父元素的文字不是单一的标签文案
         if tag == "script":
-            self._script_open = self.getpos()[0]
+            self._script_open = line
 
     def handle_endtag(self, tag: str) -> None:
         for i in range(len(self.stack) - 1, -1, -1):
@@ -1132,12 +1162,17 @@ def main() -> int:
     for label, pts in _group_scores:
         if pts < 10.0:
             print(f"  未满组: {label.split(']')[0]}] = {pts:.1f}/10")
+    # 跳过的断言既没跑过、也就谈不上「通过」：单列出来，免得 100/100 被读成「全查过了」。
+    if _skips:
+        print(f"另有 {len(_skips)} 项因环境缺工具未执行（不计入分数，也不算通过）:")
+        for s in _skips:
+            print(f"  - {s}")
     if failures:
         print(f"结果: {len(failures)} 项不通过")
         for f in failures:
             print("  -", f)
         return 1
-    print("结果: 全部通过")
+    print("结果: 全部通过" + (f"（另有 {len(_skips)} 项未执行）" if _skips else ""))
     return 0
 
 

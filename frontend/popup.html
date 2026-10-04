@@ -584,7 +584,7 @@
 
     function showUpdating() {
       const box = document.getElementById("update-modal");
-      box.innerHTML = `<h3>${esc(t("popup.updating", "Updating…"))}</h3>
+      box.innerHTML = `<h3>${esc(t("popup.updating", "Checking…"))}</h3>
         <div class="mv" id="up-phase">${esc(t("popup.downloading", "Downloading…"))}</div>
         <div class="progress"><div class="bar indeterminate" id="up-bar"></div></div>
         <div class="mv" id="up-pct"></div>`;
@@ -621,7 +621,7 @@
           <div class="mv">${esc(t("popup.update_restart", "Restarting…"))}</div>
           <div class="row-btns"><button id="up-close">${esc(t("popup.close", "Close"))}</button></div>`;
       } else {
-        box.innerHTML = `<h3>${esc(t("popup.update_failed", "Update failed"))}</h3>
+        box.innerHTML = `<h3>${esc(t("popup.update_failed", "Failed to check for updates"))}</h3>
           <div class="err">${esc(err || "")}</div>
           <div class="row-btns">
             <button id="up-rel">${esc(t("popup.release_page", "Release Page"))}</button>
@@ -703,7 +703,7 @@
       catch (e) { toast(String(e)); }
     };
     document.getElementById("btn-probe").onclick = async () => {
-      try { await invoke("probe_network"); toast(t("notify.probe_running", "Probing…")); }
+      try { await invoke("probe_network"); toast(t("notify.probe_running", "Probing current network…")); }
       catch (e) { toast(String(e)); }
     };
     document.getElementById("btn-update").onclick = () => checkForUpdate();

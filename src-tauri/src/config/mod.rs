@@ -78,7 +78,19 @@ impl Config {
                 })?;
             }
         }
-        std::fs::write(path, s).map_err(|e| {
+        // 原子写：先写 `.part` 临时文件再 `rename` 覆盖，避免崩溃/掉电把 config.json 截成半截。
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "config".to_string());
+        let tmp = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{file_name}.part"));
+        std::fs::write(&tmp, &s).map_err(|e| {
+            i18n::tf("cfg.write_failed", &[("path", &tmp.display().to_string()), ("error", &e.to_string())])
+        })?;
+        std::fs::rename(&tmp, path).map_err(|e| {
             i18n::tf("cfg.write_failed", &[("path", &path.display().to_string()), ("error", &e.to_string())])
         })
     }

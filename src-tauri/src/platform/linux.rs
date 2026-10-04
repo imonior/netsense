@@ -17,6 +17,7 @@ use super::{
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
+use crate::platform::linux_nm::{self, DeviceIp};
 use std::sync::OnceLock;
 
 /// 目标在这台机器上**到底是什么**，决定交给谁去执行。
@@ -358,15 +359,25 @@ fn nmcli(args: &[&str]) -> Result<String, String> {
 }
 
 /// 当前无线设备名（如 wlan0）。
+///
+/// 多张 Wi-Fi 网卡时优先挑**已连接**的那张（`STATE == connected`），否则落到任意一张
+/// 没在用的卡上、下发就打空。没有已连接的再退回第一张 wifi 设备（尽力而为）。
 fn wifi_iface() -> Option<String> {
-    let out = nmcli(&["-t", "-f", "DEVICE,TYPE", "dev", "status"]).ok()?;
+    let out = nmcli(&["-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"]).ok()?;
+    let mut fallback: Option<String> = None;
     for line in out.lines() {
         let f = split_t(line);
-        if f.len() >= 2 && f[1].trim() == "wifi" {
-            return Some(f[0].trim().to_string());
+        if f.len() >= 3 && f[1].trim() == "wifi" {
+            let dev = f[0].trim().to_string();
+            if f[2].trim() == "connected" {
+                return Some(dev);
+            }
+            if fallback.is_none() {
+                fallback = Some(dev);
+            }
         }
     }
-    None
+    fallback
 }
 
 /// 当前活动连接名（`nmcli con mod` 需要它）。
@@ -391,6 +402,15 @@ fn get_field(dev: &str, field: &str) -> Option<String> {
     } else {
         Some(v.to_string())
     }
+}
+
+/// 读某条已保存连接的某个设置字段（`nmcli -t -f <field> connection show <name>`）。
+/// 用于取「真实 SSID」这类藏在连接设置里、不在设备视图中的字段。
+fn get_connection_field(conn: &str, field: &str) -> Option<String> {
+    nmcli(&["-t", "-f", field, "connection", "show", conn])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn get_field_all(dev: &str, field: &str) -> Vec<String> {
@@ -602,8 +622,53 @@ fn ip_link_ready(out: &str, dev: &str) -> Option<bool> {
 /// 这是给 `wg-quick` 那类**不归 NetworkManager 管**的 WireGuard 接口兜底的：
 /// 它们在 nmcli 清单里根本不存在，只查 NM 就会永远判成「找不到隧道」。
 fn ip_link_is_up(dev: &str) -> Option<bool> {
-    let out = run("ip", &["link", "show", dev]).ok()?;
-    ip_link_ready(&out, dev)
+    // 原生 netlink 优先；netlink 不可用（容器、权限、解析失败）时回退 `ip link show` 文本解析。
+    crate::platform::linux_netlink::link_is_up(dev).or_else(|| {
+        let out = run("ip", &["link", "show", dev]).ok()?;
+        ip_link_ready(&out, dev)
+    })
+}
+
+/// `nmcli -g device show <dev>` 的逐设备字段读取，归一成 [`DeviceIp`]。
+///
+/// 这是原生 D-Bus 读取（`linux_nm::device_ip`）的兜底：当这台发行版的 NM D-Bus 属性签名
+/// 与预期不符、或没有 system bus 时回落到这里，行为完全等价于原生改造前的实现。
+fn device_ip_nmcli(dev: &str) -> DeviceIp {
+    let mut out = DeviceIp::default();
+    if let Some(addr) = get_field(&dev, "IP4.ADDRESS") {
+        let (ip, prefix) = match addr.split_once('/') {
+            Some((a, p)) => (
+                Some(a.to_string()),
+                p.trim().parse::<u32>().ok().and_then(prefix_to_mask),
+            ),
+            None => (Some(addr.clone()), None),
+        };
+        out.ipv4 = ip;
+        out.netmask = prefix;
+    }
+    out.gateway = get_field(&dev, "IP4.GATEWAY");
+    let dns = get_field_all(&dev, "IP4.DNS");
+    if !dns.is_empty() {
+        out.dns = Some(dns.join(","));
+    }
+    // 全局 IPv6：跳过 link-local（`fe80:`），取第一条真正全局地址（与 `list_interfaces` 同判据）。
+    out.ipv6 = get_field_all(&dev, "IP6.ADDRESS")
+        .into_iter()
+        .find(|a| !a.trim().to_ascii_lowercase().starts_with("fe80:"))
+        .map(|a| a.split('/').next().unwrap_or("").trim().to_string())
+        .filter(|a| !a.is_empty());
+    out.gateway6 = get_field(&dev, "IP6.GATEWAY").filter(|g| g != "::");
+    out.mac = get_field(&dev, "GENERAL.HWADDR");
+    out.routes = route_prefixes(&get_field_all(&dev, "IP4.ROUTE"));
+    out
+}
+
+/// 设备当前的 IP 配置：原生 NetworkManager D-Bus 优先，失败回落 `nmcli -g device show`。
+///
+/// 返回 `Some` 始终成立（nmcli 兜底总能产出一份结构，字段取不到即 `None`）；
+/// 仅在连 system bus 都失败时原生返回 `None`，此时由 [`device_ip_nmcli`] 兜底。
+fn device_ip(dev: &str) -> Option<DeviceIp> {
+    linux_nm::device_ip(dev).or_else(|| Some(device_ip_nmcli(dev)))
 }
 
 /// 列出 NM 已知的连接名，供「找不到隧道」的报错用（用户最需要的是名字清单）。
@@ -703,16 +768,12 @@ impl NetworkPlatform for LinuxPlatform {
         // 从设备视角读，比 `dev wifi list` 更快也更准（不受扫描结果影响）
         let dev = wifi_iface()?;
         let conn = active_connection(&dev)?;
-        // 连接的 802-11-wireless.ssid 才是真实 SSID（连接名可能被用户改过）
-        let ssid = get_field(&dev, "GENERAL.CONNECTION")
-            .unwrap_or(conn)
-            .trim()
-            .to_string();
-        if ssid.is_empty() {
-            None
-        } else {
-            Some(ssid)
-        }
+        // 连接名（`GENERAL.CONNECTION`）可能被用户改过，不可信；真正的 SSID 在该连接
+        // 的 `802-11-wireless.ssid` 设置里。先取真实 SSID，取不到再退回到连接名。
+        let ssid = get_connection_field(&conn, "802-11-wireless.ssid")
+            .or_else(|| get_field(&dev, "GENERAL.CONNECTION"))
+            .map(|s| s.trim().to_string());
+        ssid.filter(|s| !s.is_empty())
     }
 
     fn get_status(&self) -> InterfaceStatus {
@@ -724,20 +785,14 @@ impl NetworkPlatform for LinuxPlatform {
         st.ssid = self.get_current_ssid();
         st.connected = st.ssid.is_some();
 
-        if let Some(addr) = get_field(&dev, "IP4.ADDRESS") {
-            // 形如 192.168.1.5/24
-            let (ip, prefix) = match addr.split_once('/') {
-                Some((a, p)) => (a.to_string(), p.trim().parse::<u32>().ok()),
-                None => (addr.clone(), None),
-            };
-            st.ipv4 = Some(ip);
-            st.netmask = prefix.and_then(prefix_to_mask);
+        // IP / 网关 / DNS / IPv6 走原生 D-Bus（失败回落 `nmcli -g device show`）。
+        if let Some(dip) = device_ip(&dev) {
+            st.ipv4 = dip.ipv4;
+            st.netmask = dip.netmask;
+            st.gateway = dip.gateway;
+            st.dns = dip.dns;
         }
-        st.gateway = get_field(&dev, "IP4.GATEWAY");
-        let dns = get_field_all(&dev, "IP4.DNS");
-        if !dns.is_empty() {
-            st.dns = Some(dns.join(","));
-        }
+        // `v6mode` 需要从连接 setting 推导，原生读取较重，保留这一条 `nmcli` 字段查询。
         st.v6mode = get_field(&dev, "IP6.METHOD").map(|m| match m.as_str() {
             "auto" => "automatic".to_string(),
             "manual" => "manual".to_string(),
@@ -770,11 +825,10 @@ impl NetworkPlatform for LinuxPlatform {
             }
         }
 
-        // 网关 MAC：邻居表
+        // 网关 MAC：邻居表（netlink 优先，`ip neigh` 兜底）
         if let Some(gw) = st.gateway.clone() {
-            if let Ok(out) = run("ip", &["neigh", "show", &gw]) {
-                st.gateway_mac = extract_mac(&out);
-            }
+            st.gateway_mac = crate::platform::linux_netlink::gateway_mac(&gw)
+                .or_else(|| run("ip", &["neigh", "show", &gw]).ok().and_then(|o| extract_mac(&o)));
         }
         st
     }
@@ -791,7 +845,34 @@ impl NetworkPlatform for LinuxPlatform {
         let conn = active_connection(&dev)
             .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", &dev)]))?;
 
-        // 一次 `con mod` 下发 IP/网关/DNS（减少提权次数）
+        // 原生 D-Bus 优先：`Settings.Connection.Update` + `ActivateConnection` 一次下发，
+        // 不再 spawn `nmcli con mod`。任何一步失败（无 system bus、属性签名不符、
+        // 连接路径匹配不上）都回落到下面的 `nmcli` 实现，功能不退化。
+        let native = linux_nm::apply(
+            &conn,
+            &dev,
+            match p.mode {
+                Mode::Manual => "manual",
+                Mode::Dhcp => "auto",
+            },
+            p.ip.as_deref(),
+            p.netmask.as_deref().and_then(mask_to_prefix),
+            p.gateway.as_deref(),
+            p.dns.as_deref(),
+            p.v6mode.as_ref().map(|m| match m {
+                V6Mode::Off => "disabled",
+                V6Mode::Automatic => "auto",
+                V6Mode::Manual => "manual",
+            }),
+            p.ipv6.as_deref(),
+            p.v6prefix.as_deref().and_then(|s| s.parse::<u32>().ok()),
+            p.v6gateway.as_deref(),
+        );
+        if native.is_ok() {
+            return Ok(());
+        }
+
+        // 兜底：`nmcli con mod`（沿用既有逻辑）
         let mods = con_mod_props(p)?;
         let mut args: Vec<&str> = vec!["con", "mod", &conn];
         for m in &mods {
@@ -812,6 +893,13 @@ impl NetworkPlatform for LinuxPlatform {
     fn set_dhcp_for(&self, dev: &str) -> Result<(), String> {
         let conn = active_connection(dev)
             .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", dev)]))?;
+
+        // 原生 D-Bus 优先（一并清空静态 DNS，与 `nmcli ipv4.dns ""` 一致）。
+        if linux_nm::set_dhcp(&conn, dev).is_ok() {
+            return Ok(());
+        }
+
+        // 兜底：`nmcli con mod`
         run_priv(
             "nmcli",
             &[
@@ -855,75 +943,57 @@ impl NetworkPlatform for LinuxPlatform {
                     _ => super::NicKind::Other,
                 };
 
-                let addr = get_field(&dev, "IP4.ADDRESS");
-                let (ipv4, netmask) = match addr.as_deref().and_then(|a| a.split_once('/')) {
-                    Some((ip, pfx)) => (
-                        Some(ip.to_string()),
-                        pfx.trim().parse::<u32>().ok().and_then(prefix_to_mask),
-                    ),
-                    None => (addr, None),
-                };
-                let gateway = get_field(&dev, "IP4.GATEWAY");
-                // `::` 是 on-link 伪网关（同 Windows 的判据），收了就会摆出一行不是地址的「网关」。
-                let gateway6 = get_field(&dev, "IP6.GATEWAY").filter(|g| g != "::");
-                let dns = get_field_all(&dev, "IP4.DNS");
-                // 全局 IPv6：nmcli 会连 link-local 一起列出来，而 `fe80::` 每台机器都有、
-                // 也不代表这个口能走 IPv6，故跳过它取第一条真正的全局地址（去掉 /prefix）。
-                let ipv6 = get_field_all(&dev, "IP6.ADDRESS")
-                    .into_iter()
-                    .find(|a| !a.trim().to_ascii_lowercase().starts_with("fe80:"))
-                    .map(|a| a.split('/').next().unwrap_or("").trim().to_string())
-                    .filter(|a| !a.is_empty());
-                // 取 MAC 必须在 `dev` 被搬进 `NicInfo` 之前：`name: dev` 一移动，后面再
-                // `&dev` 就是 use-after-move（这个函数体只有 Linux 腿会编译，本机看不到）。
-                let mac = get_field(&dev, "GENERAL.HWADDR");
                 let ssid = if kind == super::NicKind::Wireless && Some(&dev) == wifi.as_ref() {
                     self.get_current_ssid()
                 } else {
                     None
                 };
-                if ipv4.is_none() && ssid.is_none() {
-                    continue;
-                }
 
-                let gateway_mac = gateway.as_deref().and_then(|gw| {
-                    run("ip", &["neigh", "show", gw])
-                        .ok()
-                        .and_then(|o| extract_mac(&o))
-                });
-                // 路由前缀只有 VPN 那一格会显示（面板的「网关或路由」），所以也只问隧道：
-                // 这一问是每条链路一次 `nmcli` 子进程，物理口用了它也没有地方摆。
-                let routes = if kind == super::NicKind::Vpn {
-                    route_prefixes(&get_field_all(&dev, "IP4.ROUTE"))
-                } else {
-                    Vec::new()
-                };
+                // IP / 网关 / DNS / IPv6 / MAC：原生 D-Bus 优先，失败回落 `nmcli -g device show`。
+                // `device_ip` 在 D-Bus 与 nmcli 都拿不到时返回 `None` —— 这种接口没有可展示的
+                // 地址信息，且本机又没连 SSID 时不值得占面板一格，直接跳过。
+                if let Some(dip) = device_ip(&dev) {
+                    if dip.ipv4.is_none() && ssid.is_none() {
+                        continue;
+                    }
 
-                out.push(super::NicInfo {
-                    name: dev,
-                    label: if conn.is_empty() { None } else { Some(conn.clone()) },
-                    kind,
-                    up: true,
-                    ssid,
-                    mac,
-                    ipv4,
-                    netmask,
-                    ipv6,
-                    gateway,
-                    gateway6,
-                    routes,
-                    gateway_mac,
-                    dns: if dns.is_empty() { None } else { Some(dns.join(",")) },
-                    app: if kind == super::NicKind::Vpn {
-                        Some(
-                            super::guess_vpn_app(&conn)
-                                .map(|s| s.to_string())
-                                .unwrap_or(conn),
-                        )
+                    let gateway_mac = dip.gateway.as_deref().and_then(|gw| {
+                        crate::platform::linux_netlink::gateway_mac(gw)
+                            .or_else(|| run("ip", &["neigh", "show", gw]).ok().and_then(|o| extract_mac(&o)))
+                    });
+                    // 路由前缀只有 VPN 那一格会显示（面板的「网关或路由」），所以也只问隧道。
+                    let routes = if kind == super::NicKind::Vpn {
+                        dip.routes.clone()
                     } else {
-                        None
-                    },
-                });
+                        Vec::new()
+                    };
+
+                    out.push(super::NicInfo {
+                        name: dev,
+                        label: if conn.is_empty() { None } else { Some(conn.clone()) },
+                        kind,
+                        up: true,
+                        ssid,
+                        mac: dip.mac.clone(),
+                        ipv4: dip.ipv4.clone(),
+                        netmask: dip.netmask.clone(),
+                        ipv6: dip.ipv6.clone(),
+                        gateway: dip.gateway.clone(),
+                        gateway6: dip.gateway6.clone(),
+                        routes,
+                        gateway_mac,
+                        dns: dip.dns.clone(),
+                        app: if kind == super::NicKind::Vpn {
+                            Some(
+                                super::guess_vpn_app(&conn)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or(conn),
+                            )
+                        } else {
+                            None
+                        },
+                    });
+                }
             }
 
             // 「装了、没连」的那几个 VPN 客户端补在最后：它们没有设备，上面那条按设备枚举的
@@ -1109,11 +1179,11 @@ impl NetworkPlatform for LinuxPlatform {
     }
 
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String> {
-        let mut full = vec![path.to_string()];
-        full.extend(args.iter().cloned());
         if elevated {
-            // 用户脚本提权：显式走授权框（sudo -n 失败则 pkexec），与网络配置操作区别对待
-            let refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
+            // 用户脚本提权：显式走授权框（sudo -n 失败则 pkexec），与网络配置操作区别对待。
+            // 只把真正的参数交给 `run_priv`；脚本路径本身由 `run_priv` 负责前缀，
+            // 不能把 `path` 再塞进 args（否则脚本的 $1 会变成自己的路径）。
+            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_priv(path, &refs)
         } else {
             super::run_owned(path, args).map(|_| ())

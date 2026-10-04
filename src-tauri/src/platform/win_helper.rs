@@ -1,18 +1,26 @@
 //! Windows 提权 helper：GUI 进程（同一个 exe）经一次 UAC 变成常驻的提权进程，
 //! 之后的网络配置批次通过命名管道交给它执行 —— UAC 从「每次下发弹一次」变成
-//! 「每个 GUI 会话只弹一次」。
+//! 「helper 的一生只弹一次」（它按登录用户命名、跨应用重启存活，详见下）。
 //!
 //! 这条通道可以常驻的依据（谁能和 helper 说话）：
 //!
-//! 1. **管道名携带 GUI 自己的 PID**（`\\.\pipe\netsense-h-<pid>`）：只有启动它的那个
-//!    GUI 找得到这条路；GUI 退出时句柄关闭、helper 读到 EOF 即退出，不会留下无人认领
-//!    的提权进程（首个客户端迟迟不来也有 60 秒自杀兜底）。
+//! 1. **管道名按登录用户命名，不按 GUI 进程**（`\\.\pipe\netsense-h-<SID>`）。按 PID
+//!    命名的话管道随 GUI 进程一起消失，重启一次应用就得重新授权一次 —— 那正是「每个
+//!    会话弹一次」的由来。改按 SID 之后，同一个用户在**应用重启之后**还能接上同一条
+//!    通道，授权从「每次启动一次」降到「每 30 分钟一次」（[`RECONNECT_WAIT`]）。
+//!    安全性没有因此变松：DACL 点名的正是这个 SID，而能不能投递任务始终由
+//!    [`client_is_self`] 的「同一个 exe」核验把关。
+//!    生命周期跟着**拉起它的那个 GUI 进程**走：GUI 还在就无限期等着，GUI 退出后只多留
+//!    一段重连宽限（[`RECONNECT_WAIT`]）等一个刚重启的 GUI 接管，然后自己退场 —— 不留
+//!    无人认领的提权进程。
 //! 2. **管道 ACL 点名 GUI 进程账户的 SID**（`D:(A;;GA;;;<GUI 账户 SID>)S:(ML;;NW;;;MM)`）：
 //!    SID 由 helper 在提权侧从 GUI 令牌里读出来（[`gui_user_sid`]），其他账户与匿名访问
 //!    在协议层之前就被内核拒掉。这里**不能**用 CO（CREATOR OWNER）：CO 只在**继承**的
 //!    ACE 里被替换成对象属主（MS 的 well-known SIDs 定义），而交给 `CreateNamedPipeW` 的
 //!    是一份显式描述符，不经过继承 —— CO 原样留着、匹配不上任何令牌，于是 GUI 一律
 //!    `CreateFile=5` 打不开：通道自始至终建不起来，每批配置都默默退回逐批 UAC。
+//!    读不到 GUI 令牌就没有 SID、连管道名都算不出来，那种情况一律退场（fail-closed）
+//!    而不是猜一个名字。
 //!    SACL 那半句把完整性标签压到 Medium —— helper 是 High IL 进程，管道默认继承它的标签，
 //!    而 NO_WRITE_UP 会让一个提权的管道对**没提权的自己人**关门（GUI 侧以 read+write 打开
 //!    就回 ERROR_ACCESS_DENIED）。标签留在 Medium 而不是更低：GUI 与它平级所以写得上话，
@@ -36,7 +44,7 @@
 //! 「请求已写出、链路断开、是否执行过不确定」的情况会退回逐次 UAC 重跑一遍 —— 配置批次
 //! （`netsh interface ipv4 set …`）都是幂等设定，重发不产生额外副作用。
 
-use super::windows::{encode_command, ps, ps_exec_arr, uac_cancelled};
+use super::windows::{encode_command, ps, ps_exec_arr, psq, uac_cancelled};
 use super::{priv_channel, PrivChannel};
 use crate::i18n;
 use crate::platform::run;
@@ -49,6 +57,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -62,19 +71,40 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+    WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+// `SYNCHRONIZE` 在 windows-sys 里归属 `Win32::Storage::FileSystem`（它与
+// FILE_ACCESS_RIGHTS 同为 u32 新类型，值 0x00100000），不在 Threading 下。
+// `Win32_Storage_FileSystem` 本来就已启用（`PIPE_ACCESS_DUPLEX` 来自那里）。
+use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 
 /// GUI 拉起 helper 时传的隐藏子命令（放在第一个参数位置）。
 pub(crate) const HELPER_ARG: &str = "--netsense-helper";
+
+/// 管道行协议版本。每次改了请求/响应形状都必须 +1，否则旧 helper（升级前起、同管道名
+/// 还活着的那一个）会按旧语义执行这一批，而它和「版本不符」的客户端之间没有任何东西能
+/// 拦住这条错配（审计 W4：macOS 那一侧早就有「版本不符」通道检查，Windows 这一侧缺）。
+///
+/// 握手在 [`open_conn`] 里做：客户端先发 `version`，helper 回自己的 `ver`；对不上就退回
+/// 逐次 UAC，绝不把这一批交给旧语义。
+const PROTO_VER: u32 = 1;
+
+/// `last_connect_err` 里给「协议版本对不上」留的一个哨兵码（不在 CreateFile 的正常码表里）。
+const VERSION_MISMATCH: u32 = 130;
 
 /// 本进程是否处于 helper 模式（`main` 在所有 GUI 装配之前问这个）。
 pub(crate) fn helper_mode() -> bool {
     std::env::args().nth(1).as_deref() == Some(HELPER_ARG)
 }
 
-fn pipe_path(pid: u32) -> String {
-    format!(r"\\.\pipe\netsense-h-{pid}")
+/// 管道名按**登录用户**而不是按 GUI 进程 PID 命名。
+///
+/// 换掉的理由见模块头第 1 条：按 PID 命名会让管道随 GUI 进程一起消失，于是重启一次
+/// 应用就得重新授权一次。SID 形如 `S-1-5-21-…-1001`，把 `-` 换成 `_` 只是让管道名读
+/// 起来像个名字，两侧算出的名字必须逐字相同。
+fn pipe_path(sid: &str) -> String {
+    format!(r"\\.\pipe\netsense-h-{}", sid.replace('-', "_"))
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -93,11 +123,47 @@ const EXIT_NO_CLIENT: i32 = 4;
 /// 未提权的 helper 毫无意义，还会在同名管道上留一个只会失败的应答者 —— fail-fast。
 const EXIT_NOT_ADMIN: i32 = 5;
 
-/// helper 主循环：建管道 → 验客户端 → 服务这一个会话 → 客户端断开即退出。
+/// 拉起之后等第一个客户端的上限：60 秒还连不上，说明 GUI 在连上之前就已经不在了，
+/// 一个提权进程留在后台毫无意义。
+const FIRST_CLIENT_WAIT: Duration = Duration::from_secs(60);
+
+/// GUI 进程还活着时的轮询间隔。醒来只是为了重新看一眼「它还在不在」，这一轮里若
+/// 有客户端连上会立刻被收到，间隔长一点只是把判活这件事做粗一点（10 分钟内退出的话，
+/// 宽限判定会晚最多 10 分钟生效，对一个兜底退场来说无关紧要）。
+const LIVING_TICK: Duration = Duration::from_secs(600);
+
+/// GUI 进程已经退出之后，继续等一个「刚重启的 GUI」来接管的上限。
 ///
-/// 「等客户端」这一步没有超时参数可用（同步 `ConnectNamedPipe` 一阻塞就是到底），所以它
-/// 放在工作线程里做，主线程只按 deadline 结束进程：60 秒等不到客户端，说明 GUI 在连上之前
-/// 就已经不在了，一个提权进程留在后台毫无意义。
+/// 这段时间就是「关掉再打开不必再授权」的窗口，也是「一个提权进程在无人使用后仍然
+/// 存在」的上限 —— 两者是同一个数字，因为它们说的是同一件事：helper 愿意为一个可能
+/// 马上回来的客户端多留多久。取 30 分钟：一次普通的「关掉应用、过一会儿再打开」一定
+/// 落在里面，而一台真的不再用 NetSense 的机器不会在半小时后还留着它。
+const RECONNECT_WAIT: Duration = Duration::from_secs(30 * 60);
+
+/// 处在重连宽限里时的轮询间隔：这时要把「宽限到期」判得准一点，所以比 [`LIVING_TICK`]
+/// 密得多。宽限最多 30 分钟，也就是每小时多醒 360 次 —— 一个空转的提权进程，这点开销
+/// 可以忽略，而宽限判早判晚直接影响上面那个「多留多久」。
+const RECONNECT_TICK: Duration = Duration::from_secs(5);
+
+/// helper 主循环：建管道 → 反复验客户端并服务 → 按 GUI 的生命周期决定何时退场。
+///
+/// **为什么服务多轮、而不是「一个会话完事」**：GUI 侧把连接缓存起来长期复用，正常
+/// 情况下这里一个 GUI 只连一次；但连接可能因为任何一端的原因断掉（GUI 崩了、管道被
+/// 别的同账户进程挤掉、helper 上一次自己退了）。原来「服务一轮就退出」在这些情况下
+/// 都要 GUI 重新拉一次授权，而重拉的成本是一次 UAC 弹框 —— 于是断一次就多弹一次。
+/// 改成循环服务之后，断掉的 GUI 只要还在重连窗口内回来，接上的是同一个提权进程。
+///
+/// **退场判据**（这是本函数真正的职责，也是「不留下无人认领的提权进程」那条纪律的落点）：
+///
+/// - 拉起后的第一轮只等 [`FIRST_CLIENT_WAIT`]：GUI 在连上之前就没了的话，没有任何理由
+///   让一个提权进程继续挂着。
+/// - 之后每一轮：GUI 进程还活着就无限期等（每 [`LIVING_TICK`] 醒一次只为重新判活，
+///   期间有客户端连上会立刻被服务）；GUI 已经退出就开始数 [`RECONNECT_WAIT`] 的重连
+///   宽限，到点退场。
+///   判「GUI 还在不在」用的是 [`WaitForSingleObject`] 对 GUI 进程句柄的等待，而不是
+///   「客户端还在不在」—— 两者在这里是同一件事的两种问法，但只有前者能覆盖到「GUI
+///   崩了、根本没走bye」这种情况：那之后没有任何客户端会再来，只等客户端的话这个提权
+///   进程会一直挂着。
 ///
 /// 不装日志、不起 Tauri：错误文本一律通过管道回给 GUI，由那边统一落日志和上界面
 /// （两个进程追写同一个日志文件是要打架的）。
@@ -115,22 +181,36 @@ pub(crate) fn serve() -> i32 {
     if !matches!(priv_channel(), PrivChannel::Direct) {
         return EXIT_NOT_ADMIN;
     }
-    let name = to_wide(&pipe_path(gui_pid));
-    let deadline = Instant::now() + Duration::from_secs(60);
-    // DACL 里点名 GUI 进程所属账户的 SID（[`gui_user_sid`]）：交给 CreateNamedPipeW 的是
-    // 一份显式描述符，不经过继承，CO（CREATOR OWNER）在这里匹配不上任何令牌（见模块头）。
-    // 读不到 GUI 令牌时兜底用 IU（交互式登录组）—— GUI 是人点开的，它的登录会话一定带
-    // 这个组；而「谁能投递任务」的最终判据是 accept_one 里的同 exe 核验，不靠这张 DACL。
-    let sddl = match gui_user_sid(gui_pid) {
-        Some(sid) => format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;MM)"),
-        None => "D:(A;;GA;;;IU)S:(ML;;NW;;;MM)".to_string(),
+    // 管道名与 DACL 都以 GUI 那个账户的 SID 为准（[`gui_user_sid`]）。读不出来就没有
+    // SID —— 管道名算不出来、DACL 也没法点名谁，一律退场（fail-closed）。这与旧实现
+    // 「退到 IU（交互式登录组）」是相反的选择：IU 也许能覆盖真正的登录用户，但它同时
+    // 把这条常提权通道开放给了机器上所有交互式会话，而现在这条通道已经按 SID 命名、
+    // 授权范围必须跟着收窄，不能靠一个更宽的兜底来「提高成功率」。
+    let Some(sid) = gui_user_sid(gui_pid) else {
+        return EXIT_NO_CLIENT;
     };
+    let name = to_wide(&pipe_path(&sid));
+    let sddl = format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;MM)");
+    // GUI 进程句柄（带 SYNCHRONIZE），用于判活。句柄在本函数结束时随进程一起消失，不需要
+    // 显式 CloseHandle —— 而这里也**不能**提前关：整个退场判据都建立在它身上。
+    let Some(gui) = open_gui_handle(gui_pid) else {
+        return EXIT_NO_CLIENT;
+    };
+
     let (tx, rx) = std::sync::mpsc::channel::<Result<File, i32>>();
+    // accept 工作线程：反复建实例、直到接上**同一个 exe**（`accept_one` 内部核验），
+    // 把接上的那一个交给主线程服务；主线程退场时这个线程还阻塞在 ConnectNamedPipe 上，
+    // 随进程一起结束，不必（也无法）去唤醒它。
+    let accept_name = name.clone();
+    let accept_sddl = sddl.clone();
     std::thread::spawn(move || loop {
-        match unsafe { accept_one(&name, &sddl) } {
+        match unsafe { accept_one(&accept_name, &accept_sddl) } {
             Accept::Client(pipe) => {
-                let _ = tx.send(Ok(pipe));
-                return;
+                if tx.send(Ok(pipe)).is_err() {
+                    // 主线程已经走了（退场中）：这一轮连上的客户端没人服务，
+                    // 交给下一次重连去做，不为它继续挂着。
+                    return;
+                }
             }
             Accept::Fatal(code) => {
                 let _ = tx.send(Err(code));
@@ -140,15 +220,66 @@ pub(crate) fn serve() -> i32 {
             Accept::Retry => {}
         }
     });
-    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(Ok(pipe)) => {
-            session(pipe);
-            0
-        }
-        Ok(Err(code)) => code,
-        // Err = 到点没等到客户端，或者工作线程已经没了（它 panic 时不会留下应答者）。
-        Err(_) => EXIT_NO_CLIENT,
+
+    // 第一轮：等 GUI 来连上，最多 FIRST_CLIENT_WAIT。
+    match rx.recv_timeout(FIRST_CLIENT_WAIT) {
+        Ok(Ok(pipe)) => session(pipe),
+        Ok(Err(code)) => return code,
+        Err(_) => return EXIT_NO_CLIENT,
     }
+
+    // 之后：GUI 还在就无限等，GUI 走了再给一段重连宽限。
+    // 「GUI 退出的时刻」要在**进入宽限之前**记下来 —— 判活每 RECONNECT_TICK 一次，
+    // 拿「这一轮开始时」当基准会把退出时刻一次次往后推，宽限就永远不到期。
+    let mut gone_since: Option<Instant> = None;
+    loop {
+        let tick = if gone_since.is_some() {
+            RECONNECT_TICK
+        } else {
+            LIVING_TICK
+        };
+        if let Some(since) = gone_since {
+            if since.elapsed() >= RECONNECT_WAIT {
+                return 0;
+            }
+        }
+        match rx.recv_timeout(tick) {
+            Ok(Ok(pipe)) => {
+                // 有客户端接上了：宽限重新开始计（客户端来了就说明 GUI 回来了，
+                // 先前判定的「GUI 已退出」不再成立）。
+                session(pipe);
+                gone_since = None;
+            }
+            Ok(Err(code)) => return code,
+            Err(_) => {
+                if gui_is_gone(gui) && gone_since.is_none() {
+                    gone_since = Some(Instant::now());
+                }
+                // gui_is_gone() 为 false 时什么都不做：GUI 还活着，继续等下一轮。
+            }
+        }
+    }
+}
+
+/// 以 `SYNCHRONIZE` 打开 GUI 进程，只为判活。
+///
+/// 只申请这一个权限：不申请 `PROCESS_QUERY_LIMITED_INFORMATION` 之外的任何东西，也
+/// 不申请会失败在「提权进程读低完整性进程」上的那些权限 —— 这里要的仅仅是「等这个
+/// 进程结束」的能力，`SYNCHRONIZE` 正好只给这个。
+fn open_gui_handle(gui_pid: u32) -> Option<HANDLE> {
+    let h = unsafe { OpenProcess(SYNCHRONIZE, 0, gui_pid) };
+    (!h.is_null()).then_some(h)
+}
+
+/// GUI 进程是否已经结束。
+///
+/// 判不出来一律回答「还活着」（`Some(h)` 为假才算gone）。这个方向的保守性是对的：
+/// 误判成「已退出」只是让宽限开始计时（后果：helper 在 [`RECONNECT_WAIT`] 后退场，
+/// 下次用多弹一次框）；误判成「还活着」则相反（后果：提权进程多留一会儿），而这一侧
+/// 的代价更小。
+fn gui_is_gone(gui: HANDLE) -> bool {
+    // 超时给 0 = 只查状态、不阻塞：这必须是一个纯查询，不能让判活把主循环卡住。
+    unsafe { WaitForSingleObject(gui, 0) == WAIT_OBJECT_0 }
 }
 
 enum Accept {
@@ -169,8 +300,9 @@ enum Accept {
 /// （拆分令牌的常规情形）与 over-the-shoulder（标准用户 + 管理员凭据，helper 运行在另一个
 /// 账户下）两种抬升方式都指向「那个正在连上来的账户」。
 ///
-/// 读不出来（进程已退出、句柄拿不到）返回 `None`，由调用方回退到 IU —— 不留在 CO 上：
-/// 一条永远匹配不上的 ACE 等于把通道关死，而 IU 至少覆盖真实的交互登录用户。
+/// 读不出来（进程已退出、句柄拿不到）返回 `None`，由调用方 fail-closed退场 —— 不留在
+/// CO 上（一条永远匹配不上的 ACE 等于把通道关死），也不退到 IU（那是比 SID 宽得多的
+/// 授权范围，见 [`serve`] 里为什么这次不再兜底）。
 fn gui_user_sid(gui_pid: u32) -> Option<String> {
     unsafe {
         let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, gui_pid);
@@ -183,33 +315,9 @@ fn gui_user_sid(gui_pid: u32) -> Option<String> {
         if !got_tok {
             return None;
         }
-        // `TOKEN_USER` 是指针对齐的结构，缓冲区用 u64 数组而不是 [u8; N]。
-        let mut buf = [0u64; 16];
-        let mut ret = 0u32;
-        let ok = GetTokenInformation(
-            tok,
-            TokenUser,
-            buf.as_mut_ptr().cast(),
-            std::mem::size_of_val(&buf) as u32,
-            &mut ret,
-        ) != 0;
+        let sid = token_user_sid_string(tok);
         CloseHandle(tok);
-        if !ok {
-            return None;
-        }
-        let sid = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
-        let mut w: *mut u16 = std::ptr::null_mut();
-        if ConvertSidToStringSidW(sid, &mut w) == 0 || w.is_null() {
-            return None;
-        }
-        // ConvertSidToStringSidW 保证产物是 NUL 结尾的宽字符串。
-        let mut len = 0usize;
-        while *w.add(len) != 0 {
-            len += 1;
-        }
-        let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, len));
-        LocalFree(w as HLOCAL);
-        Some(s)
+        sid
     }
 }
 
@@ -340,13 +448,18 @@ fn handle_request(line: &str) -> (String, bool) {
         Err(e) => return (err_resp(&format!("bad request: {e}")), false),
     };
     match v.get("op").and_then(|o| o.as_str()) {
+        // 版本握手：客户端连上来先问一次，回的 `ver` 必须和自己的 [`PROTO_VER`] 一致，
+        // 否则客户端退回逐次 UAC，绝不把这一批交给旧语义执行（审计 W4）。
+        Some("version") => (json!({ "ok": true, "ver": PROTO_VER }).to_string(), false),
         // 与原 `run_elevated_ps` 完全同款的内层脚本：同样的 ErrorActionPreference、
         // 同样的 -EncodedCommand 编码，helper 只是「已经提过权的那一侧」。
         Some("run_ps") => {
             let Some(body) = v.get("body").and_then(|b| b.as_str()) else {
                 return (err_resp("run_ps needs body"), false);
             };
-            let inner = format!("$ErrorActionPreference='Stop';\r\n{body}\r\n");
+            let inner = format!(
+                "$ErrorActionPreference='Stop';\r\n[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\r\n{body}\r\n"
+            );
             let b64 = encode_command(&inner);
             match run(
                 "powershell.exe",
@@ -363,6 +476,10 @@ fn handle_request(line: &str) -> (String, bool) {
                 Err(e) => (json!({ "ok": false, "error": e }).to_string(), false),
             }
         }
+        // 客户端道别：结束这一轮`session`，但**不是**让helper 进程退出。
+        // `serve` 的主循环会接着进入下一轮（GUI 还活着就继续等，重连宽限内回来就接上），
+        // 所以「bye」准确的含义是「这一条连接我不用了」，不是「你可以退场了」。
+        // 真正决定退场的是 [`serve`] 里的判活与宽限计时，不是这个 op。
         Some("bye") => (json!({ "ok": true }).to_string(), true),
         Some(other) => (err_resp(&format!("unknown op: {other}")), false),
         None => (err_resp("missing op"), false),
@@ -447,6 +564,7 @@ fn connect_reason() -> String {
         5 => "helper pipe refused this account (CreateFile=5)".to_string(),
         109 => "helper dropped the connection (win32=109)".to_string(),
         231 => "helper pipe has no free instance (CreateFile=231)".to_string(),
+        130 => "helper protocol version mismatch (old helper still running)".to_string(),
         other => format!("helper pipe could not be opened (CreateFile={other})"),
     }
 }
@@ -523,7 +641,10 @@ fn ensure_conn() -> Result<Option<Conn>, String> {
     }
     spawn_helper()?;
     // 提权进程从被批准到建好管道有落盘/加载的开销，轮询等它，而不是赌一次。
-    for _ in 0..300 {
+    // 上限 15 秒：这条循环跑在用户点了「应用」之后的那条同步路径上，等满 30 秒的体验是
+    // 「点了没反应」，而真到 15 秒还没建起来，再等下去也只是把逐次 UAC 那条退路推迟 ——
+    // 那一批照样能下发，只是多弹一次框。
+    for _ in 0..150 {
         if let Some(c) = open_conn() {
             helper_seen().store(true, Ordering::Relaxed);
             return Ok(Some(c));
@@ -533,9 +654,65 @@ fn ensure_conn() -> Result<Option<Conn>, String> {
     Ok(None)
 }
 
+/// 本进程所属账户的 SID，管道名要用它。
+///
+/// 取的是**自己**的令牌（`OpenProcessToken(GetCurrentProcess())`），不是某个 pid 的 ——
+/// 调用方问的是「我是谁」，让它去查别人反而会引入「那个进程还在不在」这种与本问题
+/// 无关的失败模式。helper 侧同样按 GUI 的 SID 命名（[`pipe_path`]），两侧算出的名字
+/// 必须逐字相同。
+fn own_user_sid() -> Option<String> {
+    let mut tok: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } == 0 {
+        return None;
+    }
+    // `GetCurrentProcess()` 返回的是伪句柄，**不能** CloseHandle —— 真正要关的是
+    // OpenProcessToken 打开的令牌句柄。
+    let sid = token_user_sid_string(tok);
+    unsafe { CloseHandle(tok) };
+    sid
+}
+
+/// 从一个令牌句柄读出 SID 的字符串形态。
+///
+/// 分离出来是因为两条路径都要用（自己 / 某个 pid），而只有「打开令牌」那一步不同。
+/// 读不出就返回 `None`，调用方一律 fail-closed。
+fn token_user_sid_string(tok: HANDLE) -> Option<String> {
+    unsafe {
+        // `TOKEN_USER` 是指针对齐的结构，缓冲区用 u64 数组而不是 [u8; N]。
+        let mut buf = [0u64; 16];
+        let mut ret = 0u32;
+        let ok = GetTokenInformation(
+            tok,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buf) as u32,
+            &mut ret,
+        ) != 0;
+        if !ok {
+            return None;
+        }
+        let sid = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        let mut w: *mut u16 = std::ptr::null_mut();
+        if ConvertSidToStringSidW(sid, &mut w) == 0 || w.is_null() {
+            return None;
+        }
+        // ConvertSidToStringSidW 保证产物是 NUL 结尾的宽字符串。
+        let mut len = 0usize;
+        while *w.add(len) != 0 {
+            len += 1;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, len));
+        LocalFree(w as HLOCAL);
+        Some(s)
+    }
+}
+
 /// 只连接已存在的 helper，绝不拉起。连不上的错误码留给 [`connect_reason`]。
 fn open_conn() -> Option<Conn> {
-    let path = pipe_path(std::process::id());
+    // 读不到自己的 SID 就没法算出管道名，也就没有「只连不拉」这条路可走 ——
+    // 这种情况必须让 ensure_conn 继续往下走去拉起 helper，而不是静默返回 None 把这一批
+    // 悄悄送去逐次 UAC。错误码仍然记成「管道从来没出现」，与现状一致。
+    let path = pipe_path(&own_user_sid()?);
     let f = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
@@ -544,7 +721,22 @@ fn open_conn() -> Option<Conn> {
         }
     };
     let r = f.try_clone().ok().map(BufReader::new)?;
-    Some(Conn { w: f, r })
+    let mut conn = Conn { w: f, r };
+    // 版本握手：老版本 helper（升级前起、同管道名还活着）不认 `version` op，会回
+    // `ok:false`；协议版本对不上也必须拒绝 —— 绝不能把这一批交给旧语义执行（审计 W4）。
+    // 握手失败就当连不上，退回逐次 UAC。
+    match conn.call(&json!({ "op": "version" }).to_string()) {
+        Ok(resp)
+            if resp.get("ok").and_then(Value::as_bool).unwrap_or(false)
+                && resp.get("ver").and_then(Value::as_u64) == Some(PROTO_VER as u64) =>
+        {
+            Some(conn)
+        }
+        _ => {
+            last_connect_err().store(VERSION_MISMATCH, Ordering::Relaxed);
+            None
+        }
+    }
 }
 
 /// 用同一个 exe、带着自己的 PID，提权拉起 helper。
@@ -555,11 +747,20 @@ fn open_conn() -> Option<Conn> {
 fn spawn_helper() -> Result<(), String> {
     let pid = std::process::id();
     let pid_s = pid.to_string();
+    // exe 路径由 Rust 自己给出，而不是到 PowerShell 里问 `Get-Process -Id $pid`：
+    // 那条路要读**另一个进程**的句柄，权限不足或进程信息被系统截短时 `.Path` 返回空，
+    // `Start-Process -FilePath` 于是拿到空串、脚本走进 catch、exit 1223 —— 上层把它
+    // 读成「用户点了取消」，表现是「每次下发都报已取消」，而真相只是没问到自己的路径。
+    // `current_exe()` 问的是自己，没有这层依赖，也就不会因为环境差异而时灵时不灵。
+    let exe = std::env::current_exe()
+        .map_err(|e| crate::i18n::tf("pal.elevate_failed", &[("error", &e.to_string())]))?;
     let script = format!(
         "$ErrorActionPreference='Stop';\
-         try {{ $x = (Get-Process -Id {pid}).Path; \
-         $p = Start-Process -FilePath $x -ArgumentList {} -Verb RunAs -WindowStyle Hidden -PassThru; \
-         if (-not $p) {{ exit 1223 }} }} catch {{ exit 1223 }}",
+         try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -WindowStyle Hidden -PassThru; \
+         if (-not $p) {{ exit 1 }} }} \
+         catch {{ $ex = $_.Exception; \
+         if ($ex.HResult -eq -2147023673 -or ($ex.Message -match 'cancel')) {{ exit 1223 }} else {{ exit 1 }} }}",
+        psq(&exe.to_string_lossy()),
         ps_exec_arr(&[HELPER_ARG, &pid_s])
     );
     match ps(&script) {

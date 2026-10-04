@@ -140,9 +140,13 @@ pub fn is_script_allowed(resolved: &std::path::Path, allowed: &AllowedScripts) -
 /// 「将当前网络设为 DHCP」必须作用于这张网卡：写死无线网卡时，插着网线的用户点它，
 /// 改动落在一台没在用的网卡上，看起来就像「点了没反应」。
 pub fn primary_nic(nics: &[crate::platform::NicInfo]) -> Option<&crate::platform::NicInfo> {
+    // 与 [`crate::conditions::identity::nic_is_up`] 同一份「存活」判据：断开的网卡（没 up
+    // 也没拿到 IPv4）不能算主网卡 —— 否则「设为 DHCP」会改到一台没在用的卡上，用户看着
+    // 像「点了没反应」。以前这里只看 `kind != Vpn`，活着的判定由 identity 模块单独持有一份，
+    // 两处会分叉，现在统一复用。
     let mut live = nics
         .iter()
-        .filter(|n| n.kind != crate::platform::NicKind::Vpn);
+        .filter(|n| n.kind != crate::platform::NicKind::Vpn && crate::conditions::identity::nic_is_up(n));
     live.clone()
         .find(|n| n.gateway.is_some())
         .or_else(|| live.next())

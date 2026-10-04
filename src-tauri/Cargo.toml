@@ -1,6 +1,6 @@
 [package]
 name = "netsense"
-version = "1.0.6"
+version = "1.0.7"
 description = "Cross-platform SSID-aware network profile switcher"
 edition = "2021"
 rust-version = "1.77"
@@ -25,6 +25,20 @@ default = []
 objc2 = "0.6"
 objc2-core-location = "0.3"
 objc2-core-wlan = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# 网络读路径原生实现（替 ip link / ip neigh 子进程），见 platform/linux_netlink.rs。
+# 只在 Linux 引入，其它平台不编译该模块、也不拉这些依赖。
+rtnetlink = "0.23"
+# rtnetlink 只把 netlink-packet-route 重导成 `rtnetlink::packet_route`；本模块直接
+# 用到 `LinkFlags` / `NeighbourAttribute` 这些报文类型，按 Rust 的依赖声明规则得自己
+# 显式声明一份（版本与 rtnetlink 0.23 实际锁定的 0.33 对齐，见 Cargo.lock）。
+netlink-packet-route = "0.33"
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+# NetworkManager D-Bus 原生化（替 nmcli 子进程），见 platform/linux_nm.rs。
+# `blocking` 让我们在同步代码里直接做 D-Bus 调用，无需额外 async runtime 杂耍。
+zbus = { version = "4", features = ["blocking"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 提权 helper（见 platform/win_helper.rs）需要的裸 Win32 API：命名管道、安全描述符、

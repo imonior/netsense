@@ -18,7 +18,7 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, PhysicalPosition, Position, WebviewWindow};
+use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
 
 /// 面板窗口 label（与 tauri.conf.json 的 windows[].label 对应）。
 pub const POPUP_LABEL: &str = "popup";
@@ -114,12 +114,135 @@ pub fn open_automation(app: &AppHandle) {
 fn show_window(app: &AppHandle, label: &str) {
     match app.get_webview_window(label) {
         Some(w) => {
+            // 只在窗口**当前不可见**时恢复几何。正开着、用户正在拖大小的窗口不该被一个
+            // 旧值拽回去 —— 那会让「拖到一半松手，切走再切回来」变成尺寸跳变。
+            if !w.is_visible().unwrap_or(false) {
+                apply_geometry(&w, label);
+            }
             let _ = w.show();
             let _ = w.set_focus();
         }
         None => crate::log::warn(&crate::i18n::tf(
             "app.window_missing",
             &[("label", label)],
+        )),
+    }
+}
+
+/// 把窗口恢复到「上次关掉时的尺寸」，并收敛到当前显示器的工作区内。
+///
+/// 两件事必须一起做才有用：
+///   - 只记住不收敛：换到小屏（或拔掉外接显示器）之后，记着的尺寸照样顶到任务栏下面，
+///     底部的按钮点不到 —— 这正是记尺寸之前那份默认高度在 1366×768 上的表现；
+///   - 只收敛不记住：用户每次打开都得重新拖一遍。
+///
+/// 收敛在**打开时**实时算，而不是在保存时：工作区会随显示器插拔、分辨率调整、任务栏
+/// 自动隐藏而变化，写进配置的那一刻的正确值，下一次打开时未必还正确。
+fn apply_geometry(win: &WebviewWindow, label: &str) {
+    let saved = saved_size(win, label);
+    let (w, h) = match saved {
+        Some(v) => v,
+        // 没记过 → 用窗口此刻的尺寸（即 `tauri.conf.json` 里声明的那个），它同样要过一遍
+        // 收敛：声明值是为大屏挑的，在小屏上一样会溢出。
+        None => match current_logical_size(win) {
+            Some(v) => v,
+            None => return,
+        },
+    };
+    let (w, h) = fit_to_work_area(win, w, h);
+    let _ = win.set_size(Size::Logical(LogicalSize::new(w as f64, h as f64)));
+}
+
+/// 当前客户区尺寸，换算成**逻辑像素**。
+fn current_logical_size(win: &WebviewWindow) -> Option<(u32, u32)> {
+    to_logical(win.inner_size().ok()?, win.scale_factor().ok()?)
+}
+
+/// 物理像素的客户区尺寸 → 逻辑像素。
+fn to_logical(size: tauri::PhysicalSize<u32>, scale: f64) -> Option<(u32, u32)> {
+    if scale <= 0.0 {
+        return None;
+    }
+    Some((
+        (size.width as f64 / scale) as u32,
+        (size.height as f64 / scale) as u32,
+    ))
+}
+
+/// 配置里记着的这个窗口的尺寸。
+fn saved_size(win: &WebviewWindow, label: &str) -> Option<(u32, u32)> {
+    let state = win
+        .app_handle()
+        .try_state::<std::sync::Arc<crate::state::AppState>>()?;
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+    match label {
+        MAIN_LABEL => s.window_sizes.main,
+        SETTINGS_LABEL => s.window_sizes.settings,
+        LOGS_LABEL => s.window_sizes.logs,
+        _ => None,
+    }
+}
+
+/// 把目标尺寸（逻辑像素）收敛到窗口所在显示器的**工作区**内，四周留一点余量。
+///
+/// 用工作区而不是整块屏幕：Windows 的它是整屏减掉任务栏，macOS 的它是整屏减掉菜单栏。
+/// 按整屏收敛的话，窗口底边正好压在任务栏上 —— 那正是「按钮被挡住」的成因。
+fn fit_to_work_area(win: &WebviewWindow, w: u32, h: u32) -> (u32, u32) {
+    let Some((_, _, ww, wh)) = work_area_at(win, None) else {
+        return (w, h);
+    };
+    let Ok(scale) = win.scale_factor() else {
+        return (w, h);
+    };
+    if scale <= 0.0 {
+        return (w, h);
+    }
+    let avail_w = (ww as f64 / scale) as i64;
+    let avail_h = (wh as f64 / scale) as i64;
+    // 四周各留一点：贴着工作区边缘的窗口既不好看，也容易压住任务栏那一条。
+    const MARGIN: i64 = 24;
+    let max_w = (avail_w - MARGIN * 2).max(1);
+    let max_h = (avail_h - MARGIN * 2).max(1);
+    ((w as i64).min(max_w) as u32, (h as i64).min(max_h) as u32)
+}
+
+/// 窗口被关掉（收回托盘）时记下它的尺寸，下次打开照原样恢复。
+///
+/// 存**逻辑像素**：物理像素在换到不同缩放比的显示器后会还原出一个两倍大的窗口，而逻辑
+/// 值在任何缩放比下都是同一个「看起来这么大」。
+///
+/// 写不进去只记一条日志：尺寸是偏好，不是配置 —— 为了它打断「关窗口」这个动作不值得，
+/// 而静默失败又会让「为什么下次又变回去了」无从查起。
+pub fn remember_size(window: &tauri::Window) {
+    let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+        return;
+    };
+    let Some((w, h)) = to_logical(size, scale) else {
+        return;
+    };
+    let Some(state) = window
+        .app_handle()
+        .try_state::<std::sync::Arc<crate::state::AppState>>()
+    else {
+        return;
+    };
+    let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+    let mut next = s.clone();
+    match window.label() {
+        MAIN_LABEL => next.window_sizes.main = Some((w, h)),
+        SETTINGS_LABEL => next.window_sizes.settings = Some((w, h)),
+        LOGS_LABEL => next.window_sizes.logs = Some((w, h)),
+        _ => return,
+    }
+    next.window_sizes = next.window_sizes.clamped();
+    match next.save(&state.settings_path) {
+        Ok(()) => *s = next,
+        Err(e) => crate::log::warn(&crate::i18n::tf(
+            "cfg.write_failed",
+            &[
+                ("path", &state.settings_path.display().to_string()),
+                ("error", &e),
+            ],
         )),
     }
 }

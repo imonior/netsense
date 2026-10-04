@@ -1614,9 +1614,15 @@
   /// 列表里那些**没被选中**的行的勾选框：没有草稿可改，就直接改磁盘上那一份。
   /// 「编辑器里勾着但没保存」和「系统实际的开关状态」必须是同一件事，否则用户
   /// 按勾选框判断哪些方案在生效，判断的是空气。
+  ///
+  /// `loadAll` 会用刚读回来的配置重建 `draft` 并清掉 `dirty` —— 而这里改的是
+  /// **别的**行，用户在当前选中那条上填到一半的内容不该被这一发顺带冲掉
+  /// （`chooseSelection` 在 `keepSelection` 下会用保存版覆盖草稿）。所以先把
+  /// 「选中项 + 草稿 + 脏标记」原样端出来，`loadAll` 之后再放回去。
   async function patchFlag(id, field, value) {
     const saved = savedProfile(id);
     if (!saved) return;
+    const keep = stashDraft();
     const payload = cleanProfile({ ...clone(saved), [field]: value });
     try {
       await invoke("save_profile", { payload: JSON.stringify(payload) });
@@ -1625,10 +1631,39 @@
       toast(t("editor.save_failed", { error: String(err) }));
       await loadAll();
     }
+    unstashDraft(keep);
+  }
+
+  /// 把「当前选中项 + 它的草稿 + 脏标记」端出来，供一次会重读配置的动作
+  /// （[`patchFlag`] / [`patchFallbackFlag`]）在重读之后原样放回。
+  /// 端的是深拷贝：重读会重绑 `draft`，不拷就会被改到。
+  function stashDraft() {
+    return { sel: sel && { ...sel }, draft: draft ? clone(draft) : null, dirty };
+  }
+  /// 放回草稿。只有在被改的不是当前那条时才放 —— `loadAll` 已经把选中项收敛到
+  /// 最新保存版了，硬塞一份旧草稿回去反而会让界面显示的内容与后端对不上。
+  function unstashDraft(keep) {
+    if (!keep) return;
+    if (!keep.sel || !keep.draft) return;
+    if (sel && sel.kind === keep.sel.kind && sel.id === keep.sel.id) {
+      draft = keep.draft;
+      dirty = keep.dirty;
+      renderAll();
+    }
   }
 
   async function patchFallbackFlag(value) {
-    await saveGlobal({ ...(globalDraft.fallback || {}), enabled: value });
+    // 改的是兜底**那一行**的启用开关，而当前选中的可能是某个 Profile ——
+    // 同样要把它的草稿端在重读之外，别让这一发把填到一半的内容冲掉。
+    // 基底取**保存版** `cfg.fallback` 而不是 `globalDraft.fallback`：这一行只在
+    // 兜底未被选中时才是这个勾选框，而 `globalDraft.fallback` 可能还留着用户上一次
+    // 编辑兜底时的草稿（选中别的行不会清它）。拿草稿当基底会把那些没保存的编辑
+    // 一起落盘 —— 「点一下启用开关」不该顺带提交别的改动。`save_global` 是整份替换，
+    // 基底必须是磁盘上真实的那一份。改完之后 `loadAll` 会把 `globalDraft.fallback`
+    // 刷成新保存版，草稿与保存版自然对齐。
+    const keep = stashDraft();
+    await saveGlobal({ ...clone(cfg.fallback || {}), enabled: value });
+    unstashDraft(keep);
   }
 
   document.addEventListener("click", (e) => {
@@ -1676,26 +1711,26 @@
         return;
       }
       case "use-cond": addCondition(el.dataset.type, el.dataset.val); return;
-      case "add-rule": (draft.rules ||= []).push({ id: uid("r"), enabled: true, conditions: [] }); renderAll(); return;
-      case "del-rule": draft.rules.splice(Number(el.dataset.i), 1); renderAll(); return;
+      case "add-rule": (draft.rules ||= []).push({ id: uid("r"), enabled: true, conditions: [] }); dirty = true; renderAll(); return;
+      case "del-rule": draft.rules.splice(Number(el.dataset.i), 1); dirty = true; renderAll(); return;
       case "add-cond": {
         const r = draft.rules[Number(el.dataset.i)];
         (r.conditions ||= []).push({ id: uid("c"), enabled: true, type: "wifi_ssid", value: "" });
-        renderAll(); return;
+        dirty = true; renderAll(); return;
       }
-      case "del-cond": draft.rules[Number(el.dataset.i)].conditions.splice(Number(el.dataset.j), 1); renderAll(); return;
-      case "drop-network": delete scope(pre).network; renderAll(); return;
+      case "del-cond": draft.rules[Number(el.dataset.i)].conditions.splice(Number(el.dataset.j), 1); dirty = true; renderAll(); return;
+      case "drop-network": delete scope(pre).network; dirty = true; renderAll(); return;
       case "add-route": {
         const net = scope(pre).network;
         if (!net) return;
         (net.routes ||= []).push({ dest: "", gateway: "", metric: 0, delete: false });
-        renderNetColumn(); return;
+        dirty = true; renderNetColumn(); return;
       }
       case "del-route": {
         const net = scope(pre).network;
         if (!net) return;
         net.routes.splice(Number(el.dataset.i), 1);
-        renderNetColumn(); return;
+        dirty = true; renderNetColumn(); return;
       }
       case "add-one": {
         const b = scope(pre);
@@ -1705,25 +1740,25 @@
           : ty === "set_default_printer" ? { type: ty, printer: "" }
             : { type: "launch_app", app: "", args: [] };
         (b.one_shot ||= []).push({ id: uid("a"), enabled: true, action });
-        renderActColumn(); refreshRun(); return;
+        dirty = true; renderActColumn(); refreshRun(); return;
       }
       case "del-one":
         scope(pre).one_shot.splice(Number(el.dataset.i), 1);
-        renderActColumn(); refreshRun(); return;
+        dirty = true; renderActColumn(); refreshRun(); return;
       case "add-persist": {
         const b = scope(pre);
         (b.persistent ||= []).push({ id: uid("p"), enabled: true,
           action: { type: "periodic_script", path: "", args: [], interval_secs: 30 } });
-        renderActColumn(); refreshRun(); return;
+        dirty = true; renderActColumn(); refreshRun(); return;
       }
       case "del-persist":
         scope(pre).persistent.splice(Number(el.dataset.i), 1);
-        renderActColumn(); refreshRun(); return;
+        dirty = true; renderActColumn(); refreshRun(); return;
       case "move-one":
       case "move-persist": {
         const list = scope(pre)[act === "move-one" ? "one_shot" : "persistent"] || [];
         swapInto(list, Number(el.dataset.i), Number(el.dataset.d));
-        renderActColumn(); refreshRun(); return;
+        dirty = true; renderActColumn(); refreshRun(); return;
       }
       default: return;
     }

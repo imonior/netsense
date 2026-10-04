@@ -50,7 +50,7 @@ use crate::automation::{self, one_shot, persistent, AllowedScripts};
 use crate::conditions::{
     evaluate_all, eval_profile, Evaluation, NetworkSnapshot, ProfileEvaluation,
 };
-use crate::config::{Branch, Config, FallbackConfig, Profile, FALLBACK_ID};
+use crate::config::{Branch, Config, FallbackConfig, NetworkConfig, Profile, FALLBACK_ID};
 use crate::detection::{self, Scheduler};
 use crate::i18n;
 use crate::log;
@@ -199,6 +199,12 @@ impl RunOpts {
         one_shot: true,
         monitor: false,
     };
+    /// 零命中兜底：跑动作 + 常驻 worker，但**不**接管健康监测 ——
+    /// 兜底没有「当前环境」可探测（用户正是要离开任何环境），也没有 Profile 可归属。
+    pub const FALLBACK: RunOpts = RunOpts {
+        one_shot: true,
+        monitor: false,
+    };
 }
 
 /// 一次已提交、尚未交回的 3B1 运行。
@@ -313,6 +319,10 @@ pub struct Engine {
     /// 网络永远停在 Home 的静态地址上。
     fallback_fp: Option<String>,
     blocked: Option<Blocked>,
+    /// 兜底 3A 失败后的「别再重试」记档（与 `blocked` 同机制，但独立于 Profile 的 3A 记档，
+    /// 避免两者互相清掉对方的屏障）。用户持续缺席时若兜底网络块反复回读失败，没有它就会
+    /// 每轮都重新跑 3A（含弹授权框）。
+    fallback_blocked: Option<Blocked>,
     /// 每个 Profile 最近一次执行错误。只保留「仍然命中」或「仍是 Active」的条目，
     /// 否则一次偶发失败会永久挂着红叉。
     errors: HashMap<String, String>,
@@ -331,6 +341,10 @@ pub struct Engine {
     /// 已提示过的冲突集合（避免每轮评估重复弹窗）
     conflict_shown: String,
     warnings: Vec<String>,
+    /// 决策代数：每次 `evaluate` 重算判定时 +1。放锁跑 I/O 的「下发阶段」靠它辨认
+    /// 「我放锁前算出的计划，放锁后还是不是当前该执行的那个」—— 见 [`pass`] 的
+    /// decide / apply / commit 三段式（审计 B2：平台 I/O 不得在持锁时做）。
+    generation: u64,
 }
 
 impl Default for Engine {
@@ -348,6 +362,7 @@ impl Default for Engine {
             hold: false,
             fallback_fp: None,
             blocked: None,
+            fallback_blocked: None,
             errors: HashMap::new(),
             health_stop: Arc::new(AtomicBool::new(false)),
             monitoring: false,
@@ -358,6 +373,7 @@ impl Default for Engine {
             worker_gen: 0,
             conflict_shown: String::new(),
             warnings: Vec::new(),
+            generation: 0,
         }
     }
 }
@@ -441,6 +457,9 @@ impl Engine {
     /// 走一轮评估并推进节律。
     pub fn evaluate(&mut self, cfg: &Config, now: Instant) {
         let due = self.due(cfg, now);
+        // 每重算一次判定就翻一代（审计 B2）：放锁跑 I/O 的「下发阶段」靠它辨认
+        // 「我放锁前算出的计划，放锁后还是不是当前该执行的那个」。
+        self.generation += 1;
         self.evaluation = evaluate_all(&cfg.profiles, &self.snapshot);
         self.first_pass_done = true;
         self.scheduler.after_evaluation(&cfg.profiles, &due, now);
@@ -658,6 +677,28 @@ impl Engine {
         keep
     }
 
+    fn is_fallback_blocked(&mut self, config_fp: &str, fingerprint: &str) -> bool {
+        let keep = match &self.fallback_blocked {
+            Some(b) => b.config_fp == config_fp && b.fingerprint == fingerprint,
+            None => false,
+        };
+        if !keep {
+            self.fallback_blocked = None;
+        }
+        keep
+    }
+
+    fn record_fallback_failure(&mut self, config_fp: String, fingerprint: String) {
+        // 与 Profile 的 `record_failure` 同理：兜底 3A 失败记档，下一轮（网络或配置一变）
+        // 之前都不再重跑 3A —— 否则用户持续缺席时会被反复要求授权。记档独立于 `blocked`，
+        // 不被 Profile 的成功应用清掉，也不会去清掉 Profile 的屏障。
+        self.fallback_blocked = Some(Blocked {
+            id: "fallback".to_string(),
+            config_fp,
+            fingerprint,
+        });
+    }
+
     fn mark_applied(&mut self, fp: String) {
         self.applied_fp = Some(fp);
         self.fallback_fp = None;
@@ -674,7 +715,7 @@ impl Engine {
         });
         self.stop_monitor();
         // 常驻 worker 不必在这里停：每一条能走到 `record_failure` 的路都先过了
-        // `execute_branch` 的开头，那里已经在新 3A 下发之前叫停了旧的一组。
+        // `branch_prepare` 的开头，那里已经在新 3A 下发之前叫停了旧的一组。
         self.active_id = None;
         self.applied_fp = None;
     }
@@ -690,35 +731,19 @@ impl Engine {
         self.applied_fp = None;
     }
 
-    /// 执行一支分支：叫停旧 worker → 3A 硬屏障 → 3B1（异步提交）→ 3B2 worker → 持续监测。
-    ///
-    /// 返回 `Err` 只可能来自 3A；3B1 连「部分失败」都不返回 —— 它此刻还在别的线程上，
-    /// 结果稍后经 `Msg::RunDone` 回来（方案第 22 条：动作失败不改变 Active）。3B2 同理，
-    /// 而且它根本不会失败返回：worker 起不来是配置问题，报在 `workers` 那一栏里。
-    /// `allowed` 由调用方在持锁期间准备好 —— 这里绝不再去 lock config。
-    fn execute_branch(
-        &mut self,
-        state: &Arc<AppState>,
-        profile: &Profile,
-        which: Which,
-        opts: RunOpts,
-        allowed: &Arc<AllowedScripts>,
-    ) -> Result<(), String> {
-        // —— 3B2：先叫停旧的一组，再动网络 ——
+    /// 下发前在锁内做的准备：THEN 分支先叫停旧 worker（顺序见 `Engine::deactivate`，
+    /// 停 worker 必须在任何新下发之前）；含网络配置时举重采样旗、作废兜底记档。
+    /// 返回将要下发的 `network` 克隆（`None` = 这支本就不含网络配置，3A 视为 Skipped）。
+    fn branch_prepare(&mut self, which: Which, branch: &Branch) -> Option<NetworkConfig> {
         // 顺序是这里的全部要点：旧环境那组「保持 VPN 连接」若还活着，会在新配置下发的
         // 同时把旧网关塞回路由表，而两件事各自的日志都写着「成功」。
         // ELSE 分支不碰 worker：它表达的是「离开这个环境时要维持什么」，而离开时并没有
         // 一个持续成立的现场可维持 —— 当前 Active 的那一组必须继续跑。
-        let hosts_workers = which == Which::Then;
-        if hosts_workers {
+        if which == Which::Then {
             self.stop_workers();
         }
-        let Some(branch) = which.of(profile) else {
-            return Ok(());
-        };
-        // —— 3A：下发 + 回读校验 ——
-        let mut three_a = ThreeAOutcome::Skipped;
-        if let Some(net) = &branch.network {
+        let net = branch.network.clone();
+        if net.is_some() {
             // 只要真下发过，就得让下一轮重看一遍现场：3A 的读回校验用的是 `fresh_status`
             // （绕过缓存），而引擎这份快照走的是缓存路径，两者在这里不是一回事。
             self.request_resample();
@@ -726,48 +751,58 @@ impl Engine {
             // 现场也可能已经被改了一半）—— 作废它，否则下一次零命中会误以为
             // 「兜底早应用过」而跳过重新下发。
             self.fallback_fp = None;
-            match network::apply_3a(&state.plat, net) {
-                Stage3A::Failed { reason } => {
-                    // 保底：探测里开了 fallback 就回落 DHCP（3A 失败处置的一部分）
-                    let degrade = net
-                        .verify
-                        .as_ref()
-                        .and_then(|v| v.health.as_ref())
-                        .map(|h| h.enabled && h.fallback.enabled)
-                        .unwrap_or(false);
-                    if degrade {
-                        match state.plat.set_dhcp() {
-                            Ok(()) => log::warn(&i18n::t("notify.fallback")),
-                            Err(e) => log::error(&i18n::tf(
-                                "notify.dhcp_failed",
-                                &[("error", &e)],
-                            )),
-                        }
-                    }
-                    return Err(reason);
-                }
-                Stage3A::Applied => {
-                    three_a = ThreeAOutcome::Applied;
-                    log::debug(&i18n::tf(
-                        "engine.pass_3a",
-                        &[("name", &profile.name), ("branch", which.name())],
-                    ));
-                }
-            }
         }
+        net
+    }
+
+    /// 3A 之后的 3B 落地：3B1 异步提交 + 3B2 常驻 worker + 持续监测。
+    ///
+    /// 调用方必须已经**在锁外**跑完 3A（`run_3a_lockfree`），并把结果透传进来
+    /// （审计 B2：平台 I/O 不得在持锁时做）。`three_a`：
+    /// - `None` = 这支本就不含网络配置（网络视为 Skipped，3B 照跑）；
+    /// - `Some(Applied)` = 3A 成功，3B 照跑；
+    /// - `Some(Failed)` = 3A 失败，**3B 一条都不跑**（方案第 16/20 条硬屏障）。
+    ///
+    /// 分支自己从 `which.of(profile)` 取，不再单独传：少一个参数，也免得「传进来的
+    /// branch 与 which 对不上」这种不一致。THEN 缺省（Profile 没配 THEN）时整段返回 ——
+    /// 这一支本来就什么都不做，连「空运行」留痕都不该有。
+    ///
+    /// 3B1 连「部分失败」都不返回 —— 它此刻还在别的线程上，结果稍后经 `Msg::RunDone`
+    /// 回来（方案第 22 条：动作失败不改变 Active）。3B2 同理，而且它根本不会失败返回：
+    /// worker 起不来是配置问题，报在 `workers` 那一栏里。`allowed` 由调用方在持锁期间
+    /// 准备好 —— 这里绝不再去 lock config。
+    fn branch_3b(
+        &mut self,
+        state: &Arc<AppState>,
+        profile: &Profile,
+        which: Which,
+        opts: RunOpts,
+        allowed: &Arc<AllowedScripts>,
+        three_a: Option<Stage3A>,
+    ) {
+        // 3A 失败 → 3B 全停（硬屏障）。
+        let outcome = match three_a {
+            Some(Stage3A::Failed { .. }) => return,
+            Some(Stage3A::Applied) => ThreeAOutcome::Applied,
+            // 无网络配置（Skipped）：仍要跑一次性动作与常驻 worker，只是留痕里
+            // 没有「已下发网络」这一项。
+            None => ThreeAOutcome::Skipped,
+        };
+        let Some(branch) = which.of(profile) else {
+            return;
+        };
         // —— 3B1：交给独立线程，引擎继续跑 ——
         if opts.one_shot {
-            self.submit_one_shot(state, profile, which, branch, allowed, three_a);
+            self.submit_one_shot(state, profile, which, branch, allowed, outcome);
         }
         // —— 3B2：每条已启用的常驻动作一条 worker，3A 通过才起 ——
-        if hosts_workers {
+        if which == Which::Then {
             self.start_workers(state, profile, branch, allowed);
         }
         // —— 持续监测：只属于「已成为 Active」的 THEN 分支 ——
         if opts.monitor {
             self.start_monitor(state, profile, branch);
         }
-        Ok(())
     }
 
     /// 提交一次后台 3B1 执行。
@@ -896,7 +931,19 @@ impl Engine {
         let fb_state = state.clone();
         let name = profile.name.clone();
         // 监测线程只做「探测 + 通知」，落到的动作在这里现成：回落 DHCP 并作废记档。
+        // 捕获「我启动时是哪个 Profile 在 Active」：监测线程阻塞探测期间可能已切到别的
+        // Profile（或已被手动停用），迟到回落若还去 set_dhcp()/清 active_id，会拆掉新环境的现场。
+        let expected = profile.id.clone();
         HealthMonitor::start(state.plat, &h, self.health_stop.clone(), move || {
+            // 迟到回落护栏：此刻「我还是不是那个 Active」？不是就什么都不做，避免拆掉
+            // 新 Active 的现场（含它自己的监测线程，否则会留下一个永远收不掉的后台线程）。
+            let still_active = {
+                let eng = fb_state.engine.lock().unwrap_or_else(|e| e.into_inner());
+                eng.active_id.as_deref() == Some(expected.as_str())
+            };
+            if !still_active {
+                return;
+            }
             if let Err(e) = fb_state.plat.set_dhcp() {
                 log::error(&i18n::tf("notify.dhcp_failed", &[("error", &e)]));
             }
@@ -1184,6 +1231,48 @@ fn reload_if_changed(state: &Arc<AppState>) -> bool {
     true
 }
 
+/// 锁外跑 3A：下发 + 路由 + 回读校验，含失败时可选的回落 DHCP（审计 B2）。
+///
+/// 只吃 `plat` 与一份 owned 的 [`NetworkConfig`] 克隆 —— 这正是它能在**不持
+/// engine / config 锁**时安全运行的原因（模块头第 2 条加锁纪律）。
+/// `apply_3a` 最坏耗时 = 4 次回读 × 800ms 沉降 + 一串子进程，持锁跑它会让
+/// `get_engine_status` / `status_payload` 这些只读 IPC 一起等上好几秒。
+///
+/// - `net = None` → 返回 `None`（这支不含网络配置，3A 视为 Skipped，3B 照跑）；
+/// - `Some(Applied)` → 下发并回读成功；
+/// - `Some(Failed{..})` → 阻断 3B；`degrade` 为真时先回落 DHCP 再返回。
+fn run_3a_lockfree(
+    state: &Arc<AppState>,
+    net: Option<&NetworkConfig>,
+    degrade: bool,
+) -> Option<Stage3A> {
+    let net = net?;
+    Some(match network::apply_3a(&state.plat, net) {
+        Stage3A::Failed { reason } => {
+            // 保底：探测里开了 fallback 就回落 DHCP（3A 失败处置的一部分）
+            if degrade {
+                match state.plat.set_dhcp() {
+                    Ok(()) => log::warn(&i18n::t("notify.fallback")),
+                    Err(e) => {
+                        log::error(&i18n::tf("notify.dhcp_failed", &[("error", &e)]));
+                    }
+                }
+            }
+            Stage3A::Failed { reason }
+        }
+        ok => ok,
+    })
+}
+
+/// 「开启了健康探测 + 探测失败回落 DHCP」时，3A 失败要顺带回落。
+fn degrade_enabled(net: &NetworkConfig) -> bool {
+    net.verify
+        .as_ref()
+        .and_then(|v| v.health.as_ref())
+        .map(|h| h.enabled && h.fallback.enabled)
+        .unwrap_or(false)
+}
+
 /// 一轮：采样（锁外）→ 评估 → 迁移 → 广播（锁外）。
 fn pass(state: &Arc<AppState>, manual: Option<String>) {
     let now = Instant::now();
@@ -1208,32 +1297,36 @@ fn pass(state: &Arc<AppState>, manual: Option<String>) {
             .unwrap_or_else(|e| e.into_inner())
             .note_sampled(snap, now);
     }
-    let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-    // DHCP 暂停：只采样（上面已完成），不评估、不下发、不跑兜底。连 `forced` 也拦 ——
-    // 「设为 DHCP」自己触发的强制轮若放行，暂停会被当场推翻（评估 → 重新命中 → 下回去）。
-    // 用户显式点的「立即应用」不走这条捷径，不受这里约束。
-    if manual.is_none() && eng.automation_held() {
-        return;
-    }
-    if manual.is_none() && !forced && eng.due(&cfg, now).is_empty() {
-        return;
-    }
-    eng.evaluate(&cfg, now);
-    let allowed = Arc::new(AllowedScripts {
-        scripts_dir: state.scripts_dir.clone(),
-        explicit: cfg.allowed_scripts.clone(),
-    });
-    if let Some(id) = &manual {
-        manual_apply(state, &mut eng, &cfg, id, &allowed);
-    }
-    if !eng.automation_held() {
+    // 评估仍在锁内（要读 snapshot / due），但**下发与兜底放到锁外**：见
+    // `reconcile` 的三段式。这里只把「评估结果 + 允许脚本集 + 是否暂停」带出来。
+    let (allowed, auto) = {
+        let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        // DHCP 暂停：只采样（上面已完成），不评估、不下发、不跑兜底。连 `forced` 也拦 ——
+        // 「设为 DHCP」自己触发的强制轮若放行，暂停会被当场推翻（评估 → 重新命中 → 下回去）。
+        // 用户显式点的「立即应用」不走这条捷径，不受这里约束。
+        if manual.is_none() && eng.automation_held() {
+            return;
+        }
+        if manual.is_none() && !forced && eng.due(&cfg, now).is_empty() {
+            return;
+        }
+        eng.evaluate(&cfg, now);
+        let allowed = Arc::new(AllowedScripts {
+            scripts_dir: state.scripts_dir.clone(),
+            explicit: cfg.allowed_scripts.clone(),
+        });
         // 暂停期间连 reconcile 都不跑：切换、兜底都是引擎的自动行为，
         // 而暂停的全部意义就是让它们在网络变化前住手。
-        reconcile(state, &mut eng, &cfg, &allowed);
+        let auto = !eng.automation_held();
+        (allowed, auto)
+    };
+    if let Some(id) = &manual {
+        manual_apply(state, id, &allowed);
     }
-    drop(cfg);
-    drop(eng);
+    if auto {
+        reconcile(state, &allowed);
+    }
     publish_view(state);
 }
 
@@ -1255,20 +1348,94 @@ fn publish_view(state: &Arc<AppState>) {
     publish_status_now(state);
 }
 
-/// 把判定结果落到网络与动作上。
-fn reconcile(
-    state: &Arc<AppState>,
-    eng: &mut Engine,
-    cfg: &Config,
-    allowed: &Arc<AllowedScripts>,
-) {
+/// 「这一轮要下发什么」的锁内产物。
+///
+/// 之所以拆成 owned 快照：网络配置被克隆出来之后，下发阶段（`run_3a_lockfree`）
+/// 只认这份快照 + `plat`，与 engine / config 两把锁完全无关（审计 B2）。
+/// `gen` 记住决策代数，提交时用它确认「放锁这一会儿，没人改过判定」。
+///
+/// `Profile` / `FallbackConfig` 装箱：两者都远大于本枚举其余字段，不装箱会让
+/// 枚举尺寸被最大变体撑到 1.4KB（`clippy::large_enum_variant`）。它只在引擎线程
+/// 栈上活一轮，装箱换来的是两个变体尺寸相当。
+enum Plan {
+    /// 唯一命中：切到 / 重下某个 Profile
+    Profile {
+        profile: Box<Profile>,
+        net: Option<NetworkConfig>,
+        opts: RunOpts,
+        /// 同一个 Active、只是内容变了（RECONFIGURE）—— 与真正的切换处置不同：
+        /// 重下失败不弹「应用失败」气泡。
+        staying: bool,
+        /// 切换前的 Active 名字，只用于日志
+        from: Option<String>,
+        fp: String,
+        gen: u64,
+    },
+    /// 零命中：跑兜底
+    Fallback {
+        fb: Box<FallbackConfig>,
+        net: Option<NetworkConfig>,
+        fp: String,
+        fingerprint: String,
+        gen: u64,
+    },
+}
+
+impl Plan {
+    fn gen(&self) -> u64 {
+        match self {
+            Plan::Profile { gen, .. } | Plan::Fallback { gen, .. } => *gen,
+        }
+    }
+    fn net(&self) -> Option<&NetworkConfig> {
+        match self {
+            Plan::Profile { net, .. } | Plan::Fallback { net, .. } => net.as_ref(),
+        }
+    }
+}
+
+/// 把判定结果落到网络与动作上。**三段式**（审计 B2）：
+///
+/// 1. [`decide_plan`] 持锁算出「这一轮该下发什么」，并把 `branch.network` 克隆成 owned 快照；
+/// 2. [`run_3a_lockfree`] **放锁**跑 3A（子进程下发 + 4×800ms 回读），engine / config
+///    两把锁全程空着 —— `get_engine_status` / `status_payload` 这些只读 IPC 不会被挂住；
+/// 3. [`commit_plan`] 重新持锁，用 `generation` 复查这份计划还是不是当前该执行的那个，
+///    是才提交（起 3B / 记档 / 切 Active）。
+///
+/// 引擎是单线程的，放锁那一会儿不会有别的 `evaluate` 插进来；但把「计划作废」
+/// 这件事用代数复查显式表达出来，将来真引入了并发评估也不必重新推演。
+fn reconcile(state: &Arc<AppState>, allowed: &Arc<AllowedScripts>) {
+    let plan = {
+        let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        decide_plan(state, &mut eng, &cfg)
+    };
+    let Some(plan) = plan else { return; };
+    // —— apply：锁外。3A 失败时的回落 DHCP 也在这一步（同样是平台 I/O）——
+    let three_a = {
+        let degrade = plan.net().map(degrade_enabled).unwrap_or(false);
+        run_3a_lockfree(state, plan.net(), degrade)
+    };
+    // —— commit：重新持锁，复查决策代数 ——
+    let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+    if eng.generation != plan.gen() {
+        log::debug(&i18n::t("engine.plan_superseded"));
+        return;
+    }
+    commit_plan(state, &mut eng, plan, three_a, allowed);
+}
+
+/// 锁内：把这一轮的判定翻译成一份 owned 的下发计划。`None` = 这一轮什么都不做。
+///
+/// Conflict 那支也在锁内把提示发掉：它是纯广播，没有任何下发。
+fn decide_plan(state: &Arc<AppState>, eng: &mut Engine, cfg: &Config) -> Option<Plan> {
     match eng.decision.clone() {
         Decision::Conflict { ids } => {
             // 冻结现状：不撤销已生效的配置（撤销会让用户当场断网，而冲突只是
             // 「不确定该用哪个」），但也绝不往下走任何一支。
             let sig = ids.join("|");
             if sig == eng.conflict_shown {
-                return;
+                return None;
             }
             eng.conflict_shown = sig;
             let names: Vec<String> = ids
@@ -1288,6 +1455,7 @@ fn reconcile(
                 "netsense://conflict",
                 serde_json::json!({ "profiles": names }),
             );
+            None
         }
         Decision::NoActiveProfile => {
             eng.conflict_shown.clear();
@@ -1297,134 +1465,191 @@ fn reconcile(
             } else {
                 eng.stop_monitor();
             }
-            apply_fallback(state, eng, cfg, allowed);
+            decide_fallback(eng, cfg)
         }
         Decision::Active { id } => {
             eng.conflict_shown.clear();
             let Some(profile) = cfg.profile_by_id(&id) else {
                 eng.active_id = None;
-                return;
+                return None;
             };
-            let fp = fingerprint_of(profile);
+            let profile = profile.clone();
+            let fp = fingerprint_of(&profile);
             let fingerprint = eng.scheduler_fingerprint();
             if eng.is_blocked(&id, &fp, &fingerprint) {
-                return; // 这个「配置 + 网络」组合已经失败过一次，别反复弹授权框
+                return None; // 这个「配置 + 网络」组合已经失败过一次，别反复弹授权框
             }
             let staying = eng.active_id.as_deref() == Some(id.as_str());
             if staying && eng.applied_fp.as_deref() == Some(fp.as_str()) {
                 // 方案第 36 条：保持 Active 不重复下发、不重复跑一次性动作
-                return;
+                return None;
             }
-            if staying {
+            // THEN 缺省等于「这一支什么都不做」：它照样算 Active（条件命中了），
+            // 只是没有网卡配置、也没有动作。给 commit 留一个空 net 去记档。
+            let branch = Which::Then.of(&profile).cloned().unwrap_or_default();
+            let (from, opts) = if staying {
                 log::info(&i18n::tf("engine.reconfigure", &[("name", &profile.name)]));
-                match eng.execute_branch(state, profile, Which::Then, RunOpts::RECONFIGURE, allowed)
-                {
-                    Ok(()) => {
-                        eng.errors.remove(&id);
-                        eng.mark_applied(fp);
-                    }
-                    Err(e) => {
-                        log::error(&i18n::tf("engine.error", &[
-                            ("name", &profile.name),
-                            ("error", &e),
-                        ]));
-                        eng.record_failure(&id, fp, e);
-                    }
-                }
-                return;
-            }
-            let from = eng.active_display_name(cfg);
-            eng.deactivate();
-            match eng.execute_branch(state, profile, Which::Then, RunOpts::FULL, allowed) {
-                Ok(()) => {
-                    eng.active_id = Some(id.clone());
-                    eng.errors.remove(&id);
-                    eng.mark_applied(fp);
-                    log::info(&i18n::tf("engine.switch", &[
-                        ("from", from.as_deref().unwrap_or("-")),
-                        ("to", &profile.name),
-                    ]));
-                    log::info(&i18n::tf("notify.applied", &[("name", &profile.name)]));
-                }
-                Err(e) => {
-                    let msg = i18n::tf("engine.error", &[("name", &profile.name), ("error", &e)]);
-                    log::error(&msg);
-                    eng.record_failure(&id, fp, e);
-                    crate::state::emit_action(state, "apply", false, msg);
-                }
-            }
+                (None, RunOpts::RECONFIGURE)
+            } else {
+                let from = eng.active_display_name(cfg);
+                eng.deactivate();
+                (from, RunOpts::FULL)
+            };
+            let net = eng.branch_prepare(Which::Then, &branch);
+            Some(Plan::Profile {
+                profile: Box::new(profile),
+                net,
+                opts,
+                staying,
+                from,
+                fp,
+                gen: eng.generation,
+            })
         }
     }
 }
 
-/// 零命中时的处置：3A（如果配了网卡配置）+ 3B（一次性动作与常驻 worker）。
+/// 锁内：零命中时算出兜底下发计划（`None` = 兜底也什么都不做）。
 ///
+/// 零命中时的处置：3A（如果配了网卡配置）+ 3B（一次性动作与常驻 worker）。
 /// 它不是 Profile：没有条件、不参与匹配、永远不会 Conflict。网络配置的存在理由只有一个 ——
 /// 上一个 Profile 可能下发了静态 IP，零命中时必须有「回到自动获取」的落点；3B 则是
 /// 「零命中期间该维持什么」，与 THEN 分支同一套执行链路。
 ///
 /// 指纹覆盖整份 fallback 内容（网络 + 动作）：改任何一项都会重新走一遍，
 /// 没改就一个字都不动 —— 否则每一轮评估都会重跑动作、重启 worker。
-fn apply_fallback(
-    state: &Arc<AppState>,
-    eng: &mut Engine,
-    cfg: &Config,
-    allowed: &Arc<AllowedScripts>,
-) {
+fn decide_fallback(eng: &mut Engine, cfg: &Config) -> Option<Plan> {
     let Some(fb) = cfg.fallback.as_ref().filter(|f| f.enabled) else {
         // 兜底被禁用/清空：之前那一组 worker 不该继续维持 —— 它守的是一个
         // 用户已经撤销的期望。记档一并作废：重新启用时要重新下发，而不是被
         // 「内容没变」挡住。
         eng.stop_fallback_workers();
         eng.fallback_fp = None;
-        return;
+        return None;
     };
-    let has_actions = one_shot::any_enabled(&fb.one_shot)
-        || fb.persistent.iter().any(|a| a.enabled);
+    let has_actions =
+        one_shot::any_enabled(&fb.one_shot) || fb.persistent.iter().any(|a| a.enabled);
     if fb.network.is_none() && !has_actions {
         // 全空的兜底 = 什么都不做（保持现状）。空配置的语义是「不干预」，
         // 不是「把之前干预过的东西撤掉」。
         eng.stop_fallback_workers();
         eng.fallback_fp = None;
-        return;
+        return None;
     }
     let fp = format!("fallback|{}", serde_json::to_string(fb).unwrap_or_default());
     if eng.fallback_fp.as_deref() == Some(fp.as_str()) {
-        return;
+        return None;
     }
-    // 新的一组起来之前先把旧的叫停 —— 与 `execute_branch` 同一条顺序规则：
+    // 兜底 3A 失败记档：同一份配置 + 同一张网络指纹下不再重跑 3A，
+    // 否则用户持续缺席时每轮都会被要求授权（与 Profile 的 `blocked` 同机制）。
+    let fingerprint = eng.scheduler.fingerprint().to_string();
+    if eng.is_fallback_blocked(&fp, &fingerprint) {
+        return None;
+    }
+    // 新的一组起来之前先把旧的叫停 —— 与 `branch_prepare` 同一条顺序规则：
     // 旧配置的「保持 VPN 连接」不能在 3A 下发的同时还去抢路由表。
     eng.stop_fallback_workers();
-    // —— 3A：下发 + 回读校验 ——
-    let mut three_a = ThreeAOutcome::Skipped;
-    if let Some(net) = &fb.network {
+    let net = fb.network.clone();
+    if net.is_some() {
         // 下发的就是本机真实的网络改动：下一轮必须先重采样，否则「零命中 → 回落 DHCP」
         // 之后引擎还拿着静态 IP 时代的旧快照，指纹里的 primary/接口列表都可能是老的。
         eng.request_resample();
-        match network::apply_3a(&state.plat, net) {
-            Stage3A::Failed { reason } => {
-                log::error(&i18n::tf("engine.fallback_failed", &[("error", &reason)]));
+    }
+    Some(Plan::Fallback {
+        fb: Box::new(fb.clone()),
+        net,
+        fp,
+        fingerprint,
+        gen: eng.generation,
+    })
+}
+
+/// 锁内：3A 已在锁外跑完，这里只做「记账 + 起 3B」。
+///
+/// `generation` 的复查已在 [`reconcile`] 里做完，进到这里时这份计划仍然有效。
+fn commit_plan(
+    state: &Arc<AppState>,
+    eng: &mut Engine,
+    plan: Plan,
+    three_a: Option<Stage3A>,
+    allowed: &Arc<AllowedScripts>,
+) {
+    match plan {
+        Plan::Profile {
+            profile,
+            opts,
+            staying,
+            from,
+            fp,
+            ..
+        } => {
+            let profile = *profile; // 拆箱：下面只用 &profile 与它的字段
+            let failure = match &three_a {
+                Some(Stage3A::Failed { reason }) => Some(reason.clone()),
+                _ => None,
+            };
+            match failure {
+                Some(reason) => {
+                    let msg =
+                        i18n::tf("engine.error", &[("name", &profile.name), ("error", &reason)]);
+                    log::error(&msg);
+                    eng.record_failure(&profile.id, fp, reason);
+                    // 重下失败不弹「应用失败」气泡：多半是用户改完配置就等着生效，
+                    // 报错已经在日志和该 Profile 的红叉上。真正的切换才通知。
+                    if !staying {
+                        crate::state::emit_action(state, "apply", false, msg);
+                    }
+                }
+                None => {
+                    if let Some(Stage3A::Applied) = &three_a {
+                        log::debug(&i18n::tf(
+                            "engine.pass_3a",
+                            &[("name", &profile.name), ("branch", Which::Then.name())],
+                        ));
+                    }
+                    if !staying {
+                        eng.active_id = Some(profile.id.clone());
+                    }
+                    eng.errors.remove(&profile.id);
+                    eng.mark_applied(fp);
+                    if !staying {
+                        log::info(&i18n::tf("engine.switch", &[
+                            ("from", from.as_deref().unwrap_or("-")),
+                            ("to", &profile.name),
+                        ]));
+                        log::info(&i18n::tf("notify.applied", &[("name", &profile.name)]));
+                    }
+                }
+            }
+            // 3A 失败时 branch_3b 自己会整段跳过（硬屏障）。
+            eng.branch_3b(state, &profile, Which::Then, opts, allowed, three_a);
+        }
+        Plan::Fallback { fb, fp, fingerprint, .. } => {
+            if let Some(Stage3A::Failed { reason }) = &three_a {
+                log::error(&i18n::tf("engine.fallback_failed", &[("error", reason)]));
                 // 3A 失败 = 3B 一条都不跑（与分支同一道硬屏障）；记档不写，
                 // 下一轮（网络或配置一变）会自动重试。
+                eng.record_fallback_failure(fp, fingerprint);
                 return;
             }
-            Stage3A::Applied => three_a = ThreeAOutcome::Applied,
+            eng.fallback_fp = Some(fp);
+            eng.applied_fp = None;
+            eng.active_id = None;
+            log::info(&i18n::t("engine.fallback_applied"));
+            // —— 3B：合成一个说得清归属的身份 ——
+            // 兜底不接管健康监测：它没有「当前环境」可探测，也没有 Profile 可归属。
+            // holder 必然挂着一支 THEN（见 fallback_holder），branch_3b 由此取到那一支。
+            let holder = fallback_holder(&fb);
+            eng.branch_3b(
+                state,
+                &holder,
+                Which::Then,
+                RunOpts::FALLBACK,
+                allowed,
+                three_a,
+            );
         }
     }
-    eng.fallback_fp = Some(fp);
-    eng.applied_fp = None;
-    eng.active_id = None;
-    log::info(&i18n::t("engine.fallback_applied"));
-    // —— 3B：合成一个说得清归属的身份 ——
-    let holder = fallback_holder(fb);
-    let branch = holder
-        .then
-        .as_ref()
-        // i18n-exempt: panic 消息说的是内部不变量，给改代码的人看 —— 它既不进字典，
-        // 也没有任何一条路径能把它渲染到界面上。
-        .expect("fallback_holder 必然挂着一支 THEN");
-    eng.submit_one_shot(state, &holder, Which::Then, branch, allowed, three_a);
-    eng.start_workers(state, &holder, branch, allowed);
 }
 
 /// 给兜底合成一个「说得清归属」的 Profile。
@@ -1449,57 +1674,109 @@ fn fallback_holder(fb: &FallbackConfig) -> Profile {
 ///
 /// 它不是后门：命中就跑 THEN、不命中就跑 ELSE；若此刻有多个 Profile 命中则直接拒绝
 /// 并列出冲突名单 —— 否则用户可以绕过「多命中不自动选择」这条核心约束。
-fn manual_apply(
-    state: &Arc<AppState>,
-    eng: &mut Engine,
-    cfg: &Config,
-    id: &str,
-    allowed: &Arc<AllowedScripts>,
-) {
-    let Some(profile) = cfg.profile_by_id(id) else {
-        let msg = i18n::tf("engine.unknown_profile", &[("name", id)]);
-        log::warn(&msg);
-        crate::state::emit_action(state, "apply", false, msg);
-        return;
+///
+/// 与 [`reconcile`] 同样是三段式（审计 B2）：锁内判定 + 快照网络 → **放锁**跑 3A →
+/// 重新持锁记档。「立即应用」尤其不该持锁下发：这一问一答本来就在等结果。
+fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) {
+    struct Manual {
+        profile: Profile,
+        net: Option<NetworkConfig>,
+        matched: bool,
+        which: Which,
+        fp: String,
+        gen: u64,
+    }
+    // —— decide（锁内）——
+    let plan = {
+        let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(profile) = cfg.profile_by_id(id) else {
+            let msg = i18n::tf("engine.unknown_profile", &[("name", id)]);
+            log::warn(&msg);
+            crate::state::emit_action(state, "apply", false, msg);
+            return;
+        };
+        if !profile.enabled {
+            let msg = i18n::tf("engine.disabled", &[("name", &profile.name)]);
+            crate::state::emit_action(state, "apply", false, msg);
+            return;
+        }
+        let others: Vec<String> = eng
+            .evaluation
+            .matched_ids
+            .iter()
+            .filter(|m| m.as_str() != id)
+            .map(|m| {
+                cfg.profile_by_id(m)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| m.clone())
+            })
+            .collect();
+        if !others.is_empty() {
+            let msg = i18n::tf("engine.conflict_blocked", &[
+                ("name", &profile.name),
+                ("others", &others.join(", ")),
+            ]);
+            log::warn(&msg);
+            crate::state::emit_action(state, "apply", false, msg);
+            return;
+        }
+        let matched = eval_profile(profile, &eng.snapshot).matched;
+        let which = if matched { Which::Then } else { Which::Else };
+        let Some(branch) = which.of(profile).cloned() else {
+            let msg = i18n::tf("engine.no_branch", &[
+                ("name", &profile.name),
+                ("branch", which.name()),
+            ]);
+            crate::state::emit_action(state, "apply", false, msg);
+            return;
+        };
+        let profile = profile.clone();
+        let fp = fingerprint_of(&profile);
+        let net = eng.branch_prepare(which, &branch);
+        Manual {
+            profile,
+            net,
+            matched,
+            which,
+            fp,
+            gen: eng.generation,
+        }
     };
-    if !profile.enabled {
-        let msg = i18n::tf("engine.disabled", &[("name", &profile.name)]);
-        crate::state::emit_action(state, "apply", false, msg);
+    // —— apply（锁外）——
+    let three_a = {
+        let degrade = plan.net.as_ref().map(degrade_enabled).unwrap_or(false);
+        run_3a_lockfree(state, plan.net.as_ref(), degrade)
+    };
+    // —— commit（重新持锁，复查决策代数）——
+    let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+    if eng.generation != plan.gen {
+        log::debug(&i18n::t("engine.plan_superseded"));
         return;
     }
-    let others: Vec<String> = eng
-        .evaluation
-        .matched_ids
-        .iter()
-        .filter(|m| m.as_str() != id)
-        .map(|m| {
-            cfg.profile_by_id(m)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| m.clone())
-        })
-        .collect();
-    if !others.is_empty() {
-        let msg = i18n::tf("engine.conflict_blocked", &[
-            ("name", &profile.name),
-            ("others", &others.join(", ")),
-        ]);
-        log::warn(&msg);
-        crate::state::emit_action(state, "apply", false, msg);
-        return;
-    }
-    let matched = eval_profile(profile, &eng.snapshot).matched;
-    let which = if matched { Which::Then } else { Which::Else };
-    if which.of(profile).is_none() {
-        let msg = i18n::tf("engine.no_branch", &[
-            ("name", &profile.name),
-            ("branch", which.name()),
-        ]);
-        crate::state::emit_action(state, "apply", false, msg);
-        return;
-    }
-    let fp = fingerprint_of(profile);
-    match eng.execute_branch(state, profile, which, RunOpts::MANUAL, allowed) {
-        Ok(()) => {
+    let Manual {
+        profile,
+        matched,
+        which,
+        fp,
+        ..
+    } = plan;
+    match &three_a {
+        Some(Stage3A::Failed { reason }) => {
+            let msg = i18n::tf("engine.error", &[("name", &profile.name), ("error", reason)]);
+            log::error(&msg);
+            if matched {
+                eng.record_failure(&profile.id, fp, reason.clone());
+            }
+            crate::state::emit_action(state, "apply", false, msg);
+        }
+        _ => {
+            if let Some(Stage3A::Applied) = &three_a {
+                log::debug(&i18n::tf(
+                    "engine.pass_3a",
+                    &[("name", &profile.name), ("branch", which.name())],
+                ));
+            }
             let msg = i18n::tf("engine.manual_ok", &[
                 ("name", &profile.name),
                 ("branch", which.name()),
@@ -1508,21 +1785,20 @@ fn manual_apply(
             crate::state::emit_action(state, "apply", true, msg);
             if matched {
                 // 唯一命中：手动应用等价于正常激活，记档让引擎别再重下一遍
-                eng.active_id = Some(id.to_string());
+                // 先停掉任何旧 Profile 残留的监测线程，否则它会继续 armed 并在下次探测时
+                // 拆掉刚刚手动激活的这个现场。
+                eng.stop_monitor();
+                eng.active_id = Some(profile.id.clone());
                 eng.applied_fp = Some(fp);
                 eng.fallback_fp = None;
-                eng.decision = Decision::Active { id: id.to_string() };
+                eng.decision = Decision::Active {
+                    id: profile.id.clone(),
+                };
             }
-        }
-        Err(e) => {
-            let msg = i18n::tf("engine.error", &[("name", &profile.name), ("error", &e)]);
-            log::error(&msg);
-            if matched {
-                eng.record_failure(id, fp, e);
-            }
-            crate::state::emit_action(state, "apply", false, msg);
         }
     }
+    // 3A 失败时 branch_3b 自己会整段跳过（硬屏障）。
+    eng.branch_3b(state, &profile, which, RunOpts::MANUAL, allowed, three_a);
 }
 
 fn fingerprint_of(p: &Profile) -> String {
@@ -1608,26 +1884,35 @@ fn probe(state: &Arc<AppState>) {
     let now = Instant::now();
     // 采样在锁外，理由同 set_dhcp。
     let snap = NetworkSnapshot::sample(&state.plat);
-    let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-    eng.note_sampled(snap, now);
-    eng.evaluate(&cfg, now);
-    let allowed = Arc::new(AllowedScripts {
-        scripts_dir: state.scripts_dir.clone(),
-        explicit: cfg.allowed_scripts.clone(),
-    });
-    match eng.decision.clone() {
-        Decision::Active { id } => manual_apply(state, &mut eng, &cfg, &id, &allowed),
-        Decision::Conflict { ids } => {
-            let names: Vec<String> = ids
+    // 评估在锁内，冲突名单也在锁内解析好 —— manual_apply 自己管加锁（它要放锁跑 3A），
+    // 所以这里只把「判定 + 名字 + allow-list」带出来，不把锁传下去。
+    let (allowed, decision, conflict_names) = {
+        let mut eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        eng.note_sampled(snap, now);
+        eng.evaluate(&cfg, now);
+        let allowed = Arc::new(AllowedScripts {
+            scripts_dir: state.scripts_dir.clone(),
+            explicit: cfg.allowed_scripts.clone(),
+        });
+        let decision = eng.decision.clone();
+        let conflict_names: Vec<String> = match &decision {
+            Decision::Conflict { ids } => ids
                 .iter()
                 .map(|id| {
                     cfg.profile_by_id(id)
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| id.clone())
                 })
-                .collect();
-            let msg = i18n::tf("notify.probe_conflict", &[("names", &names.join(", "))]);
+                .collect(),
+            _ => Vec::new(),
+        };
+        (allowed, decision, conflict_names)
+    };
+    match decision {
+        Decision::Active { id } => manual_apply(state, &id, &allowed),
+        Decision::Conflict { .. } => {
+            let msg = i18n::tf("notify.probe_conflict", &[("names", &conflict_names.join(", "))]);
             log::warn(&msg);
             crate::state::emit_action(state, "probe", false, msg);
         }
@@ -1637,8 +1922,6 @@ fn probe(state: &Arc<AppState>) {
             crate::state::emit_action(state, "probe", false, msg);
         }
     }
-    drop(cfg);
-    drop(eng);
     publish_view(state);
 }
 
@@ -2045,8 +2328,8 @@ mod tests {
     }
 
     /// 兜底的身份是合成的：id 用保留名（运行留痕与 worker 归属都认它）、名字来自字典
-    /// （用户没有可改的 name）、网络必须留空 —— 3A 由 `apply_fallback` 亲自跑过，
-    /// 挂在这支分支上会让 `execute_branch` 再下发一次。
+    /// （用户没有可改的 name）、网络必须留空 —— 3A 由 `decide_fallback` 亲自下发过，
+    /// 挂在这支分支上会让 `commit_plan` 再下发一次。
     #[test]
     fn the_fallback_holder_is_a_synthetic_identity_for_attribution_only() {
         use crate::config::{OneShotAction, OneShotActionType, PersistentAction, PersistentActionType};

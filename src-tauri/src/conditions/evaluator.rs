@@ -66,8 +66,9 @@ pub fn eval_condition(c: &Condition, snap: &NetworkSnapshot) -> ConditionStatus 
     }
     let hit = match c.kind {
         crate::config::ConditionType::WifiSsid => {
-            // SSID 大小写敏感（802.11 的 SSID 本身就是字节串）
-            snap.ssid.as_deref() == Some(c.value.as_str())
+            // SSID 大小写敏感（802.11 的 SSID 本身就是字节串）。配置值只裁掉首尾空白
+            // （用户在下拉里手填时常带一个尾随空格），不改大小写、不裁 SSID 本身的字节。
+            snap.ssid.as_deref() == Some(c.value.trim())
         }
         crate::config::ConditionType::GatewayMac => mac_eq(snap.gateway_mac.as_deref(), &c.value),
         crate::config::ConditionType::Bssid => mac_eq(snap.bssid.as_deref(), &c.value),
