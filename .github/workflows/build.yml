@@ -1,11 +1,14 @@
 name: build
 
-# Three-platform build and release:
-#   - Pushing a v* tag  -> auto-creates a Draft Release with the three-platform installers
-#                          (windows-x64 / macos-arm64 / macos-x64 / linux-x64)
+# Eight-target build and release:
+#   - Pushing a v* tag  -> auto-creates a Draft Release with installers + portable archives for:
+#       windows-x64 (nsis,msi)   windows-arm64 (nsis,msi)   windows-x86 32-bit (nsis,msi)
+#       macos-arm64 (dmg)        macos-x64 (dmg)
+#       linux-x64 (deb)          linux-arm64 (deb)          linux-armv7 32-bit (deb)
+#     each leg also uploads a portable .zip (extract-and-run, no installer).
 #   - Manual workflow run -> only builds and uploads bare executable artifacts, no Release
 # Why in the cloud: Windows needs MSVC + WiX/NSIS, macOS signing must run on a Mac,
-# Linux depends on webkit2gtk.
+# Linux cross-compiles to arm64/armhf and depends on webkit2gtk.
 
 on:
   workflow_dispatch:
@@ -163,6 +166,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             label: windows-x64
             bundles: "nsis,msi"
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            label: windows-arm64
+            bundles: "nsis,msi"
+          - platform: windows-latest
+            target: i686-pc-windows-msvc
+            label: windows-x86
+            bundles: "nsis,msi"
           - platform: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
@@ -175,6 +186,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             label: linux-x64
             bundles: "deb"
+            dpkg-arch: amd64
+          - platform: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            label: linux-arm64
+            bundles: "deb"
+            dpkg-arch: arm64
+          - platform: ubuntu-22.04
+            target: armv7-unknown-linux-gnueabihf
+            label: linux-armv7
+            bundles: "deb"
+            dpkg-arch: armhf
     runs-on: ${{ matrix.platform }}
     # A single-platform cold build takes ~3-10 min; 60 min covers a first full compile and avoids
     # infinite queuing when runners are scarce (a 17h hang has happened before).
@@ -182,13 +204,42 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Linux system dependencies
+      - name: Linux system dependencies (host amd64 + cross targets)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev patchelf build-essential curl wget file libssl-dev
+          case "${{ matrix.dpkg-arch }}" in
+            arm64)
+              sudo dpkg --add-architecture arm64
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                gcc-aarch64-linux-gnu \
+                libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 librsvg2-dev:arm64 \
+                libayatana-appindicator3-dev:arm64 libssl-dev:arm64 ;;
+            armhf)
+              sudo dpkg --add-architecture armhf
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                gcc-arm-linux-gnueabihf \
+                libwebkit2gtk-4.1-dev:armhf libgtk-3-dev:armhf librsvg2-dev:armhf \
+                libayatana-appindicator3-dev:armhf libssl-dev:armhf ;;
+          esac
+
+      # Cross-compilation: point cargo/pkg-config at the target sysroot + linker. Harmless on amd64.
+      - name: Linux cross toolchain env
+        if: matrix.platform == 'ubuntu-22.04' && matrix.dpkg-arch != 'amd64'
+        shell: bash
+        run: |
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV" ;;
+            armv7-unknown-linux-gnueabihf)
+              echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV" ;;
+          esac
 
       # windows-latest doesn't ship WiX / NSIS; Tauri needs them explicitly to build msi/nsis.
       # choco may return non-zero on "already installed / pending reboot"; `|| true` absorbs that,
@@ -308,6 +359,43 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseId: ${{ needs.release.outputs.release_id }}
 
+      # Portable archive (extract-and-run, no installer). Zipped with Python so it works on every
+      # runner. macOS ships the .app; Windows/Linux ship the binary plus the embedded resources dir.
+      - name: Build portable archive
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="${{ matrix.target }}"
+          B="src-tauri/target/${T}/release/bundle"
+          D="portable-stage"
+          rm -rf "$D" && mkdir -p "$D"
+          [ -f "src-tauri/target/${T}/release/netsense.exe" ] && cp "src-tauri/target/${T}/release/netsense.exe" "$D/"
+          [ -f "src-tauri/target/${T}/release/netsense" ]   && cp "src-tauri/target/${T}/release/netsense"   "$D/"
+          [ -d "$B/macos/NetSense.app" ] && cp -r "$B/macos/NetSense.app" "$D/"
+          [ -d "$B/resources" ] && cp -r "$B/resources" "$D/"
+          printf 'Portable NetSense %s\nExtract and run NetSense.app / netsense / netsense.exe directly.\nNo installer; the per-user config dir is used as usual.\n' "${{ github.ref_name }}" > "$D/README.txt"
+          python - <<'PY'
+          import shutil
+          shutil.make_archive("NetSense_${{ matrix.label }}_portable", "zip", root_dir="portable-stage")
+          PY
+          rm -rf "$D"
+          ls -la "NetSense_${{ matrix.label }}_portable.zip"
+
+      - name: Upload portable archive to Draft Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          F="NetSense_${{ matrix.label }}_portable.zip"
+          gh api -X POST \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=${F}" \
+            -H "Content-Type: application/zip" --input "$F"
+          echo "uploaded ${F}"
+
       # Hash the installers here, on the machine that just built them, while they are still ordinary
       # files on disk. The alternative -- pulling each asset back out of the Release in the
       # `checksums` job -- cannot work in Actions: downloading an asset's *binary* content is not
@@ -329,7 +417,7 @@ jobs:
             d=$(dirname "$f"); n=$(basename "$f")
             ( cd "$d" && sha256sum "$n" ) >> "$out"
           done < <(find "src-tauri/target/${{ matrix.target }}/release/bundle" -type f \
-                     \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.deb' \) -print0 | sort -z)
+                     \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.zip' \) -print0 | sort -z)
           if [ ! -s "$out" ]; then
             echo "::error::leg ${{ matrix.label }} produced no installer to checksum"
             exit 1
@@ -409,8 +497,8 @@ jobs:
           legs=$(find fragments -name 'SHA256SUMS.*' | wc -l)
           # A missing line is not cosmetic: the updater treats "my file is not in SHA256SUMS" as
           # "this update cannot be verified", and refuses it -- so that platform would never upgrade.
-          if [ "${count:-0}" -eq 0 ] || [ "$legs" -lt 4 ]; then
-            echo "::error::${legs} leg(s) / ${count} installer(s) contributed checksums, expected 4"
+          if [ "${count:-0}" -eq 0 ] || [ "$legs" -lt 8 ]; then
+            echo "::error::${legs} leg(s) / ${count} installer(s) contributed checksums, expected 8"
             exit 1
           fi
           cat SHA256SUMS

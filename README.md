@@ -97,14 +97,23 @@ command directly: everything platform-specific sits behind one trait in the PAL
 
 ### Build in the cloud (no local dependencies)
 
-Pushing a version tag runs CI for all four targets at once
-(`windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`) and opens a **Draft** Release that the
-installers attach to; it goes public on its own once every asset is there and `SHA256SUMS` was
+Pushing a version tag runs CI for every target at once and opens a **Draft** Release that the
+assets attach to; it goes public on its own once every asset is present and `SHA256SUMS` was
 generated:
+
+| OS | Architectures | Installer | Portable |
+|----|---------------|-----------|----------|
+| Windows | x64, ARM64, x86 (32-bit) | NSIS + MSI | `netsense.exe` + resources (zip) |
+| macOS | Apple Silicon, Intel | DMG (`.app` inside) | `.app` (zip) |
+| Linux | x64, ARM64, ARMv7 (32-bit) | DEB | binary + resources (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
+
+Each release also ships a **portable** archive per target — extract it and run `NetSense.app` /
+`netsense` / `netsense.exe` directly, no installer. Settings still live in the per-user config dir,
+so a portable copy and an installed copy on the same machine share the same profiles.
 
 The same workflow can be started manually from GitHub → Actions → build → Run workflow, which
 produces bare executables and no Release.

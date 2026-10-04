@@ -6,6 +6,14 @@ All notable changes to NetSense are documented here. The format is based on
 
 ## [1.0.7] - 2026-10-04
 
+### Added
+
+- **More platforms and a portable build.** CI now builds eight targets (was four) and attaches a portable archive to every release:
+  - Windows: added **ARM64** (`aarch64-pc-windows-msvc`) and **32-bit x86** (`i686-pc-windows-msvc`); x64 keeps NSIS + MSI.
+  - Linux: added **ARM64** (`aarch64-unknown-linux-gnu`) and **32-bit ARM** (`armv7-unknown-linux-gnueabihf`); x64 keeps DEB.
+  - macOS: Apple Silicon + Intel DMG (unchanged).
+  - **Portable**: each target also ships a `NetSense_<label>_portable.zip` — extract and run `NetSense.app` / `netsense` / `netsense.exe` directly, no installer; it uses the same per-user config dir.
+
 ### Fixed
 
 - **Linux: the status query no longer panics.** The native netlink reader resolved its answer channel with `tokio::sync::oneshot::Receiver::blocking_recv()` inside an async Tauri command, which violates the tokio contract and panicked on every status read. The channel is now a `std::sync::mpsc` receiver polled with `recv_timeout`, and the worker is guarded by `tokio::time::timeout` so a half-dead connection cannot hang the whole read path.

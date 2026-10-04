@@ -6,6 +6,14 @@ NetSense 的所有重要变更记录于此。格式基于
 
 ## [1.0.7] - 2026-10-04
 
+### 新增
+
+- **补齐平台与便携版。** CI 现构建八个目标（原为四个），并为每个目标附上便携压缩包：
+  - Windows：新增 **ARM64**（`aarch64-pc-windows-msvc`）与 **32 位 x86**（`i686-pc-windows-msvc`）；x64 保留 NSIS + MSI。
+  - Linux：新增 **ARM64**（`aarch64-unknown-linux-gnu`）与 **32 位 ARM**（`armv7-unknown-linux-gnueabihf`）；x64 保留 DEB。
+  - macOS：Apple Silicon + Intel 的 DMG（不变）。
+  - **便携版**：每个目标另附 `NetSense_<label>_portable.zip`——解压后直接运行 `NetSense.app` / `netsense` / `netsense.exe`，无需安装；仍使用同一份每用户配置目录。
+
 ### 修复
 
 - **Linux：状态查询不再崩溃。** 原生 netlink 读取在 async Tauri 命令里用 `tokio::sync::oneshot::Receiver::blocking_recv()` 取应答通道，违反 tokio 契约，每次读状态都 panic。现改为 `std::sync::mpsc` 接收端加 `recv_timeout`，worker 侧再套 `tokio::time::timeout`，半死连接不会挂死整条读路径。

@@ -93,13 +93,20 @@ Core Engine（detection / conditions / 照合 / network / automation）はシス
 
 ### クラウドでビルド（ローカル依存なし）
 
-バージョンタグをプッシュすると、CI が 4 つのターゲットすべてに対して一度に実行され
-（`windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`）、インストーラを添付した **Draft** Release が
-作成されます。すべてのアセットが揃って `SHA256SUMS` も生成されると、勝手に公開へ進みます:
+バージョンタグをプッシュすると、CI がすべてのターゲットに対して一度に実行され、アセットを添付した
+**Draft** Release が作成されます。すべてのアセットが揃って `SHA256SUMS` も生成されると、勝手に公開へ進みます:
+
+| OS | アーキテクチャ | インストーラ | ポータブル |
+|----|---------------|--------------|------------|
+| Windows | x64, ARM64, x86 (32 ビット) | NSIS + MSI | `netsense.exe` + リソース (zip) |
+| macOS | Apple Silicon, Intel | DMG (`.app` 内包) | `.app` (zip) |
+| Linux | x64, ARM64, ARMv7 (32 ビット) | DEB | バイナリ + リソース (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
+
+各リリースには各ターゲット用の**ポータブル** zip も同梱されます——展開して `NetSense.app` / `netsense` / `netsense.exe` を直接実行、インストーラ不要。設定は従来どおり各ユーザー設定ディレクトリを使用するため、同一マシン上のポータブル版とインストール版は同じ設定を共有します。
 
 同じワークフローは GitHub → Actions → build → Run workflow から手動でも起動できます。この場合は
 むき出しの実行ファイルだけが生成され、Release は作成されません。

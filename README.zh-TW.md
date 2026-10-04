@@ -75,13 +75,20 @@ Tauri v2 + Rust、系統 WebView、前端為純靜態 HTML/CSS/JS（無 Node 建
 
 ### 雲端建置（本機零依賴）
 
-推一個版本 tag，就會讓 CI 同時跑四個目標
-（`windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`），並開出一個附上安裝包的 **Draft** Release；
-等四個平台的產物都齊、`SHA256SUMS` 也產生好之後，它自己轉為正式發行：
+推一個版本 tag 就會讓 CI 對全部目標同時建置，並開出附上產物的 **Draft** Release；等所有產物都齊、
+`SHA256SUMS` 也產生好之後，它自己轉為正式發行：
+
+| 系統 | 架構 | 安裝包 | 便攜版 |
+|------|------|--------|--------|
+| Windows | x64、ARM64、x86（32 位元） | NSIS + MSI | `netsense.exe` + 資源（zip） |
+| macOS | Apple Silicon、Intel | DMG（內含 `.app`） | `.app`（zip） |
+| Linux | x64、ARM64、ARMv7（32 位元） | DEB | 二進位 + 資源（zip） |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
+
+每個 Release 還會為各目標附上**便攜版**壓縮包——解壓後直接執行 `NetSense.app` / `netsense` / `netsense.exe`，無須安裝；設定仍寫入同一份每使用者目錄，便攜版與安裝版在同一台機器上共用同一套設定。
 
 同一個 workflow 也可以在 GitHub → Actions → build → Run workflow 手動啟動，那種做法只產出裸
 可執行檔、不產 Release。

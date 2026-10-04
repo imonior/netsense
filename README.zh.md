@@ -78,13 +78,20 @@ Core Engine（detection / conditions / 匹配 / network / automation）从不直
 
 ### 云端构建（本地零依赖）
 
-推一个版本 tag 就会让 CI 同时构建四个目标
-（`windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`），并创建一个附带安装包的 **Draft**
-Release；等四个平台的产物都齐、`SHA256SUMS` 也生成好之后，它自己转为正式发布：
+推一个版本 tag 就会让 CI 对全部目标同时构建，并创建附带产物的 **Draft** Release；等所有产物都齐、
+`SHA256SUMS` 也生成好之后，它自己转为正式发布：
+
+| 系统 | 架构 | 安装包 | 便携版 |
+|------|------|--------|--------|
+| Windows | x64、ARM64、x86（32 位） | NSIS + MSI | `netsense.exe` + 资源（zip） |
+| macOS | Apple Silicon、Intel | DMG（内含 `.app`） | `.app`（zip） |
+| Linux | x64、ARM64、ARMv7（32 位） | DEB | 二进制 + 资源（zip） |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
+
+每个 Release 还会为各目标附上**便携版**压缩包——解压后直接运行 `NetSense.app` / `netsense` / `netsense.exe`，无需安装；配置仍写入同一份每用户目录，便携版与安装版在同一台机器上共享同一套配置。
 
 同一个 workflow 也可在 GitHub → Actions → build → Run workflow 手动触发；那种方式只产出裸可执行文件，
 不创建 Release。

@@ -6,6 +6,14 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 
 ## [1.0.7] - 2026-10-04
 
+### 추가
+
+- **플랫폼 추가 및 포터블 버전.** CI가 이제 8개 타깃(기존 4개)을 빌드하고 각 타깃에 포터블 zip을 포함합니다:
+  - Windows: **ARM64**(`aarch64-pc-windows-msvc`)와 **32비트 x86**(`i686-pc-windows-msvc`) 추가; x64는 기존 NSIS + MSI 유지.
+  - Linux: **ARM64**(`aarch64-unknown-linux-gnu`)와 **32비트 ARM**(`armv7-unknown-linux-gnueabihf`) 추가; x64는 기존 DEB 유지.
+  - macOS: Apple Silicon + Intel DMG (변경 없음).
+  - **포터블 버전**: 각 타깃에 `NetSense_<label>_portable.zip` 추가 — 압축 해제 후 `NetSense.app` / `netsense` / `netsense.exe` 직접 실행, 설치 불필요; 설정은 기존대로 사용자별 설정 디렉터리 사용.
+
 ### 수정
 
 - **Linux: 상태 조회가 더 이상 패닉하지 않는다.** 네이티브 netlink 리더가 async Tauri 명령 안에서 응답 채널을 `tokio::sync::oneshot::Receiver::blocking_recv()`로 받았는데, tokio 계약 위반으로 상태를 읽을 때마다 패닉했다. 채널은 `std::sync::mpsc` 수신측으로 바꿔 `recv_timeout`로 받고, worker 쪽에는 `tokio::time::timeout`을 걸었다. 이제 반쯤 죽은 연결이 읽기 경로 전체를 멈추게 하지 않는다.
