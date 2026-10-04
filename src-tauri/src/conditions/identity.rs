@@ -61,6 +61,16 @@ impl NetworkSnapshot {
         }
     }
 
+    /// 这一份快照有没有读到「现在是哪个网络」的任何一项证据。
+    ///
+    /// 三项全空**不能**读成「此刻在一个陌生网络上」：SSID 这一侧在 macOS 上只有
+    /// CoreWLAN 一个来源（命令行在 Sequoia 上全部涂黑），网关 MAC 要靠 ARP 表里恰好
+    /// 有那一条，BSSID 同理 —— 三者同时为空更常见的原因是这几次读取都没拿到东西。
+    /// 引擎用它拦住「零命中 → 撤掉现网」那条处置，见 `engine::decide_plan`。
+    pub fn has_identity(&self) -> bool {
+        self.ssid.is_some() || self.gateway_mac.is_some() || self.bssid.is_some()
+    }
+
     /// 变化检测用的指纹。
     ///
     /// 为什么不能只比 SSID：网关 MAC 变了意味着换了一台路由器（同一
@@ -105,6 +115,31 @@ mod tests {
             interfaces: ifaces.iter().map(|s| s.to_string()).collect(),
             tunnels: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_sample_without_any_identity_field_is_not_an_observation() {
+        // 现场在线（en0 仍在网卡集合里），但 SSID / 网关 MAC / BSSID 一个都没读到。
+        // 这一份不是「换到了一个陌生网络」的观察，而是身份读取失败 —— 拿它判零命中，
+        // 兜底就会把正在工作的静态配置拆掉（回落 DHCP、清空 DNS）。
+        let s = snap(None, None, &["en0"]);
+        assert!(
+            !s.has_identity(),
+            "三项身份字段全空时，这份快照不该被当成读到了网络身份"
+        );
+        assert!(
+            s.fingerprint().contains("en0"),
+            "网卡集合照常进指纹：身份没读到不等于什么都没读到"
+        );
+    }
+
+    #[test]
+    fn any_single_identity_field_counts_as_read() {
+        assert!(snap(Some("Office"), None, &["en0"]).has_identity());
+        assert!(snap(None, Some("aa:bb:cc:dd:ee:ff"), &["en0"]).has_identity());
+        let mut b = snap(None, None, &["en0"]);
+        b.bssid = Some("11:22:33:44:55:66".into());
+        assert!(b.has_identity(), "BSSID 单独有值也算读到了身份");
     }
 
     #[test]

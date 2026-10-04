@@ -16,6 +16,14 @@ NetSense 的所有重要变更记录于此。格式基于
 
 ### 修复
 
+- **轮询不再拆掉正在工作的网络。** 某一轮采样完全没读到网络身份 —— SSID、网关 MAC、BSSID 全空 ——
+  时，引擎过去把它读成「一个 Profile 都没命中」并下发零命中兜底：静态地址变成自动获取，配置好的 DNS
+  被清空成自动，而界面上看不出是谁改的。三项同时为空更常见的原因是这几次读取都没拿到东西，而不是
+  「到了一个陌生网络」：macOS 上 SSID 只有 CoreWLAN 一个来源（命令行在 Sequoia 上全部涂黑），网关 MAC
+  要靠 ARP 表里恰好有那一条 —— 重连进行中的那一轮就是这个样子。没有被证实的零命中现在既不动 Active
+  Profile，也不停它的健康监测，更不下发兜底；连续两轮读空才认定这个网络确实读不出身份，兜底照常生效。
+  轮询同时也会等满 `change_delay_secs` 的稳定窗口，不再抢在事件路径的去抖之前判定。
+
 - **Linux：状态查询不再崩溃。** 原生 netlink 读取在 async Tauri 命令里用 `tokio::sync::oneshot::Receiver::blocking_recv()` 取应答通道，违反 tokio 契约，每次读状态都 panic。现改为 `std::sync::mpsc` 接收端加 `recv_timeout`，worker 侧再套 `tokio::time::timeout`，半死连接不会挂死整条读路径。
 - **Linux：网卡枚举现在能编译也能跑。** `list_interfaces` 编不过：重构后的 `device_ip` 返回 `Option<DeviceIp>` 却没解包，且兄弟模块 `linux_nm` 裸名引用却没导入。两处都修了，Linux 后端不再被 `cfg(linux)` 静默剔除，而是真正参与编译。
 - **macOS：网关 MAC 现在能匹配吞前导零的 OUI。** `arp -n` 打出 `0:50:56:c0:0:8` 而非 `00:50:56:c0:00:08`，旧的整体补零救不回与前面 IP 文本同分组的首字节。新加的 `extract_mac_loose`（cfg 无关、有单测）逐组归一成规范 MAC，VMware / 华为 OUI 重新被匹配。

@@ -294,6 +294,13 @@ pub(crate) fn epoch_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+/// 零命中要落成处置之前，允许「连续读不到身份」被当成既成事实的轮数。
+///
+/// 为什么是 2：一节采样约 2 s，而误判的代价是「把用户的静态 IP 与指定 DNS 拆成
+/// 自动获取」，代价的反方向只是「多等一节才回落」。2 轮足够把「CoreWLAN 这一次没
+/// 返回 / ARP 表恰好空了」这类单轮抖动滤掉，又不至于让真的换了陌生网络时等太久。
+const UNIDENTIFIED_CONFIRMS: usize = 2;
+
 /// 引擎状态。除构造外只由引擎线程改写。
 pub struct Engine {
     pub snapshot: NetworkSnapshot,
@@ -307,6 +314,10 @@ pub struct Engine {
     /// 到期、这一轮什么都不广播，界面上挂着的仍是下发前那份快照。
     resample_wanted: bool,
     first_pass_done: bool,
+    /// 连续多少轮采样都没读到任何身份字段（SSID / 网关 MAC / BSSID 全空）。
+    /// 零命中要拆现网之前，用它确认「真的是一个陌生网络」而不是「这几轮什么都没读到」，
+    /// 见 `NetworkSnapshot::has_identity` 与 `Engine::no_match_is_actionable`。
+    identity_misses: usize,
     /// 当前生效的 Profile id
     active_id: Option<String>,
     /// 上次成功下发的 Profile 内容指纹（内容没变就别再弹一次授权框）
@@ -357,6 +368,7 @@ impl Default for Engine {
             last_sample: None,
             resample_wanted: false,
             first_pass_done: false,
+            identity_misses: 0,
             active_id: None,
             applied_fp: None,
             hold: false,
@@ -393,6 +405,11 @@ impl Engine {
 
     pub fn note_sampled(&mut self, snap: NetworkSnapshot, now: Instant) {
         self.last_sample = Some(now);
+        self.identity_misses = if snap.has_identity() {
+            0
+        } else {
+            self.identity_misses + 1
+        };
         self.snapshot = snap;
         if self.scheduler.observe(&self.snapshot, now) && self.hold {
             // 网络真的变了：DHCP 后的手动暂停到此结束，自动化恢复正常节律。
@@ -400,6 +417,21 @@ impl Engine {
             self.hold = false;
             log::info(&i18n::t("engine.hold_released"));
         }
+    }
+
+    /// 零命中这一判定能不能落成处置（撤销 Active、跑兜底）。
+    ///
+    /// 判据不是「命中数为 0」，而是「命中数为 0，**且**这一份快照确实读到了此刻在哪个
+    /// 网络上」。三项身份字段全空时，更常见的解释是那几次读取都没拿到东西：macOS 的
+    /// SSID 只有 CoreWLAN 一个来源（命令行在 Sequoia 上全部涂黑），网关 MAC 要靠 ARP
+    /// 表里恰好有默认路由那一条，BSSID 同理。把「没读到」当成「到了一个陌生网络」的
+    /// 代价是当场拆掉现网 —— 静态 IP 变自动获取、指定 DNS 变自动，而界面上看不出是
+    /// 谁改的。
+    ///
+    /// 连续空到 `UNIDENTIFIED_CONFIRMS` 轮之后就放行：那时候它已经是「这个网络读不出
+    /// 身份」的稳定事实（网线拔了、纯有线且 ARP 表空着），兜底必须照常起作用。
+    pub fn no_match_is_actionable(&self) -> bool {
+        self.snapshot.has_identity() || self.identity_misses >= UNIDENTIFIED_CONFIRMS
     }
 
     /// 进入「设为 DHCP」后的手动暂停：引擎不再自动评估与下发，直到下一次网络变化。
@@ -1459,6 +1491,13 @@ fn decide_plan(state: &Arc<AppState>, eng: &mut Engine, cfg: &Config) -> Option<
         }
         Decision::NoActiveProfile => {
             eng.conflict_shown.clear();
+            if !eng.no_match_is_actionable() {
+                // 这一份快照连「此刻在哪个网络」都没读到 —— 保持现状：Active 不动、
+                // 健康监测不停、兜底下发也不跑。等下一轮读到身份，或空转到
+                // `UNIDENTIFIED_CONFIRMS` 轮之后再按零命中处置。
+                log::debug(&i18n::t("engine.no_match_unread"));
+                return None;
+            }
             if eng.active_id.take().is_some() {
                 eng.deactivate();
                 log::info(&i18n::t("engine.no_match"));
@@ -2249,9 +2288,59 @@ mod tests {
         );
 
         // 网络变化 → 解除；节律交还给 Profile 自己的 timing。
+        // 解除的同一瞬间不许评估：变化刚发生，正处在 change_delay 的稳定窗口里，
+        // 而这一窗口对轮询同样生效（见 `Scheduler::is_due`）—— 暂停结束后多等 5 s
+        // 再判，换来的是「判的时候网络已经停了」。
         eng.note_sampled(snap("B"), later);
         assert!(!eng.automation_held(), "观察到变化就要解除暂停");
-        assert_eq!(eng.due(&cfg, later), vec!["office".to_string()]);
+        assert!(
+            eng.due(&cfg, later).is_empty(),
+            "变化还没稳定，恢复自动化不等于立刻判定"
+        );
+        assert_eq!(
+            eng.due(&cfg, later + std::time::Duration::from_secs(5)),
+            vec!["office".to_string()]
+        );
+    }
+
+    /// 一份读不到身份的快照不构成「零命中」的证据，`decide_plan` 的 NoActiveProfile
+    /// 那一支第一件事就是这个闸门：闸门不放行时既不撤销 Active，也不下发兜底。
+    ///
+    /// 不加这道判据时会发生什么：macOS 上 SSID 只有 CoreWLAN 一个来源，网关 MAC 要靠
+    /// ARP 表里恰好有默认路由那一条 —— 重连过程中的某一轮它们可以同时为空。那一份
+    /// 快照判出来就是「一个 Profile 都没命中」，于是兜底把正在工作的静态 IP 改成
+    /// 自动获取、把配置好的 DNS 清空成系统自动，而界面上一切看起来都正常。
+    ///
+    /// 放行条件刻意不是「永远别动」：连续空到 `UNIDENTIFIED_CONFIRMS` 轮之后必须照常
+    /// 兜底，否则真遇上读不出身份的网络（拔网线、纯有线且 ARP 空表）就再也没有落点。
+    #[test]
+    fn a_zero_match_needs_an_observed_identity_before_it_can_teardown() {
+        let mut eng = Engine::new();
+        let t0 = Instant::now();
+        let blank = |ssid: Option<&str>| NetworkSnapshot {
+            ssid: ssid.map(|s| s.to_string()),
+            ..Default::default()
+        };
+
+        // 第一项读到就够：有线网络本来就没有 SSID，网关 MAC 就是它的身份。
+        eng.note_sampled(blank(None), t0);
+        assert_eq!(eng.identity_misses, 1);
+        assert!(
+            !eng.no_match_is_actionable(),
+            "单轮读空是读取失败的形状，不是「换了个陌生网络」的形状"
+        );
+        eng.note_sampled(blank(Some("Office")), t0 + std::time::Duration::from_secs(2));
+        assert_eq!(eng.identity_misses, 0, "读到身份就要立刻清零计数");
+        assert!(eng.no_match_is_actionable());
+
+        // 连续读空到第 `UNIDENTIFIED_CONFIRMS` 轮：认了，兜底必须还能起作用。
+        for i in 0..UNIDENTIFIED_CONFIRMS {
+            eng.note_sampled(blank(None), t0 + std::time::Duration::from_secs(4 + i as u64 * 2));
+        }
+        assert!(
+            eng.no_match_is_actionable(),
+            "稳定读不出身份是既成事实，拦住它等于让兜底永久失效"
+        );
     }
 
     /// 暂停里的 Profile 展示成 Suspended（前端 PAUSED），不是 ERROR：

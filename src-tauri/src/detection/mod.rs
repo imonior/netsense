@@ -4,7 +4,9 @@
 //!
 //! - **变化事件**：网络指纹变了 → 再等 `change_delay_secs` 秒 → 评估。等待是为了躲开
 //!   漫游/重连过程中「SSID 已变但网关还没到位」的中间态。
-//! - **轮询**：每隔 `poll_interval_secs` 秒无条件重新评估一次，与有没有变化无关。
+//! - **轮询**：每隔 `poll_interval_secs` 秒重新评估一次，与有没有变化无关；
+//!   但若指纹刚变且还没过 `change_delay_secs`，这一轮要往后让 —— 变化过程中的
+//!   那次读取最容易什么都读不到，拿它当判定会误伤。
 //!
 //! ⚠️ 「网络事件」目前由**指纹差分**实现，不是系统原生事件（macOS 的
 //! `SCNetworkReachability`、Windows 的 `NotifyIpInterfaceChange`、Linux 的 rtnetlink
@@ -98,7 +100,20 @@ impl Scheduler {
             }
         }
         if wants_polling {
-            return now >= sch.next_poll;
+            if now < sch.next_poll {
+                return false;
+            }
+            // 轮询也要等 change_delay。不等的后果：指纹刚变（漫游/重连正在进行）时，
+            // 轮询抢在稳定之前评估一轮，而这一轮恰恰是最读不到东西的一轮 ——
+            // SSID 还没回来、ARP 表还是空的，于是「零命中」被当成事实并拆掉现网。
+            // 事件分支本来就要等稳定，轮询不该是绕过它的后门。
+            // changed_at 为 None = 启动以来没变过，这一轮不是在追中间态，照常放行。
+            if let Some(at) = self.changed_at {
+                if now.duration_since(at) < Duration::from_secs(d.change_delay_secs) {
+                    return false;
+                }
+            }
+            return true;
         }
         false
     }
@@ -236,6 +251,26 @@ mod tests {
         s.after_evaluation(std::slice::from_ref(&p), &["o".to_string()], c.at(30));
         assert!(!s.is_due(&p, c.at(59), false));
         assert!(s.is_due(&p, c.at(60), false));
+    }
+
+    /// 轮询点到了，但指纹刚变、还没过 `change_delay_secs` —— 这一轮要往后让。
+    ///
+    /// 不让的后果就是误拆现网：漫游/重连过程中恰有那么一瞬间 SSID 与网关 MAC 同时
+    /// 读不到，抢跑的轮询把它判成「零命中」，兜底随即把静态地址与指定 DNS 换成自动。
+    /// 让过稳定窗口之后这轮照旧补上，节律本身没有丢。
+    #[test]
+    fn a_due_poll_yields_while_the_network_is_still_flapping() {
+        let c = Clock::new();
+        let mut s = Scheduler::default();
+        let p = profile("o", DetectionMode::PollingOnly, 5, 30);
+        s.observe(&fp("A"), c.at(0));
+        s.after_evaluation(std::slice::from_ref(&p), &["o".to_string()], c.at(0));
+        s.observe(&fp("B"), c.at(28));
+        assert!(
+            !s.is_due(&p, c.at(30), false),
+            "轮询到点但变化还没稳定，这一轮不许判"
+        );
+        assert!(s.is_due(&p, c.at(33), false), "稳定之后这轮轮询要照常补上");
     }
 
     #[test]

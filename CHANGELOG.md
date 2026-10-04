@@ -16,6 +16,18 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Fixed
 
+- **A polling pass can no longer dismantle a working network.** When one sample reads no network
+  identity at all — SSID, gateway MAC and BSSID all empty — the engine used to read that as "not one
+  Profile matches" and run the zero-match fallback, so a static address became DHCP-assigned and the
+  configured DNS servers were cleared to automatic, while the UI showed nobody doing it. All three being
+  empty is far more often "these reads returned nothing" than "we are on an unknown network": macOS has
+  exactly one SSID source (CoreWLAN; the CLI reads are blacked out on Sequoia), and the gateway MAC only
+  appears when that entry happens to be in the ARP table — which is precisely the shape of a sample taken
+  mid-reconnect. An uncorroborated zero match now leaves the Active profile, its health monitor and the
+  fallback untouched; two consecutive empty samples are taken as an unreadable network, and the fallback
+  works as before. Polling also waits out `change_delay_secs` when the fingerprint has just changed, so it
+  can no longer jump ahead of the settle window the event path already respects.
+
 - **Linux: the status query no longer panics.** The native netlink reader resolved its answer channel with `tokio::sync::oneshot::Receiver::blocking_recv()` inside an async Tauri command, which violates the tokio contract and panicked on every status read. The channel is now a `std::sync::mpsc` receiver polled with `recv_timeout`, and the worker is guarded by `tokio::time::timeout` so a half-dead connection cannot hang the whole read path.
 - **Linux: network enumeration now compiles and runs.** `list_interfaces` failed to compile because the refactored `device_ip` returns `Option<DeviceIp>` (left unwrapped) and the sibling module `linux_nm` was referenced without an import. Both are fixed, so the Linux backend actually builds instead of being silently excluded by `cfg(linux)`.
 - **macOS: gateway MAC resolves for OUIs that drop leading zeros.** `arp -n` prints `0:50:56:c0:0:8` instead of `00:50:56:c0:00:08`, and the old whole-line padding could not restore the first byte fused with the preceding IP text. A new `extract_mac_loose` (cfg-agnostic, unit-tested) restores the canonical MAC, so VMware / Huawei OUIs are matched again.

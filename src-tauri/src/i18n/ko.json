@@ -161,6 +161,7 @@
   "engine.monitor_fallback_short": "네트워크 도달 불가, DHCP로 되돌렸습니다",
   "engine.no_branch": "{name}에 {branch} 분기가 설정되지 않아 아무것도 실행하지 않았습니다",
   "engine.no_match": "일치하는 프로필이 없어 현재 프로필에서 벗어났습니다",
+  "engine.no_match_unread": "일치는 없지만 이 스냅샷은 네트워크 식별 정보(SSID / 게이트웨이 MAC / BSSID)를 하나도 읽지 못했습니다. 확인할 수 있을 때까지 현재 설정을 유지합니다",
   "engine.one_shot_partial": "{name}의 일회성 동작이 일부 실패했습니다: {ok}/{total} 성공",
   "engine.reconfigure": "{name}이(가) 계속 일치하고 설정이 바뀌어 네트워크만 다시 적용했습니다 (동작은 재실행하지 않음)",
   "engine.switch": "{from}에서 {to}(으)로 전환했습니다",

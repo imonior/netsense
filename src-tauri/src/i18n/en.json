@@ -161,6 +161,7 @@
   "engine.monitor_fallback_short": "Network unreachable, switched back to DHCP",
   "engine.no_branch": "{name} has no {branch} branch configured; nothing to do",
   "engine.no_match": "No profile matched; leaving the current profile",
+  "engine.no_match_unread": "Zero match, but this snapshot read no network identity at all (SSID / gateway MAC / BSSID all empty); keeping the current settings until that is confirmed",
   "engine.one_shot_partial": "{name} one-shot actions incomplete: {ok}/{total} succeeded",
   "engine.reconfigure": "{name} still matches and its settings changed; re-applying network only (actions not re-run)",
   "engine.switch": "Switched from {from} to {to}",

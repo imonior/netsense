@@ -285,6 +285,21 @@ Rule    = (all *enabled* Conditions ANDed)
   regression test `engine::tests::conflict_never_picks_a_winner` is there to keep it that way.
 - Manual "Apply now" (`engine::manual_apply`) re-evaluates *that Profile's own* conditions — it is not a
   bypass. It refuses a disabled Profile, and refuses during a conflict with `engine.conflict_blocked`.
+- **A zero match only tears the network down once the snapshot has actually identified a network**
+  (`NetworkSnapshot::has_identity` → `Engine::no_match_is_actionable`, checked first thing in the
+  `NoActiveProfile` arm of `engine::decide_plan`). All three identity fields empty is much more often
+  "this round of reads returned nothing" than "we are on an unknown network": on macOS the SSID has exactly
+  one source (CoreWLAN — the CLI reads are blacked out on Sequoia), the gateway MAC needs that one entry to
+  happen to be in the ARP table, and the BSSID likewise. Acting on a single such round leaves the user
+  connected to a working network whose static address has been replaced by DHCP and whose DNS has been
+  cleared to automatic, with nothing in the UI saying who did it. So an uncorroborated zero match neither
+  deactivates the Active profile nor stops its health monitor nor applies `fallback`. It stops being
+  protective if it blocks forever, so `UNIDENTIFIED_CONFIRMS` consecutive empty samples (≈4 s at the 2 s
+  sampling cadence) are treated as established fact and `fallback` runs as before. Pinned by
+  `a_zero_match_needs_an_observed_identity_before_it_can_teardown`. The detection layer closes the same door
+  from the other side: a due **poll** now waits out `change_delay_secs` when the fingerprint changed
+  recently (`a_due_poll_yields_while_the_network_is_still_flapping`) — the event path already settled, and
+  polling must not be the back door around it.
 - CONFLICT (condition layer) and ERROR (execution layer) are distinct display states and must not be
   collapsed into one another. **Only 3A can produce ERROR** (`engine::Engine::record_failure`, reached from
   a `Stage3A::Failed` or from the health monitor falling the config back to DHCP): it clears `active_id`,
@@ -410,7 +425,8 @@ Key modelling points, each of which is easy to get wrong:
   That is what makes the editor's three-way DNS select (keep / system-auto / set) honest — "keep" is
   expressed by deleting the key, and the apply path leaves the servers alone. `set_dhcp()` is the one
   deliberate exception: the fallback path clears DNS explicitly, because there "no longer pin anything"
-  *is* the desired state.
+  *is* the desired state — and that visible, hard-to-explain consequence is exactly why the zero-match
+  gate in §5 has to be sure the network was really read before it runs this line.
 - **Routes live in 3A**, not in the automation list: a route that failed to land must not let the rest of
   the automation run. Inside 3A it is covered by Apply+Verify and blocks 3B when it fails.
 - `Config::validate()` rejects structurally-broken configs before they reach disk (empty/duplicate ids,
@@ -864,7 +880,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **529 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **530 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1125,11 +1141,15 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   warning),
   `conditions::evaluator` (Rules OR / enabled-Conditions AND / disabled Profile still reports rule states /
   MAC normalization / interface condition checks **all** live NICs / `evaluate_all` collects every match
-  without choosing), `conditions::identity` (fingerprint notices gateway & interface changes),
+  without choosing), `conditions::identity` (fingerprint notices gateway & interface changes, and a sample
+  whose SSID / gateway MAC / BSSID are all empty is **not** an observation of "some other network"),
   `detection` (per-Profile delay isolation, events-only vs events+polling vs polling-only cadence,
-  first pass always due, timer reset),
+  a due poll yielding while the fingerprint is still inside `change_delay_secs`, first pass always due,
+  timer reset),
   `engine::decide` (0 / 1 / 2+ → `no_active_profile` / `active` / `conflict`, **conflict never picks a
   winner**, stable tagged serialization),
+  `engine` zero-match corroboration (an unread identity blocks the teardown for exactly as many samples as
+  `UNIDENTIFIED_CONFIRMS` allows, and one field read flips it back),
   `engine` run attribution + **layering** (a `Partial`/`Failed` run leaves Active untouched, only a 3A
   failure clears Active and yields ERROR, and an ERROR never bleeds into a Conflict on another Profile),
   `engine` resample handover (a forced resample governs **exactly one** pass: nothing is owed one when no

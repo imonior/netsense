@@ -161,6 +161,7 @@
   "engine.monitor_fallback_short": "ネットワーク到達不能、DHCP に切り戻しました",
   "engine.no_branch": "{name} に {branch} 分岐が設定されていないため、何も実行しませんでした",
   "engine.no_match": "一致するプロファイルがないため、現在のプロファイルから離脱しました",
+  "engine.no_match_unread": "ゼロ一致ですが、このスナップショットはネットワーク識別情報（SSID / ゲートウェイ MAC / BSSID）を何も読めていません。確認できるまで現在の設定を維持します",
   "engine.one_shot_partial": "{name} の一度きりのアクションが一部失敗しました: {ok}/{total} 成功",
   "engine.reconfigure": "{name} は引き続き一致し設定が変わったため、network のみを再適用しました（アクションは再実行しません）",
   "engine.switch": "{from} から {to} に切り替えました",
