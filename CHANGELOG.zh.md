@@ -8,9 +8,9 @@ NetSense 的所有重要变更记录于此。格式基于
 
 ### 新增
 
-- **补齐平台与便携版。** CI 现构建八个目标（原为四个），并为每个目标附上便携压缩包：
+- **补齐平台与便携版。** CI 现构建六个目标（原为四个），并为每个目标附上便携压缩包：
   - Windows：新增 **ARM64**（`aarch64-pc-windows-msvc`）与 **32 位 x86**（`i686-pc-windows-msvc`）；x64 保留 NSIS + MSI。
-  - Linux：新增 **ARM64**（`aarch64-unknown-linux-gnu`）与 **32 位 ARM**（`armv7-unknown-linux-gnueabihf`）；x64 保留 DEB。
+  - Linux：x64 保留 DEB（不变）。
   - macOS：Apple Silicon + Intel 的 DMG（不变）。
   - **便携版**：每个目标另附 `NetSense_<label>_portable.zip`——解压后直接运行 `NetSense.app` / `netsense` / `netsense.exe`，无需安装；仍使用同一份每用户配置目录。
 

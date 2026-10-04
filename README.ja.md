@@ -100,7 +100,7 @@ Core Engine（detection / conditions / 照合 / network / automation）はシス
 |----|---------------|--------------|------------|
 | Windows | x64, ARM64, x86 (32 ビット) | NSIS + MSI | `netsense.exe` + リソース (zip) |
 | macOS | Apple Silicon, Intel | DMG (`.app` 内包) | `.app` (zip) |
-| Linux | x64, ARM64, ARMv7 (32 ビット) | DEB | バイナリ + リソース (zip) |
+| Linux | x64 | DEB | バイナリ + リソース (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0

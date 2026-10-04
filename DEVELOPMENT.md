@@ -627,7 +627,7 @@ earlier, so it keeps its own rules:
 - **Verification is fail-closed.** No `SHA256SUMS` on the release, an asset it does not list, an
   unfetchable sums file and a mismatch all abort the update; the UI then falls back to "open the
   release page", which is what makes being strict affordable. `build.yml` publishes exactly one
-  root-level `SHA256SUMS` after all four legs land (§13.2), so a normal release always verifies.
+  root-level `SHA256SUMS` after every leg lands (§13.2), so a normal release always verifies.
 - **Every hop is https, not just the URL we were handed.** The scheme is screened before a request
   leaves the process, and both curl call sites pass `--proto =https` because `-L` alone would follow
   an `https → http` redirect and finish the transfer in cleartext (`--proto` filters redirect targets
@@ -1051,14 +1051,19 @@ sh scripts/install-priv-helper.sh
 
 ### Cloud build (CI)
 
-`.github/workflows/build.yml` is a four-target matrix: `windows-x64` / `macos-arm64` / `macos-x64` / `linux-x64`.
+`.github/workflows/build.yml` is a six-target matrix: `windows-x64` / `windows-arm64` /
+`windows-x86` / `macos-arm64` / `macos-x64` / `linux-x64`. Linux ARM (`aarch64-unknown-linux-gnu`,
+`armv7-unknown-linux-gnueabihf`) is **not** built: the DEB needs the webkit2gtk/GTK *dev* packages
+for that architecture, and those live on ports.ubuntu.com while the runner's apt sources are
+amd64-only, so `dpkg --add-architecture` + `apt-get install …:arm64` fails before the compiler is
+reached. The `checksums` job lists the required legs in `LEG_LABELS` and checks each one by name.
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0     # validate -> release(draft) -> build x4 -> checksums -> publish -> cask
+git tag v1.0.0 && git push origin v1.0.0     # validate -> release(draft) -> build x6 -> checksums -> publish -> cask
 gh workflow run build.yml --ref main         # compile + test only; never touches a Release
 ```
 
-**A `main` push compiles nothing** — the workflow listens on `workflow_dispatch` and `push: tags: v*` only. So after changing Rust (or adding a unit test), verify with the dispatched run above: it runs clippy and `cargo test` on all four targets and uploads each platform's bare executable as an artifact, while every release-creating step is gated on `refs/tags/` and is skipped.
+**A `main` push compiles nothing** — the workflow listens on `workflow_dispatch` and `push: tags: v*` only. So after changing Rust (or adding a unit test), verify with the dispatched run above: it runs clippy and `cargo test` on all six targets and uploads each platform's bare executable as an artifact, while every release-creating step is gated on `refs/tags/` and is skipped.
 
 Inside the flow it first runs `python3 scripts/validate.py` (JSON / i18n parity / PAL boundary / trait coverage / docs alignment) and `node scripts/editor-smoke.mjs` (the editor's data binding, headlessly). Then each build leg lints itself (`cargo clippy --all-targets -- -D warnings`, §12 — per-leg because a macOS runner never compiles the Windows or Linux PAL code) and runs `cargo test` (config schema, condition evaluation, detection cadence, engine decision, 3A readback, one-shot scheduling, PAL utils, i18n parity, plus the editor's recorded payloads replayed through `Config::validate()`); only after those pass does it compile and package.
 
@@ -1266,7 +1271,7 @@ git commit --allow-empty -m "test: let AI do it"                     # must be b
 
 ### 13.2 Release job: exactly one draft per tag, addressed by id
 
-`build.yml` is `validate → release → build ×4 → checksums → publish → cask`. The `release` job
+`build.yml` is `validate → release → build ×6 → checksums → publish → cask`. The `release` job
 creates the Draft Release **once**, before the matrix, and exports its numeric id; every
 build leg passes it to `tauri-action` as `releaseId`. The final `publish` job PATCHes that
 same release to `draft=false`, and only runs when `checksums` verified the assets it is
@@ -1276,7 +1281,7 @@ Two traps this structure exists to avoid — both were hit for real while cuttin
 
 1. **`tauri-action` upserts by tag, which is not safe under a parallel matrix.** It only
    looks up or creates a release when `releaseId` is absent (`if (tagName && !releaseId)`
-   in `src/index.ts`). The four legs belong to a *single run*, and the workflow-level
+   in `src/index.ts`). The matrix legs belong to a *single run*, and the workflow-level
    `concurrency` group only serialises whole runs — so it never protected the legs from
    each other. In the first run, two legs each found no release and each created
    one: **two drafts on one tag**, with the installers split across them (both macOS dmgs
@@ -1329,7 +1334,7 @@ and that failure was silent before.
 the PAL split into `platform/{macos,windows,linux}.rs` on top of the system's own authorization; the
 config model and condition engine; per-Profile detection cadence; 3A Apply → routes → readback
 Verify; the 0/1/2+ decision with Conflict; 3B1 running its actions in listed order off the engine thread
-with a per-action timeout and a structured `last_run`; 3B2 desired-state workers; the four-target CI matrix
+with a per-action timeout and a structured `last_run`; 3B2 desired-state workers; the six-target CI matrix
 and in-app upgrade.
 
 **Not implemented**, roughly in the order that makes each one useful:
@@ -1411,10 +1416,10 @@ The project's own vocabulary, mostly short labels that carry load-bearing semant
 | Layer | Covered by | Still open |
 |---|---|---|
 | Config model, conditions, detection, engine decisions, 3A readback expectations, 3B1 scheduling, 3B2 workers, PAL utils, i18n | `cargo test` (pure std — no tokio, no real system commands), §12 | the PAL commands themselves, against real adapters |
-| Docs ↔ code ↔ docs, i18n parity, PAL boundary, version consistency, UI text sourcing | `scripts/validate.py` (11 scored checks) | nothing mechanical: whether a translated paragraph still *means* the English one stays a review task (§13) |
+| Docs ↔ code ↔ docs, i18n parity, PAL boundary, version consistency, UI text sourcing | `scripts/validate.py` (12 scored checks) | nothing mechanical: whether a translated paragraph still *means* the English one stays a review task (§13) |
 | Editor data binding, and the payloads it sends | `scripts/editor-smoke.mjs` + the fixture replay test (§12) | rendering in a real WebView |
 | Rust lints that `cargo check` cannot see | `cargo clippy --all-targets -- -D warnings` in every build leg (§12) | a Windows- or Linux-only lint — a macOS host never compiles that code, which is why the gate is per-leg instead of once |
-| Compile + package on four targets | CI — a dispatched run proves compilation, a tag produces installers (§11) | — |
+| Compile + package on six targets | CI — a dispatched run proves compilation, a tag produces installers (§11) | — |
 
 What no automated gate can reach, and therefore what needs a real machine per OS:
 
@@ -1575,6 +1580,6 @@ Preflight results measured on a Windows machine (for you to judge which path to 
 
 **Conclusion**: disk space can't fit the MSVC toolchain, so a local Windows installer is impossible. Feasible paths in recommended order:
 
-1. **CI build (preferred)**: push the repo to GitHub, `git tag v1.0.0 && git push origin v1.0.0`, and `.github/workflows/build.yml` produces windows-x64 / macos-arm64 / macos-x64 / linux-x64 executables and installers on the cloud matrix. **Zero local dependency, no disk used, get all three platforms at once.**
+1. **CI build (preferred)**: push the repo to GitHub, `git tag v1.0.0 && git push origin v1.0.0`, and `.github/workflows/build.yml` produces windows-x64 / windows-arm64 / windows-x86 / macos-arm64 / macos-x64 / linux-x64 executables and installers on the cloud matrix. **Zero local dependency, no disk used, get all three platforms at once.**
 2. **Local build**: first free ~10 GB, install Visual Studio Build Tools (check "Desktop development with C++") and Rust, then run `scripts\build-windows.ps1` (the script does the preflight for you).
 3. **Verify code compiles only**: install Rust's `x86_64-pc-windows-gnu` target — `cargo check` **needs no linker**, only `windres` (TDM-GCC ships it), so `cargo check --target x86_64-pc-windows-gnu` validates types and dependency resolution but produces no executable. See `scripts/sandbox-bootstrap.sh`.

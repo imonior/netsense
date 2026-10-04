@@ -105,7 +105,7 @@ generated:
 |----|---------------|-----------|----------|
 | Windows | x64, ARM64, x86 (32-bit) | NSIS + MSI | `netsense.exe` + resources (zip) |
 | macOS | Apple Silicon, Intel | DMG (`.app` inside) | `.app` (zip) |
-| Linux | x64, ARM64, ARMv7 (32-bit) | DEB | binary + resources (zip) |
+| Linux | x64 | DEB | binary + resources (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0

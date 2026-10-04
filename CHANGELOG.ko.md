@@ -8,9 +8,9 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 
 ### 추가
 
-- **플랫폼 추가 및 포터블 버전.** CI가 이제 8개 타깃(기존 4개)을 빌드하고 각 타깃에 포터블 zip을 포함합니다:
+- **플랫폼 추가 및 포터블 버전.** CI가 이제 6개 타깃(기존 4개)을 빌드하고 각 타깃에 포터블 zip을 포함합니다:
   - Windows: **ARM64**(`aarch64-pc-windows-msvc`)와 **32비트 x86**(`i686-pc-windows-msvc`) 추가; x64는 기존 NSIS + MSI 유지.
-  - Linux: **ARM64**(`aarch64-unknown-linux-gnu`)와 **32비트 ARM**(`armv7-unknown-linux-gnueabihf`) 추가; x64는 기존 DEB 유지.
+  - Linux: x64 DEB 유지(변경 없음).
   - macOS: Apple Silicon + Intel DMG (변경 없음).
   - **포터블 버전**: 각 타깃에 `NetSense_<label>_portable.zip` 추가 — 압축 해제 후 `NetSense.app` / `netsense` / `netsense.exe` 직접 실행, 설치 불필요; 설정은 기존대로 사용자별 설정 디렉터리 사용.
 

@@ -96,13 +96,13 @@ Core Engine (detection / conditions / 매칭 / network / automation)은 시스�
 |----|----------|-----------|---------|
 | Windows | x64, ARM64, x86 (32비트) | NSIS + MSI | `netsense.exe` + 리소스 (zip) |
 | macOS | Apple Silicon, Intel | DMG (`.app` 내장) | `.app` (zip) |
-| Linux | x64, ARM64, ARMv7 (32비트) | DEB | 바이너리 + 리소스 (zip) |
+| Linux | x64 | DEB | 바이너리 + 리소스 (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-각 릴리스에는 대상별 **포터블** zip도 포함됩니다 — 압축 해제 후 `NetSense.app` / `netsense` / `netsense.exe`를 직접 실행하면 되고 설치 불필요. 설정은 기존대로 사용자별 설정 디렉터리를 쓰므로, 같은 머신의 포터블 버전과 설치 버전은 동일한 설정을 공유합니다。
+각 릴리스에는 대상별 **포터블** zip도 포함됩니다 — 압축 해제 후 `NetSense.app` / `netsense` / `netsense.exe`를 직접 실행하면 되고 설치 불필요. 설정은 기존대로 사용자별 설정 디렉터리를 쓰므로, 같은 머신의 포터블 버전과 설치 버전은 동일한 설정을 공유합니다.
 
 같은 워크플로를 GitHub → Actions → build → Run workflow에서 수동으로 시작할 수도 있습니다. 그러면
 날것의 실행 파일만 만들어지고 Release는 생성되지 않습니다.

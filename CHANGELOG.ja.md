@@ -8,9 +8,9 @@ NetSense のすべての重要な変更をここに記録する。形式は
 
 ### 追加
 
-- **プラットフォーム拡充とポータブル版。** CI は現在 8 ターゲット（従来は 4）をビルドし、各ターゲットにポータブル zip を同梱します：
+- **プラットフォーム拡充とポータブル版。** CI は現在 6 ターゲット（従来は 4）をビルドし、各ターゲットにポータブル zip を同梱します：
   - Windows： **ARM64**（`aarch64-pc-windows-msvc`）と **32 ビット x86**（`i686-pc-windows-msvc`）を追加；x64 は引き続き NSIS + MSI。
-  - Linux： **ARM64**（`aarch64-unknown-linux-gnu`）と **32 ビット ARM**（`armv7-unknown-linux-gnueabihf`）を追加；x64 は引き続き DEB。
+  - Linux：x64 は引き続き DEB（変更なし）。
   - macOS：Apple Silicon + Intel の DMG（変更なし）。
   - **ポータブル版**：各ターゲットに `NetSense_<label>_portable.zip` を追加——展開して `NetSense.app` / `netsense` / `netsense.exe` を直接実行、インストーラ不要；設定は従来どおり各ユーザー設定ディレクトリを使用。
 

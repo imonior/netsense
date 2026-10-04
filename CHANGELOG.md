@@ -8,9 +8,9 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **More platforms and a portable build.** CI now builds eight targets (was four) and attaches a portable archive to every release:
+- **More platforms and a portable build.** CI now builds six targets (was four) and attaches a portable archive to every release:
   - Windows: added **ARM64** (`aarch64-pc-windows-msvc`) and **32-bit x86** (`i686-pc-windows-msvc`); x64 keeps NSIS + MSI.
-  - Linux: added **ARM64** (`aarch64-unknown-linux-gnu`) and **32-bit ARM** (`armv7-unknown-linux-gnueabihf`); x64 keeps DEB.
+  - Linux: x64 DEB (unchanged).
   - macOS: Apple Silicon + Intel DMG (unchanged).
   - **Portable**: each target also ships a `NetSense_<label>_portable.zip` — extract and run `NetSense.app` / `netsense` / `netsense.exe` directly, no installer; it uses the same per-user config dir.
 

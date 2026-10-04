@@ -85,7 +85,7 @@ Core Engine（detection / conditions / 匹配 / network / automation）从不直
 |------|------|--------|--------|
 | Windows | x64、ARM64、x86（32 位） | NSIS + MSI | `netsense.exe` + 资源（zip） |
 | macOS | Apple Silicon、Intel | DMG（内含 `.app`） | `.app`（zip） |
-| Linux | x64、ARM64、ARMv7（32 位） | DEB | 二进制 + 资源（zip） |
+| Linux | x64 | DEB | 二进制 + 资源（zip） |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0

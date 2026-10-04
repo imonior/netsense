@@ -82,7 +82,7 @@ Tauri v2 + Rust、系統 WebView、前端為純靜態 HTML/CSS/JS（無 Node 建
 |------|------|--------|--------|
 | Windows | x64、ARM64、x86（32 位元） | NSIS + MSI | `netsense.exe` + 資源（zip） |
 | macOS | Apple Silicon、Intel | DMG（內含 `.app`） | `.app`（zip） |
-| Linux | x64、ARM64、ARMv7（32 位元） | DEB | 二進位 + 資源（zip） |
+| Linux | x64 | DEB | 二進位 + 資源（zip） |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
