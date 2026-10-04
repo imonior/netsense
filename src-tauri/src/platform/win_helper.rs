@@ -572,7 +572,7 @@ fn connect_reason() -> String {
 /// 记一次失败，并给出这一批的诊断。计数钉在 [`GIVE_UP_AFTER`] 封顶：它只用来管「拉不拉」，
 /// 而 u8 回绕会把闸门重新打开 —— 与其放任涨破，不如到顶就不再动。
 fn note_failure() -> String {
-    let _ = helper_fails().try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+    let _ = helper_fails().fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
         (v < GIVE_UP_AFTER).then_some(v + 1)
     });
     connect_reason()
