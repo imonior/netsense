@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use zbus::blocking::{Connection, Proxy};
-use zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 
 use crate::platform::MAX_ROUTES_PER_IFACE;
 

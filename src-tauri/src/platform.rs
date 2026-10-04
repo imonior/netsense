@@ -1139,6 +1139,10 @@ pub(crate) fn extract_mac(line: &str) -> Option<String> {
 /// 补零」的做法补不到它，于是 `gateway_mac` 条件对这一类 OUI 永远解析不出来。这里用字节
 /// 窗口扫描，MAC 的 6 组形态独立成串即可命中，不受周围文本干扰；每组各自补到 2 位，
 /// 因此 `0:50:56:c0:0:8` 稳定还原成 `00:50:56:c0:00:08`。
+// 仅在 macOS 宿主构建里被 `macos.rs` 调用；非 mac 构建里只有单测会用到它
+// （`cargo check` 不编测试），故在此放行 dead_code，以免 Windows / Linux 上
+// `cargo check`/`clippy` 报未使用——macOS 构建里它确有调用方。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn extract_mac_loose(line: &str) -> Option<String> {
     let bytes = line.as_bytes();
     let n = bytes.len();
