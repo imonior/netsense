@@ -186,6 +186,16 @@ impl Config {
             }
             if let Some(b) = &p.else_branch {
                 validate_branch(&branch_ctx(&p.name, "else"), b)?;
+                // ELSE 分支的常驻动作直接拒绝：它表达「离开这个环境时要维持什么」，
+                // 而离开时并没有一个持续成立的现场，所以那几条永远不会被维持。
+                // 与其让用户以为「配了没生效」（这种表现最难查），不如在加载时就拦住。
+                let live = b.persistent.iter().filter(|a| a.enabled).count();
+                if live > 0 {
+                    return Err(i18n::tf("cfg.err_else_persistent", &[
+                        ("name", &p.name),
+                        ("count", &live.to_string()),
+                    ]));
+                }
             }
         }
         if let Some(fb) = &self.fallback {
@@ -201,24 +211,9 @@ impl Config {
 
     /// 能跑但需要注意的事项（不阻断加载）。
     ///
-    /// THEN 分支的常驻动作不需要告警 —— 它现在真的会起 worker（`automation::persistent`）。
-    /// 剩下这一种是真需要注意的：ELSE 表达「离开这个环境时要维持什么」，而离开时并没有
-    /// 一个持续成立的现场，所以那几条永远不会被维持。
+    /// ELSE 分支的常驻动作已在 `validate()` 中被拒绝，这里不再重复报。
     pub fn warnings(&self) -> Vec<Warning> {
-        let mut out = Vec::new();
-        for p in &self.profiles {
-            let Some(b) = p.else_branch.as_ref() else {
-                continue;
-            };
-            let live = b.persistent.iter().filter(|a| a.enabled).count();
-            if live > 0 {
-                out.push(Warning(i18n::tf("cfg.warn_else_persistent", &[
-                    ("name", &p.name),
-                    ("count", &live.to_string()),
-                ])));
-            }
-        }
-        out
+        Vec::new()
     }
 }
 
@@ -844,9 +839,9 @@ mod tests {
     }
 
     /// THEN 的常驻动作现在真的会起 worker，所以它不该再有告警；ELSE 的那几条不会跑，
-    /// 必须报出来 —— 「配了却什么都不发生」是最难查的一类反馈。
+    /// 现在直接在 validate 中拒绝，不再只报 warning。
     #[test]
-    fn persistent_actions_on_the_else_branch_are_reported_as_warnings() {
+    fn persistent_actions_on_the_else_branch_are_rejected() {
         dicts_ready();
         let wg = |branch: &str| {
             format!(
@@ -865,10 +860,16 @@ mod tests {
         );
 
         let els = Config::from_json(&wg("else")).expect("同上");
-        els.validate().expect("同上");
-        let w = els.warnings();
-        assert_eq!(w.len(), 1, "必须报出一条告警: {:?}", w);
-        assert!(w[0].0.contains("persistent") && w[0].0.contains("else"), "{:?}", w[0].0);
+        assert!(
+            els.validate().is_err(),
+            "else 分支的常驻动作必须被拒绝: {:?}",
+            els.validate()
+        );
+        assert!(
+            els.warnings().is_empty(),
+            "else 分支的常驻动作已被 validate 拒绝，不该再报 warning: {:?}",
+            els.warnings()
+        );
     }
 
     /// 上一条测试手写的是「编辑器**应该**发出的 payload」，这条验收的是它**实际**发出的那些：

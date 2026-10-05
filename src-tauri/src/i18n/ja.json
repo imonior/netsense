@@ -371,6 +371,7 @@
   "cfg.rule_empty": "プロファイル「{name}」の rule「{rule}」が空です — 空の rule は決して一致しません。削除するか条件を追加してください",
   "cfg.ctx_branch": "プロファイル「{profile}」の {branch} 分岐",
   "cfg.warn_else_persistent": "プロファイル「{name}」の else 分岐に persistent アクションが {count} 個設定されています — 常駐アクションは Active の then 分岐でのみ起動するため、この分岐は維持されません",
+  "cfg.err_else_persistent": "プロファイル「{name}」の else 分岐に {count} 個の常駐アクションがあります：この分岐は決して維持されません — 削除するか then 分岐に移動してください",
   "cfg.cond_no_id": "プロファイル「{name}」に id のない条件があります",
   "cfg.cond_empty_value": "プロファイル「{name}」の条件「{id}」({type}) の値が空です — 無効化するか、比較する値を入力してください",
   "cfg.cond_not_mac": "プロファイル「{name}」の条件「{id}」は MAC 形式の値が必要です（現在: {value}）",

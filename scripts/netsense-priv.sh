@@ -219,7 +219,11 @@ exec_op() {
             is_route_dest "$1" || die "bad dest: $1"
             is_ipv4 "$2"       || die "bad gw: $2"
             is_metric "$3"     || die "bad metric: $3"
-            if [ -n "$3" ] && [ "$3" != "0" ]; then
+            # 路由已存在时不视为失败（避免 Profile A 加路由、Profile B 又加一次、
+            # Profile B 回滚时把 Profile A 的路由删了）。
+            if route -n get -net "$1" 2>&1 | grep -q "$2"; then
+                :  # 路由已存在，跳过
+            elif [ -n "$3" ] && [ "$3" != "0" ]; then
                 route -n add -net "$1" "$2" -metrics "$3"
             else
                 route -n add -net "$1" "$2"

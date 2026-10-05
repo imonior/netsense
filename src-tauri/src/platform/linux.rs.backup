@@ -1114,16 +1114,7 @@ impl NetworkPlatform for LinuxPlatform {
             ]
         };
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match run_priv("ip", &refs) {
-            Ok(()) => Ok(()),
-            Err(e) if e.contains("File exists") || e.contains("RTNETLINK") => {
-                // 路由已存在：不视为失败，也不由本事务回滚时删除。
-                // 这避免了「Profile A 加了路由，Profile B 又加一次，
-                // Profile B 回滚时把 Profile A 的路由删了」的故障。
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+        run_priv("ip", &refs)
     }
 
     fn delete_route(&self, dest: &str) -> Result<(), String> {

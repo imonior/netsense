@@ -371,6 +371,7 @@
   "cfg.rule_empty": "rule '{rule}' in profile '{name}' is empty — an empty rule never matches; delete it or add conditions",
   "cfg.ctx_branch": "{profile} / {branch}",
   "cfg.warn_else_persistent": "profile '{name}' configures {count} persistent actions on the else branch: workers only start with the Active profile's then branch, so this branch is never maintained",
+  "cfg.err_else_persistent": "profile '{name}' has {count} persistent action(s) on the else branch: this branch is never maintained — remove them or move them to the then branch",
   "cfg.cond_no_id": "profile '{name}' has a condition with no id",
   "cfg.cond_empty_value": "condition '{id}' ({type}) in profile '{name}' has no value — disable it, or fill in the value to compare",
   "cfg.cond_not_mac": "condition '{id}' in profile '{name}' needs a MAC-shaped value (current: {value})",

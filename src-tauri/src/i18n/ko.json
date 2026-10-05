@@ -371,6 +371,7 @@
   "cfg.rule_empty": "프로파일 '{name}'의 rule '{rule}'이(가) 비어 있습니다 — 빈 rule은 절대 일치하지 않습니다. 삭제하거나 조건을 추가하세요",
   "cfg.ctx_branch": "프로파일 '{profile}'의 {branch} 분기",
   "cfg.warn_else_persistent": "프로파일 '{name}'의 else 분기에 persistent 동작이 {count}개 설정되어 있습니다 — 상주 동작은 Active 프로파일의 then 분기에서만 시작되므로 이 분기는 유지되지 않습니다",
+  "cfg.err_else_persistent": "프로파일 '{name}'의 else 분기에 {count}개의 상주 동작이 있습니다: 이 분기는 절대 유지되지 않습니다 — 삭제하거나 then 분기로 이동하세요",
   "cfg.cond_no_id": "프로파일 '{name}'에 id가 없는 조건이 있습니다",
   "cfg.cond_empty_value": "프로파일 '{name}'의 조건 '{id}' ({type}) 값이 비어 있습니다 — 비활성화하거나 비교할 값을 입력하세요",
   "cfg.cond_not_mac": "프로파일 '{name}'의 조건 '{id}'에는 MAC 형식 값이 필요합니다 (현재: {value})",

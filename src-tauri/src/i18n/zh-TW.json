@@ -371,6 +371,7 @@
   "cfg.rule_empty": "profile「{name}」的 rule「{rule}」為空（空 rule 恆不匹配，請刪除它或加條件）",
   "cfg.ctx_branch": "profile「{profile}」的 {branch} 分支",
   "cfg.warn_else_persistent": "profile「{name}」的 else 分支配了 {count} 個 persistent 動作：常駐動作只隨 Active 的 then 分支啟動，這一支不會被維持",
+  "cfg.err_else_persistent": "profile「{name}」的 else 分支有 {count} 個常駐動作：這一支永遠不會被維持 —— 請刪除或移到 then 分支",
   "cfg.cond_no_id": "profile「{name}」有條件缺少 id",
   "cfg.cond_empty_value": "profile「{name}」的條件「{id}」({type}) 值為空：停用它，或填上比較值",
   "cfg.cond_not_mac": "profile「{name}」的條件「{id}」需要 MAC 形態的值（目前: {value}）",
