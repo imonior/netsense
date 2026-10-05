@@ -28,17 +28,25 @@ pub enum Stage3A {
 const READBACK_ATTEMPTS: usize = 4;
 const READBACK_SETTLE: Duration = Duration::from_millis(800);
 
-/// 执行 3A：下发 → 路由 → 回读校验。
+/// 执行 3A：快照当前状态 → 下发 → 路由 → 回读校验。
 ///
-/// 任一步失败都返回 [`Stage3A::Failed`]，调用方据此**不要**执行 3B。
+/// 任一步失败都尝试回滚到快照状态，再返回 [`Stage3A::Failed`]。
+/// 调用方据此**不要**执行 3B。
 pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
+    // 1. 快照当前网络状态（用于失败时回滚）
+    let before = plat.get_status();
+    
+    // 2. 下发网络配置
     if let Err(e) = plat.apply_network(cfg) {
+        // 下发失败：尝试回滚
+        plat.restore_from_snapshot(&before).ok();
         return Stage3A::Failed {
             reason: i18n::tf("net.apply_failed", &[("error", &e)]),
         };
     }
-    // 静态路由属于 3A：路由没加上时继续跑自动化只会放大问题 —— 放在 on_apply 里，
-    // 「路由失败」和「软件启动失败」就会混在同一份结果里，后者还照样执行。
+    
+    // 3. 下发静态路由（记录已添加的路由，失败时回滚）
+    let mut added_routes: Vec<(String, String)> = Vec::new();
     for r in &cfg.routes {
         let res = if r.delete {
             plat.delete_route(&r.dest)
@@ -49,9 +57,19 @@ pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
             }
         };
         if let Err(e) = res {
+            // 路由失败：回滚已添加的路由 + 网络配置
+            for (dest, _gw) in added_routes {
+                plat.delete_route(&dest).ok();
+            }
+            plat.restore_from_snapshot(&before).ok();
             return Stage3A::Failed {
                 reason: i18n::tf("net.route_failed", &[("dest", &r.dest), ("error", &e)]),
             };
+        }
+        if !r.delete {
+            if let Some(g) = r.gateway.as_deref() {
+                added_routes.push((r.dest.clone(), g.to_string()));
+            }
         }
     }
 
@@ -71,6 +89,8 @@ pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
             }
         }
     }
+    // 校验失败：回滚到快照状态
+    plat.restore_from_snapshot(&before).ok();
     Stage3A::Failed {
         reason: i18n::tf(
             "net.verify_failed",

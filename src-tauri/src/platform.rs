@@ -608,6 +608,39 @@ pub trait NetworkPlatform: Send + Sync {
     /// 不受上面那条三态约定约束。
     fn set_dhcp(&self) -> Result<(), String>;
 
+    /// 从快照恢复网络配置（3A 事务回滚用）。
+    ///
+    /// 当 3A 下发失败或校验失败时，调用此方法将网卡恢复到快照时的状态。
+    /// 实现应根据快照中的 IP/掩码/网关/DNS 等信息重新下发配置。
+    /// 若快照中无 IP 信息（如 DHCP 状态），则回落到 DHCP。
+    fn restore_from_snapshot(&self, snap: &InterfaceStatus) -> Result<(), String> {
+        // 默认实现：根据快照内容决定恢复方式
+        // 若有静态 IP 信息则恢复静态配置，否则回落 DHCP
+        if let (Some(ip), Some(netmask), Some(gw)) = (&snap.ipv4, &snap.netmask, &snap.gateway) {
+            let cfg = NetworkConfig {
+                mode: crate::config::Mode::Manual,
+                ip: Some(ip.clone()),
+                netmask: Some(netmask.clone()),
+                gateway: Some(gw.clone()),
+                dns: snap.dns.clone(),
+                v6mode: snap.v6mode.clone().and_then(|s| match s.as_str() {
+                    "off" => Some(crate::config::V6Mode::Off),
+                    "automatic" => Some(crate::config::V6Mode::Automatic),
+                    "manual" => Some(crate::config::V6Mode::Manual),
+                    _ => None,
+                }),
+                ipv6: None,
+                v6prefix: None,
+                v6gateway: None,
+                routes: Vec::new(),
+                verify: None,
+            };
+            self.apply_network(&cfg)
+        } else {
+            self.set_dhcp()
+        }
+    }
+
     /// 枚举**当前在用**的全部网卡（有线 / 无线 / VPN），每张一张 [`NicInfo`]。
     ///
     /// 与 `get_status()` 的分工：`get_status` 只回答"主无线网卡现在什么参数"（供

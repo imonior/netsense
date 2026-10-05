@@ -396,7 +396,7 @@ fn netsh_bssid_rssi_for_mac(text: &str, mac: &str) -> (Option<String>, Option<i3
                         bssid = Some(super::normalize_mac(&m));
                     }
                 }
-            } else if t.starts_with("Signal") {
+            } else if t.starts_with("Signal") || t.starts_with("信号") {
                 if let Some(pct) = percent_in(t) {
                     rssi = Some(pct / 2 - 100);
                 }
