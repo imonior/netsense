@@ -5,6 +5,7 @@
 //! platform/macos.rs      networksetup / arp / airport / route / scutil / osascript
 //! platform/windows.rs    netsh / PowerShell(CIM) / route / rasdial / wireguard.exe / UAC 提权
 //! platform/linux.rs      nmcli / ip / pkexec
+//! platform/mock.rs       Mock 实现（仅测试构建）
 //! ```
 //!
 //! 上层（`main` / `ipc` / `core`）只依赖 [`Platform`]（编译期选定的实现）
@@ -19,6 +20,9 @@ use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+mod mock;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 compile_error!("NetSense 仅支持 macOS / Windows / Linux 三个平台"); // i18n-exempt: 编译期消息，只有构建者看得到，永远不会渲染进界面
@@ -485,7 +489,7 @@ pub(crate) fn find_tunnel_row<'a>(
         })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProbeTarget {
     pub mode: crate::config::ProbeMode,
     pub http_target: Option<String>,
@@ -496,6 +500,12 @@ pub struct ProbeTarget {
 pub enum Health {
     Ok,
     Fail,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Health::Ok
+    }
 }
 
 /// SSID 监视句柄：`stop()` 后后台线程会在下一轮退出。
@@ -1851,3 +1861,72 @@ printer CanonG3860 is disabled.
         assert_eq!(app_letters("!!"), "");
     }
 }
+#[cfg(test)]
+mod mock_tests {
+    use super::*;
+    use crate::config::Mode;
+
+    #[test]
+    fn mock_platform_records_calls() {
+        let m = MockPlatform::new();
+        m.get_status();
+        m.set_dhcp();
+        let calls = m.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(calls[0], Call::GetStatus));
+        assert!(matches!(calls[1], Call::SetDhcp));
+    }
+
+    #[test]
+    fn mock_platform_apply_network_updates_state() {
+        let m = MockPlatform::new();
+        let cfg = NetworkConfig {
+            mode: Mode::Manual,
+            ip: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("8.8.8.8".into()),
+            ..Default::default()
+        };
+        m.apply_network(&cfg).unwrap();
+        let status = m.get_status();
+        assert_eq!(status.ipv4, Some("192.168.1.100".into()));
+        assert_eq!(status.gateway, Some("192.168.1.1".into()));
+    }
+
+    #[test]
+    fn mock_platform_add_route_is_idempotent() {
+        let m = MockPlatform::new();
+        m.add_route("10.0.0.0/8", "192.168.1.1", 0).unwrap();
+        m.add_route("10.0.0.0/8", "192.168.1.1", 0).unwrap(); // 幂等，不报错
+        assert_eq!(m.routes().len(), 1);
+    }
+
+    #[test]
+    fn mock_platform_delete_route_removes_route() {
+        let m = MockPlatform::new();
+        m.add_route("10.0.0.0/8", "192.168.1.1", 0).unwrap();
+        m.delete_route("10.0.0.0/8").unwrap();
+        assert_eq!(m.routes().len(), 0);
+    }
+
+    #[test]
+    fn mock_platform_probe_returns_injected_result() {
+        let m = MockPlatform::new();
+        m.set_probe_result(Health::Fail);
+        let h = m.probe(&ProbeTarget::default(), 1000);
+        assert_eq!(h, Health::Fail);
+    }
+
+    #[test]
+    fn mock_platform_clear_calls() {
+        let m = MockPlatform::new();
+        m.get_status();
+        m.set_dhcp();
+        assert_eq!(m.calls().len(), 2);
+        m.clear_calls();
+        assert!(m.calls().is_empty());
+    }
+}
+#[cfg(test)]
+pub use crate::platform::mock::{Call, MockPlatform};
