@@ -177,6 +177,11 @@ jobs:
             target: aarch64-pc-windows-msvc
             label: windows-arm64
             bundles: "nsis,msi"
+            # 这条腿是交叉编译：runner 是 x64 Windows，跑不动 aarch64 的测试可执行文件
+            # （`This version of %1 is not compatible...` os error 216）。所以这里只编译测试，
+            # 不执行。This leg is cross-compiled: the runner is x64 Windows and cannot execute an
+            # aarch64 test binary (os error 216), so it only *builds* the tests.
+            test_args: "--no-run"
           - platform: windows-latest
             target: i686-pc-windows-msvc
             label: windows-x86
@@ -265,7 +270,11 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets -- -D warnings
 
       - name: Unit tests (matcher / i18n / editor contract)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+        # `matrix.test_args` 只在交叉编译的腿上是 `--no-run`（见矩阵里 windows-arm64 的注释）：
+        # 那些腿只能保证「测试代码能编译」，执行不了二进制；其余腿照常真跑。
+        # `matrix.test_args` is `--no-run` only on cross-compiled legs (see windows-arm64 in the
+        # matrix): those legs can only prove the tests *compile*, not run them.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} ${{ matrix.test_args }}
 
       # The installer ownership, Release title and notes are all written once by the `release` leg
       # above; we don't regenerate them here (previously the CHANGELOG extraction lived in the

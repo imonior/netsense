@@ -1406,15 +1406,17 @@ pub(crate) fn parse_ip_route(out: &str) -> Vec<RouteConfig> {
         let mut i = 1;
         while i < t.len() {
             match t[i] {
-                "via" => {
-                    if i + 1 < t.len() {
-                        gateway = Some(t[i + 1].to_string());
-                    }
+                // `i + 1` 的越界检查写成 match guard，而不是臂内的 `if`：两者语义等价
+                // （guard 不成立就落到下面的 `_` 臂），但 clippy 的 `collapsible_match`
+                // 会把臂内 `if` 判为可折叠项，在 `-D warnings` 下直接变编译错误。
+                // The bounds check is a match guard rather than an `if` inside the arm. Same
+                // semantics (a false guard falls through to `_`), but clippy's `collapsible_match`
+                // flags the in-arm `if`, which is a hard error under `-D warnings`.
+                "via" if i + 1 < t.len() => {
+                    gateway = Some(t[i + 1].to_string());
                 }
-                "metric" => {
-                    if i + 1 < t.len() {
-                        metric = t[i + 1].parse().unwrap_or(0);
-                    }
+                "metric" if i + 1 < t.len() => {
+                    metric = t[i + 1].parse().unwrap_or(0);
                 }
                 _ => {}
             }
