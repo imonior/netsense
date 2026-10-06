@@ -1,6 +1,6 @@
 [package]
 name = "netsense"
-version = "1.0.7"
+version = "1.5.0"
 description = "Cross-platform SSID-aware network profile switcher"
 edition = "2021"
 rust-version = "1.77"
@@ -18,6 +18,9 @@ sha2 = "0.10"
 [features]
 # default = macOS; 后续加 windows / linux feature gates
 default = []
+# 用 MockPlatform 顶替编译期选定的真实 PAL，跑完整 Engine 集成测试（快照→判定→下发→3B）。
+# 关闭时生产代码路径零改动（Platform 仍是 macos/windows/linux 之一的真实实现）。
+engine-mock = []
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # CoreWLAN 读现连 SSID（macOS 14+ 唯一稳定来源）；CLLocation 负责一次性索取定位授权；

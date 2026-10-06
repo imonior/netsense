@@ -82,7 +82,7 @@ Tauri v2 + Rust、系統 WebView、前端為純靜態 HTML/CSS/JS（無 Node 建
 |------|------|--------|--------|
 | Windows | x64、ARM64、x86（32 位元） | NSIS + MSI | `netsense.exe` + 資源（zip） |
 | macOS | Apple Silicon、Intel | DMG（內含 `.app`） | `.app`（zip） |
-| Linux | x64 | DEB | 二進位 + 資源（zip） |
+| Linux | x64, ARM64 | DEB | 二進位 + 資源（zip） |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
@@ -181,7 +181,7 @@ NetSense 常駐托盤：點圖示（左右鍵皆同）開啟面板，所有入�
 另外，`run_script` 只會執行位於 `<配置目錄>/scripts` 之下、或在
 `allowed_scripts` 裡登記過的路徑；相對路徑以 `config.json` 所在的目錄為準，而不是行程啟動時的目錄。
 
-`DEVELOPMENT.md` 詳細說明了這個模型、引擎流水線以及各平台的坑點。
+架構真源（模組邊界、引擎狀態機、3A 事務與回滾、平台抽象層）見 `ARCHITECTURE.md`；建置、執行、測試與各平台坑點見 `DEVELOPMENT.md`。
 
 ## 授權
 

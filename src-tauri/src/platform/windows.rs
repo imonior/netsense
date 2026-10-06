@@ -25,7 +25,7 @@ use super::{
     WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
-use crate::config::model::NetworkTarget;
+use crate::config::model::{NetworkTarget, RouteConfig};
 use crate::i18n;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -420,7 +420,7 @@ fn netsh_bssid_rssi_for_mac(text: &str, mac: &str) -> (Option<String>, Option<i3
                         bssid = Some(super::normalize_mac(&m));
                     }
                 }
-            } else if t.starts_with("Signal") || t.starts_with("信号") {
+            } else if t.starts_with("Signal") || t.starts_with("信号") { // i18n-exempt: matches Windows' localized netsh output (信号 = "Signal")
                 if let Some(pct) = percent_in(t) {
                     rssi = Some(pct / 2 - 100);
                 }
@@ -1752,6 +1752,21 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
         }])
     }
 
+    fn get_routes(&self) -> Vec<RouteConfig> {
+        // `Get-NetRoute` 不需要提权；读不到（极老系统缺 NetTCPIP 模块）就退化为空，不阻断回滚。
+        // `Get-NetRoute` needs no elevation; if it's unavailable we degrade to empty rather than
+        // blocking the rollback.
+        let script = r#"Get-NetRoute -AddressFamily IPv4 | ForEach-Object { "$($_.DestinationPrefix)|$($_.NextHop)|$($_.RouteMetric)" }"#;
+        match ps(script) {
+            Ok(o) => parse_ps_routes(&o),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn restore_from_snapshot(&self, snap: &InterfaceStatus) -> Result<(), String> {
+        crate::platform::restore_snapshot_impl(self, snap)
+    }
+
     fn launch_app(&self, app: &str, args: &[String]) -> Result<(), String> {
         let arg_list = if args.is_empty() {
             String::new()
@@ -1863,6 +1878,45 @@ else { '[]' }"#
         // 刻意选 `lpoptions -d` 是同一个决策：这个动作每次进入 Active 都会跑。
         ps(&set_default_printer_script(printer)).map(|_| ())
     }
+}
+
+/// 解析 `Get-NetRoute` 脚本输出（每行 `DestinationPrefix|NextHop|RouteMetric`）为
+/// [`RouteConfig`]（供 3A 回滚恢复用）。`NextHop` 为 `0.0.0.0` / 空表示 on-link，无网关。
+/// Parse `Get-NetRoute` script output (`DestinationPrefix|NextHop|RouteMetric` per line) into
+/// [`RouteConfig`] for 3A rollback. `NextHop` of `0.0.0.0` / empty means on-link (no gateway).
+pub(crate) fn parse_ps_routes(out: &str) -> Vec<RouteConfig> {
+    let mut routes = Vec::new();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let dest = parts[0].trim();
+        if dest.is_empty() {
+            continue;
+        }
+        // 链路本地 / 多播 / 广播跳过（系统自管）。
+        if dest.starts_with("169.254")
+            || dest.starts_with("224.")
+            || dest.starts_with("255.255.255.255")
+        {
+            continue;
+        }
+        let gw = parts[1].trim();
+        let gateway = if gw.is_empty() || gw == "0.0.0.0" || gw == "::" {
+            None
+        } else {
+            Some(gw.to_string())
+        };
+        let metric = parts[2].trim().parse::<u32>().unwrap_or(0);
+        routes.push(RouteConfig {
+            dest: dest.to_string(),
+            gateway,
+            metric,
+            delete: false,
+        });
+    }
+    routes
 }
 
 #[cfg(test)]
@@ -2383,5 +2437,28 @@ BSSID              : 60-32-B9-00-AA-BB
         for bad in ["", "..", "..\\..\\windows\\evil", "a/b", "C:\\x", "a\0b"] {
             assert!(safe_tunnel_name(bad).is_err(), "{:?} 不该被当成隧道名", bad);
         }
+    }
+
+    #[test]
+    fn parse_ps_routes_extracts_static_routes() {
+        let out = "\
+0.0.0.0/0|192.168.1.1|0
+10.0.0.0/8|10.1.1.1|20
+169.254.0.0/16|0.0.0.0|0
+192.168.1.0/24||0";
+        let routes = parse_ps_routes(out);
+        assert!(
+            routes.iter().any(|r| r.dest == "0.0.0.0/0" && r.gateway.as_deref() == Some("192.168.1.1")),
+            "default 路由应被捕获，网关为 192.168.1.1"
+        );
+        assert!(
+            routes.iter().any(|r| r.dest == "10.0.0.0/8" && r.gateway.as_deref() == Some("10.1.1.1") && r.metric == 20),
+            "第三方静态路由应被捕获，metric 正确"
+        );
+        assert!(!routes.iter().any(|r| r.dest.starts_with("169.254")), "链路本地应跳过");
+        assert!(
+            routes.iter().any(|r| r.dest == "192.168.1.0/24" && r.gateway.is_none()),
+            "on-link 路由保留但网关为 None"
+        );
     }
 }

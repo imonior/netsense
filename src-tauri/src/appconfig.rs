@@ -31,6 +31,7 @@
 //! 「开机后有」；当场启动一个已经在运行的应用没有意义，而取消勾选时把正在跑的自己杀掉，
 //! 更是莫名其妙的行为。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::i18n;
@@ -211,7 +212,8 @@ impl AppConfig {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
             }
         }
-        // 原子写：先写 `.part` 临时文件再 `rename` 覆盖，避免崩溃/掉电把 settings.json 截成半截。
+        // 覆盖前先把当前文件轮转成时间戳备份（保留最近 5 份），误删/改坏配置可恢复。
+        Self::rotate_backup(path);
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -220,8 +222,46 @@ impl AppConfig {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(format!("{file_name}.part"));
-        std::fs::write(&tmp, &s).map_err(|e| e.to_string())?;
+        // 原子写：先写临时文件、fsync 落盘，再 rename 覆盖，避免崩溃/掉电把 settings.json 截成半截。
+        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    }
+
+    /// 覆盖写之前把当前文件轮转成时间戳备份，保留最近 `BACKUP_KEEP` 份（误删/改坏配置可恢复）。
+    /// best-effort：任何错误都忽略，保存主流程不能因此失败。
+    fn rotate_backup(path: &Path) {
+        const BACKUP_KEEP: usize = 5;
+        if !path.exists() {
+            return;
+        }
+        let Some(dir) = path.parent() else { return; };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return; };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = dir.join(format!(".{name}.{stamp}.bak"));
+        let _ = std::fs::copy(path, &backup);
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut backs: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&format!(".{name}.")) && n.ends_with(".bak"))
+                })
+                .collect();
+            backs.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+            while backs.len() > BACKUP_KEEP {
+                if let Some(old) = backs.first() {
+                    let _ = std::fs::remove_file(old);
+                }
+                backs.remove(0);
+            }
+        }
     }
 }
 

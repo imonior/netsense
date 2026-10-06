@@ -96,7 +96,7 @@ Core Engine (detection / conditions / 매칭 / network / automation)은 시스�
 |----|----------|-----------|---------|
 | Windows | x64, ARM64, x86 (32비트) | NSIS + MSI | `netsense.exe` + 리소스 (zip) |
 | macOS | Apple Silicon, Intel | DMG (`.app` 내장) | `.app` (zip) |
-| Linux | x64 | DEB | 바이너리 + 리소스 (zip) |
+| Linux | x64, ARM64 | DEB | 바이너리 + 리소스 (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
@@ -203,7 +203,7 @@ NetSense는 트레이에 상주합니다: 아이콘을 클릭하면(왼쪽·오�
 등록된 경로만 실행합니다. 상대 경로는 프로세스가 시작된 위치가 아니라 config.json이 있는 디렉터리를
 기준으로 해석됩니다.
 
-`DEVELOPMENT.md`에 모델, 엔진 파이프라인, 플랫폼별 함정이 자세하게 정리되어 있습니다.
+아키텍처 정典(모듈 경계, 엔진 상태 머신, 3A 트랜잭션과 롤백, 플랫폼 추상화 계층)은 `ARCHITECTURE.md`에; 빌드·실행·테스트 및 플랫폼별 함정은 `DEVELOPMENT.md`를 보세요.
 
 ## 라이선스
 

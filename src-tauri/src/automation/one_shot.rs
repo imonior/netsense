@@ -405,10 +405,21 @@ mod tests {
             vec!["first", "second", "third"],
             "结果顺序就是列表顺序，一条都没少"
         );
+        // 该断言依赖真实 PAL 真正执行脚本（不存在的脚本会失败）；MockPlatform 不执行、
+        // 永远返回成功，因此只在非 engine-mock 构建下校验「全部失败」。顺序断言（上一条）
+        // 在两种构建下都生效，仍是本测试的主意图。
+        // This assertion depends on the real PAL actually executing the script (a missing script
+        // fails); MockPlatform never executes and always reports success, so it only holds in a
+        // non-engine-mock build. The ordering assertion above runs under both builds.
+        #[cfg(not(feature = "engine-mock"))]
         assert!(
             report.outcomes.iter().all(|o| !o.ok),
             "一条失败不该截断后面的：三条都要留下记录"
         );
+        // 同上：整批状态也依赖「三条都失败」，故一并只在非 engine-mock 构建下校验。
+        // Ditto: the batch status also assumes all three failed, so it is checked only in a
+        // non-engine-mock build.
+        #[cfg(not(feature = "engine-mock"))]
         assert_eq!(report.status, BatchStatus::Failed, "三条都失败该记 Failed，而不是中断");
     }
 

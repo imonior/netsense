@@ -100,7 +100,7 @@ Core Engine（detection / conditions / 照合 / network / automation）はシス
 |----|---------------|--------------|------------|
 | Windows | x64, ARM64, x86 (32 ビット) | NSIS + MSI | `netsense.exe` + リソース (zip) |
 | macOS | Apple Silicon, Intel | DMG (`.app` 内包) | `.app` (zip) |
-| Linux | x64 | DEB | バイナリ + リソース (zip) |
+| Linux | x64, ARM64 | DEB | バイナリ + リソース (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
@@ -208,7 +208,7 @@ Linux は `~/.config/netsense`。実行ファイルと同じ場所には置き�
 の中か `allowed_scripts` に登録されたパスだけです。相対パスはプロセスを起動したディレクトリではなく、
 config.json のあるディレクトリを基準に解決されます。
 
-`DEVELOPMENT.md` にモデル、エンジンのパイプライン、プラットフォーム別の落とし穴を詳しく書いてあります。
+アーキテクチャの正典（モジュール境界、エンジン状態機械、3A トランザクションとロールバック、プラットフォーム抽象層）は `ARCHITECTURE.md`；ビルド・実行・テスト・プラットフォーム別の落とし穴は `DEVELOPMENT.md` を参照。
 
 ## ライセンス
 

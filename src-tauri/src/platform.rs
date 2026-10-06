@@ -11,7 +11,8 @@
 //! 上层（`main` / `ipc` / `core`）只依赖 [`Platform`]（编译期选定的实现）
 //! 与 [`NetworkPlatform`] trait，不直接接触任何系统命令 —— 这是跨平台的关键边界。
 
-use crate::config::NetworkConfig;
+use crate::config::model::{NetworkTarget, RouteConfig};
+use crate::config::{Mode, NetworkConfig, V6Mode};
 use serde::Serialize;
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -21,7 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
+// `mock` 在测试与 `engine-mock` 特性下都要编译：后者会把 `Platform` 别名换成 `MockPlatform`，
+// 而 `cargo clippy --all-targets --features engine-mock` 会构建不含 `cfg(test)` 的 lib，
+// 若这里只允许 `cfg(test)`，`mock` 模块在 lib 里找不到（E0432）。
+// `mock` must compile under both `test` and the `engine-mock` feature: the feature swaps the
+// `Platform` alias to `MockPlatform`, and `cargo clippy --all-targets --features engine-mock`
+// builds the lib without `cfg(test)`, so gating this on `test` alone would make `mock` missing.
+#[cfg(any(test, feature = "engine-mock"))]
 mod mock;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -45,6 +52,66 @@ pub struct InterfaceStatus {
     pub v6mode: Option<String>,
     /// 当前无线接口名（macOS: en0 / Windows: Wi-Fi / Linux: wlan0）
     pub iface: Option<String>,
+    /// 快照采集时这份状态所代表的「配置目标网卡」。3A 事务回滚需按同一张网卡恢复，
+    /// 否则以太网/VPN 上的回滚会落到默认主网卡上。
+    /// The network target this snapshot was captured for; 3A rollback must restore on the
+    /// same interface, otherwise an Ethernet/VPN rollback would land on the default primary NIC.
+    pub target: Option<NetworkTarget>,
+    /// 快照采集时该网卡上**已存在**的静态路由。3A 事务回滚据此恢复，避免误删第三方软件的路由
+    /// （见 ChatGPT #28/#29：单纯 `delete <dest>` 会连原本属于系统的路由一起删掉）。
+    /// Static routes already present on the NIC when the snapshot was taken; 3A rollback
+    /// re-adds them so it never wipes a route owned by the OS or another app (ChatGPT #28/#29).
+    pub routes: Vec<RouteConfig>,
+}
+
+/// 3A 事务回滚的共享实现：把网卡恢复到快照时的状态（见 ChatGPT #28/#29）。
+///
+/// 三份平台实现的 [`NetworkPlatform::restore_from_snapshot`] 都委派给它，保证回滚逻辑只有一份：
+/// 按快照记录的 `target` 重新下发 IP/掩码/网关/DNS，再把快照采集时该网卡上**已存在**的路由加回去
+/// （而不是只 `delete <dest>` —— 那样会连原本属于系统/其它软件的路由一起清掉）。
+/// Shared 3A rollback: restore the NIC to the captured snapshot (ChatGPT #28/#29). All three
+/// platforms delegate their `restore_from_snapshot` to this so the logic is defined once: re-apply
+/// IP/mask/gateway/DNS on the same `target`, then re-add the routes that already existed before.
+pub(crate) fn restore_snapshot_impl(
+    plat: &impl NetworkPlatform,
+    snap: &InterfaceStatus,
+) -> Result<(), String> {
+    if let (Some(ip), Some(netmask), Some(gw)) = (&snap.ipv4, &snap.netmask, &snap.gateway) {
+        let cfg = NetworkConfig {
+            mode: Mode::Manual,
+            target: snap.target,
+            ip: Some(ip.clone()),
+            netmask: Some(netmask.clone()),
+            gateway: Some(gw.clone()),
+            dns: snap.dns.clone(),
+            v6mode: snap.v6mode.clone().and_then(|s| match s.as_str() {
+                "off" => Some(V6Mode::Off),
+                "automatic" => Some(V6Mode::Automatic),
+                "manual" => Some(V6Mode::Manual),
+                _ => None,
+            }),
+            ipv6: None,
+            v6prefix: None,
+            v6gateway: None,
+            routes: Vec::new(),
+            verify: None,
+        };
+        let res = plat.apply_network(&cfg);
+        if res.is_ok() {
+            // 恢复快照采集时该网卡上已存在的路由，避免回滚把第三方路由一并清掉。
+            // Re-add the pre-existing routes so rollback doesn't wipe third-party routes.
+            for r in &snap.routes {
+                if !r.delete {
+                    if let Some(g) = &r.gateway {
+                        let _ = plat.add_route(&r.dest, g, r.metric);
+                    }
+                }
+            }
+        }
+        res
+    } else {
+        plat.set_dhcp()
+    }
 }
 
 /// 网卡种类。用于面板与设置窗口「网络硬件信息」列的分组展示。
@@ -615,39 +682,29 @@ pub trait NetworkPlatform: Send + Sync {
     /// 不受上面那条三态约定约束。
     fn set_dhcp(&self) -> Result<(), String>;
 
+    /// 采集「当前网卡上已存在的静态路由」，供 3A 事务回滚恢复用。
+    ///
+    /// 三份平台实现都必须覆盖它：回滚要按快照里记录的 `target` 把被覆盖前的路由还原回去
+    /// （见 ChatGPT #28/#29：单纯 `delete <dest>` 会连原本属于系统的路由一起删掉）。
+    /// 实现见各 `platform::*`：macOS 解析 `netstat -rn`、Windows 解析 `Get-NetRoute`、
+    /// Linux 解析 `ip route`。
+    /// Collect the static routes already present on the NIC, for 3A transaction rollback.
+    /// All three platforms must override it: rollback re-adds the pre-existing routes on the
+    /// same `target` (ChatGPT #28/#29: `delete <dest>` alone would wipe a system/third-party
+    /// route). Implementations live in each `platform::*`: macOS parses `netstat -rn`,
+    /// Windows parses `Get-NetRoute`, Linux parses `ip route`.
+    fn get_routes(&self) -> Vec<RouteConfig>;
+
     /// 从快照恢复网络配置（3A 事务回滚用）。
     ///
-    /// 当 3A 下发失败或校验失败时，调用此方法将网卡恢复到快照时的状态。
-    /// 实现应根据快照中的 IP/掩码/网关/DNS 等信息重新下发配置。
-    /// 若快照中无 IP 信息（如 DHCP 状态），则回落到 DHCP。
-    fn restore_from_snapshot(&self, snap: &InterfaceStatus) -> Result<(), String> {
-        // 默认实现：根据快照内容决定恢复方式
-        // 若有静态 IP 信息则恢复静态配置，否则回落 DHCP
-        if let (Some(ip), Some(netmask), Some(gw)) = (&snap.ipv4, &snap.netmask, &snap.gateway) {
-            let cfg = NetworkConfig {
-                mode: crate::config::Mode::Manual,
-                target: None,
-                ip: Some(ip.clone()),
-                netmask: Some(netmask.clone()),
-                gateway: Some(gw.clone()),
-                dns: snap.dns.clone(),
-                v6mode: snap.v6mode.clone().and_then(|s| match s.as_str() {
-                    "off" => Some(crate::config::V6Mode::Off),
-                    "automatic" => Some(crate::config::V6Mode::Automatic),
-                    "manual" => Some(crate::config::V6Mode::Manual),
-                    _ => None,
-                }),
-                ipv6: None,
-                v6prefix: None,
-                v6gateway: None,
-                routes: Vec::new(),
-                verify: None,
-            };
-            self.apply_network(&cfg)
-        } else {
-            self.set_dhcp()
-        }
-    }
+    /// 三份平台实现都委派给 [`restore_snapshot_impl`]：回滚逻辑只写一份。它会按快照里
+    /// 记录的 `target` 重新下发 IP/掩码/网关/DNS，并把快照采集时该网卡上**已存在**的路由
+    /// 也加回去 —— 而不是只 `delete <dest>`，那样会连原本属于系统/其它软件的路由一起清掉。
+    /// Restore the NIC to the captured snapshot (3A transaction rollback). All three platforms
+    /// delegate to [`restore_snapshot_impl`] so the rollback logic lives in exactly one place:
+    /// it re-applies IP/mask/gateway/DNS on the same `target` and re-adds the routes that already
+    /// existed before the profile ran, instead of `delete <dest>` wiping a third-party route.
+    fn restore_from_snapshot(&self, snap: &InterfaceStatus) -> Result<(), String>;
 
     /// 枚举**当前在用**的全部网卡（有线 / 无线 / VPN），每张一张 [`NicInfo`]。
     ///
@@ -1401,25 +1458,55 @@ pub const fn platform_name() -> &'static str {
 
 // —————————————————————————— 编译期平台选择 ——————————————————————————
 
+// 启用 `engine-mock` 时 `Platform` 别名换成 `MockPlatform`，本机真实 PAL 仍被编译但不再被
+// 任何代码路径引用，于是它的内部函数/常量会被 dead_code 判定为未使用。这只是 DI 换型的
+// 假阳性，只在特性开启时放行，正常构建仍全量受 lint 约束。
+// Under `engine-mock` the real PAL is still compiled but no longer referenced (Platform = Mock),
+// so its internals trip `dead_code`. That is a false positive of the type swap — allow it only
+// with the feature on; the normal build stays fully linted.
+#[cfg_attr(feature = "engine-mock", allow(dead_code))]
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg_attr(feature = "engine-mock", allow(dead_code))]
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub(crate) mod win_helper;
+#[cfg_attr(feature = "engine-mock", allow(dead_code))]
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg_attr(feature = "engine-mock", allow(dead_code))]
 #[cfg(target_os = "linux")]
 mod linux_netlink;
+#[cfg_attr(feature = "engine-mock", allow(dead_code))]
 #[cfg(target_os = "linux")]
 mod linux_nm;
 
+// `priv_channel` / 定位授权这些与「当前平台」绑定的元数据函数，无论是否启用 engine-mock
+// 都从真实平台导出（它们只是读系统状态，测试里调用无害）。
+// `priv_channel` / location-authorization metadata fns always come from the real PAL, even under
+// engine-mock (they only read system state, harmless in tests).
 #[cfg(target_os = "macos")]
-pub use macos::{priv_channel, request_location_authorization, MacPlatform as Platform};
+pub use macos::{priv_channel, request_location_authorization};
 #[cfg(target_os = "windows")]
-pub use windows::{priv_channel, WindowsPlatform as Platform};
+pub use windows::priv_channel;
 #[cfg(target_os = "linux")]
-pub use linux::{priv_channel, LinuxPlatform as Platform};
+pub use linux::priv_channel;
+
+// `Platform` 是「编译期选定的 PAL 类型别名」：默认指向当前 OS 的真实实现；
+// 启用 `engine-mock` 时改成 `MockPlatform`，从而让 `AppState`/Engine 在测试里跑在 mock 上，
+// 而生产构建路径完全不变。
+// `Platform` is the compile-time-selected PAL alias; it points at the real impl by default and at
+// `MockPlatform` under `engine-mock`, so tests can drive the Engine on a mock while production is
+// untouched.
+#[cfg(all(target_os = "macos", not(feature = "engine-mock")))]
+pub use macos::MacPlatform as Platform;
+#[cfg(all(target_os = "windows", not(feature = "engine-mock")))]
+pub use windows::WindowsPlatform as Platform;
+#[cfg(all(target_os = "linux", not(feature = "engine-mock")))]
+pub use linux::LinuxPlatform as Platform;
+#[cfg(feature = "engine-mock")]
+pub use crate::platform::mock::MockPlatform as Platform;
 
 #[cfg(test)]
 mod tests {
@@ -1862,6 +1949,7 @@ printer CanonG3860 is disabled.
 #[cfg(test)]
 mod mock_tests {
     use super::*;
+    use crate::config::model::{NetworkTarget, RouteConfig};
     use crate::config::Mode;
 
     #[test]
@@ -1924,6 +2012,47 @@ mod mock_tests {
         assert_eq!(m.calls().len(), 2);
         m.clear_calls();
         assert!(m.calls().is_empty());
+    }
+
+    #[test]
+    fn restore_from_snapshot_reapplies_previous_routes_and_target() {
+        let m = MockPlatform::new();
+        // 模拟一张以太网网卡「下发前」的快照：静态 IP + 一条第三方路由。
+        // Simulate a pre-apply snapshot on an Ethernet NIC: static IP + a third-party route.
+        let snap = InterfaceStatus {
+            ipv4: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("8.8.8.8".into()),
+            target: Some(NetworkTarget::Ethernet),
+            routes: vec![RouteConfig {
+                dest: "10.0.0.0/8".into(),
+                gateway: Some("192.168.1.1".into()),
+                metric: 10,
+                delete: false,
+            }],
+            ..Default::default()
+        };
+        m.restore_from_snapshot(&snap).unwrap();
+        // 网络配置按 Ethernet 目标恢复（不是默认 Primary）。
+        // Network config is restored on the Ethernet target, not the default Primary.
+        let calls = m.calls();
+        let applied = calls
+            .iter()
+            .find_map(|c| match c {
+                Call::ApplyNetwork { cfg } => Some(cfg),
+                _ => None,
+            })
+            .expect("restore 应重新下发网络配置 / restore must re-apply network config");
+        assert_eq!(applied.target, Some(NetworkTarget::Ethernet));
+        // 快照里的第三方路由被恢复回来，而不是被丢掉的。
+        // The pre-existing third-party route is restored, not dropped.
+        assert!(
+            m.routes()
+                .iter()
+                .any(|(d, g, _)| d == "10.0.0.0/8" && g == "192.168.1.1"),
+            "回滚应恢复快照里的旧路由 / rollback must restore the previous route"
+        );
     }
 }
 #[cfg(test)]

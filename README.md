@@ -105,7 +105,7 @@ generated:
 |----|---------------|-----------|----------|
 | Windows | x64, ARM64, x86 (32-bit) | NSIS + MSI | `netsense.exe` + resources (zip) |
 | macOS | Apple Silicon, Intel | DMG (`.app` inside) | `.app` (zip) |
-| Linux | x64 | DEB | binary + resources (zip) |
+| Linux | x64, ARM64 | DEB | binary + resources (zip) |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
@@ -218,7 +218,9 @@ writes the empty string, so the servers are cleared; "DNS Servers" pushes what y
 `allowed_scripts`; a relative path is read against the directory holding `config.json`, not the
 directory the process was started from.
 
-`DEVELOPMENT.md` documents the model, the engine pipeline and the per-platform traps in detail.
+`ARCHITECTURE.md` is the canonical architecture reference — module boundaries, the engine state
+machine, the 3A transaction/rollback, and the platform abstraction layer. `DEVELOPMENT.md` covers
+building, running, testing and the per-platform dev traps.
 
 ## License
 

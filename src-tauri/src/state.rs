@@ -92,6 +92,9 @@ impl AppState {
             settings_path,
             settings: Mutex::new(settings),
             scripts_dir,
+            // `Platform` 是零大小单元结构体（真实 PAL 与 MockPlatform 同形），直接以值构造，
+            // 两种目标下都无需 `Default`。`Platform` is a zero-sized unit struct (real PAL and
+            // MockPlatform share the shape) — construct it as a value; no `Default` needed either way.
             plat: Platform,
             engine: Mutex::new(engine),
             engine_tx: OnceLock::new(),

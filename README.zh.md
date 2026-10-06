@@ -85,7 +85,7 @@ Core Engine（detection / conditions / 匹配 / network / automation）从不直
 |------|------|--------|--------|
 | Windows | x64、ARM64、x86（32 位） | NSIS + MSI | `netsense.exe` + 资源（zip） |
 | macOS | Apple Silicon、Intel | DMG（内含 `.app`） | `.app`（zip） |
-| Linux | x64 | DEB | 二进制 + 资源（zip） |
+| Linux | x64, ARM64 | DEB | 二进制 + 资源（zip） |
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
@@ -184,7 +184,8 @@ NetSense 常驻托盘：点图标（左右键都一样）打开面板，所有�
 另外，`run_script` 只会执行 `<配置目录>/scripts` 之下、或在 `allowed_scripts` 里登记过的路径；
 相对路径按 `config.json` 所在目录解释，而不是按进程启动时的目录。
 
-模型细节、引擎流水线与各平台坑点详见 `DEVELOPMENT.md`（英文）。
+架构真源（模块边界、引擎状态机、3A 事务与回滚、平台抽象层）见 `ARCHITECTURE.md`；构建、运行、
+测试与各平台坑点见 `DEVELOPMENT.md`。
 
 ## 许可证
 

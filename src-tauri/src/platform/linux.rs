@@ -16,7 +16,7 @@ use super::{
     WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
-use crate::config::model::NetworkTarget;
+use crate::config::model::{NetworkTarget, RouteConfig};
 use crate::i18n;
 use crate::platform::linux_nm::{self, DeviceIp};
 use std::sync::OnceLock;
@@ -1181,6 +1181,14 @@ impl NetworkPlatform for LinuxPlatform {
         run_priv("ip", &["route", "del", dest])
     }
 
+    fn get_routes(&self) -> Vec<RouteConfig> {
+        parse_ip_route(&run("ip", &["route", "show"]).unwrap_or_default())
+    }
+
+    fn restore_from_snapshot(&self, snap: &InterfaceStatus) -> Result<(), String> {
+        crate::platform::restore_snapshot_impl(self, snap)
+    }
+
     fn launch_app(&self, app: &str, args: &[String]) -> Result<(), String> {
         // 三条出路：可执行文件直接跑；存在但不能 exec 的（.desktop、文档）与 URL 交给
         // xdg-open；写成路径却根本不在机器上的，在这里报错 —— 见 classify_target。
@@ -1366,6 +1374,60 @@ impl NetworkPlatform for LinuxPlatform {
         // 系统级默认（`lpadmin -d`）要 root，而这个动作每次进入 Active 都会跑。
         run("lpoptions", &["-d", printer]).map(|_| ())
     }
+}
+
+/// 解析 `ip route show` 输出为 [`RouteConfig`]（供 3A 回滚恢复用）。
+///
+/// 只认「default」与带 `/` 的前缀行；`local` / `broadcast` / `throw` 这类系统自管行跳过。
+/// 链路本地（169.254.*）、多播（224.*）、广播（255.255.255.255）也跳过。
+/// Parse `ip route show` into [`RouteConfig`] for 3A rollback. Only `default` and CIDR prefix
+/// lines are kept; kernel-managed `local`/`broadcast`/`throw` rows are skipped.
+pub(crate) fn parse_ip_route(out: &str) -> Vec<RouteConfig> {
+    let mut routes = Vec::new();
+    for line in out.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.is_empty() {
+            continue;
+        }
+        let raw = t[0];
+        if raw != "default" && !raw.contains('/') {
+            continue; // local / broadcast / throw / unreachable 等系统行
+        }
+        if raw.starts_with("169.254")
+            || raw.starts_with("224.")
+            || raw.starts_with("255.255.255.255")
+            || raw.starts_with("ff00::")
+        {
+            continue;
+        }
+        let dest = if raw == "default" { "0.0.0.0/0" } else { raw };
+        let mut gateway = None;
+        let mut metric = 0u32;
+        let mut i = 1;
+        while i < t.len() {
+            match t[i] {
+                "via" => {
+                    if i + 1 < t.len() {
+                        gateway = Some(t[i + 1].to_string());
+                    }
+                }
+                "metric" => {
+                    if i + 1 < t.len() {
+                        metric = t[i + 1].parse().unwrap_or(0);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        routes.push(RouteConfig {
+            dest: dest.to_string(),
+            gateway,
+            metric,
+            delete: false,
+        });
+    }
+    routes
 }
 
 #[cfg(test)]
@@ -1658,5 +1720,26 @@ mod tests {
         let props = con_mod_props(&cfg(Mode::Manual, Some(" 8.8.8.8 ,1.1.1.1, "))).unwrap();
         let i = props.iter().position(|p| p == "ipv4.dns").unwrap();
         assert_eq!(props[i + 1], "8.8.8.8 1.1.1.1", "nmcli 那边是空格分隔");
+    }
+
+    #[test]
+    fn parse_ip_route_extracts_static_routes() {
+        let out = "\
+default via 192.168.1.1 dev eth0 proto dhcp metric 100
+192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.5 metric 100
+10.0.0.0/8 via 10.1.1.1 dev tun0 metric 20
+local 192.168.1.5 dev eth0 proto kernel scope host src 192.168.1.5
+169.254.0.0/16 dev eth0 scope link metric 1000";
+        let routes = parse_ip_route(out);
+        assert!(
+            routes.iter().any(|r| r.dest == "0.0.0.0/0" && r.gateway.as_deref() == Some("192.168.1.1") && r.metric == 100),
+            "default 路由应被捕获，网关与 metric 正确"
+        );
+        assert!(
+            routes.iter().any(|r| r.dest == "10.0.0.0/8" && r.gateway.as_deref() == Some("10.1.1.1") && r.metric == 20),
+            "第三方静态路由应被捕获"
+        );
+        assert!(!routes.iter().any(|r| r.dest.starts_with("169.254")), "链路本地应跳过");
+        assert!(!routes.iter().any(|r| r.dest == "local"), "local 系统行应跳过");
     }
 }

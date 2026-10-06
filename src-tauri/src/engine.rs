@@ -2520,3 +2520,229 @@ mod tests {
         assert_eq!(then.persistent.len(), 1);
     }
 }
+
+/// 集成测试（评审 #1 头号建议）：用 MockPlatform 把「快照 → 判定 → 下发 → 3B」整条 Engine
+/// 链路自动跑起来。这里放的是「不需要 engine-mock feature」的两项——决策不变量与 3A 回滚，
+/// 它们在普通 `cargo test` 下也会跑。
+/// Integration tests (review #1): drive the whole Engine chain (snapshot → decide → apply → 3B)
+/// on MockPlatform. This module holds the two feature-independent cases (decision invariants and
+/// the 3A rollback); they run under plain `cargo test`.
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::config::{Mode, NetworkConfig};
+    use crate::config::model::RouteConfig;
+    use crate::network::{apply_3a, Stage3A};
+    use crate::platform::MockPlatform;
+    use crate::platform::{Call, InterfaceStatus};
+
+    /// 评审 §50：任意匹配规模下的不变量 —— 0→NoActiveProfile, 1→Active, 2+→Conflict（永不挑边）。
+    #[test]
+    fn decision_invariant_holds_for_any_match_count() {
+        let ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        for n in 0..=ids.len() {
+            let matched: Vec<String> = ids[..n].iter().map(|s| s.to_string()).collect();
+            match decide(&matched) {
+                Decision::NoActiveProfile => assert_eq!(n, 0, "只有 0 命中才该是无 Active"),
+                Decision::Active { id } => {
+                    assert_eq!(n, 1, "只有恰好 1 命中才该是 Active");
+                    assert_eq!(id, "a", "唯一的命中者必须是它");
+                }
+                Decision::Conflict { ids } => {
+                    assert!(n >= 2, "2+ 命中才该是 Conflict");
+                    assert_eq!(ids.len(), n, "冲突名单要完整报出每个候选");
+                }
+            }
+        }
+    }
+
+    /// 评审 P0 #2/#3 + #1：3A 下发失败时，回滚必须恢复旧静态配置、且保留系统原有的第三方路由
+    /// （不能只 `delete <dest>` 误删）。直接针对 `apply_3a` 跑在 MockPlatform 上验证。
+    #[test]
+    fn apply_3a_rolls_back_and_keeps_pre_existing_routes_on_failure() {
+        let mock = MockPlatform::new();
+        mock.set_state(InterfaceStatus {
+            ipv4: Some("192.168.1.10".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            ..Default::default()
+        });
+        // 下发前系统已有的第三方路由：回滚必须保留它。
+        mock.set_routes(vec![("10.20.20.0/24".to_string(), "192.168.1.254".to_string(), 10)]);
+        // 让 apply_network 失败 → 触发回滚
+        mock.set_apply_network_result(Err("simulated failure".into()));
+        let net = NetworkConfig {
+            mode: Mode::Manual,
+            ip: Some("10.0.0.5".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("10.0.0.1".into()),
+            dns: Some("1.1.1.1".into()),
+            routes: vec![RouteConfig {
+                dest: "172.16.0.0/12".into(),
+                gateway: Some("10.0.0.9".into()),
+                metric: 20,
+                delete: false,
+            }],
+            ..Default::default()
+        };
+        let res = apply_3a(&mock, &net);
+        assert!(matches!(res, Stage3A::Failed { .. }), "下发失败必须阻断 3B");
+        assert!(
+            mock.calls()
+                .iter()
+                .any(|c| matches!(c, Call::RestoreFromSnapshot { .. })),
+            "失败必须调用 restore_from_snapshot 回滚"
+        );
+        let routes = mock.routes();
+        assert!(
+            routes
+                .iter()
+                .any(|(d, g, _)| d == "10.20.20.0/24" && g == "192.168.1.254"),
+            "回滚必须保留下发前系统已有的路由，不能误删第三方路由（评审 #28/#29）"
+        );
+    }
+}
+
+/// 完整 Engine 集成测试：把 MockPlatform 顶替真实 PAL（`engine-mock` feature），用 `pass()`
+/// 驱动真实引擎循环（采样 → 评估 → 决策 → 3A 下发 → 3B），断言 mock 记录了对应的平台调用。
+/// Full Engine integration: MockPlatform stands in for the real PAL (feature `engine-mock`), and
+/// `pass()` drives the real engine loop; we assert the mock recorded the expected platform calls.
+#[cfg(all(test, feature = "engine-mock"))]
+mod mock_engine {
+    use super::*;
+    use crate::appconfig::AppConfig;
+    use crate::config::{
+        Branch, Condition, ConditionType, Config, FallbackConfig, Mode, NetworkConfig, Profile,
+        Rule, SCHEMA,
+    };
+    use crate::platform::{Call, InterfaceStatus};
+    use crate::state::AppState;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    /// 「WifiSsid == <ssid> 命中」的 Profile：THEN 含静态 IP（无 3B 动作，避免测试残留线程）。
+    fn ssid_profile(id: &str, ssid: &str) -> Profile {
+        Profile {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            rules: vec![Rule {
+                id: format!("{id}-r1"),
+                enabled: true,
+                conditions: vec![Condition {
+                    id: format!("{id}-c1"),
+                    enabled: true,
+                    kind: ConditionType::WifiSsid,
+                    value: ssid.to_string(),
+                }],
+            }],
+            then: Some(Branch {
+                network: Some(NetworkConfig {
+                    mode: Mode::Manual,
+                    ip: Some("10.0.0.5".to_string()),
+                    netmask: Some("255.255.255.0".to_string()),
+                    gateway: Some("10.0.0.1".to_string()),
+                    dns: Some("1.1.1.1".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// 顶着 mock PAL 建 AppState 并塞入配置（`engine-mock` 下 `plat` 即 MockPlatform）。
+    fn state_with(cfg: Config) -> Arc<AppState> {
+        let mut s = AppState::no_config_yet(
+            PathBuf::from("netsense_test_config.json"),
+            PathBuf::from("netsense_test_settings.json"),
+            AppConfig::default(),
+        );
+        s.config = Mutex::new(cfg);
+        Arc::new(s)
+    }
+
+    /// 让 mock 当前网络状态报告某个 SSID（`pass` 采样时读到它）。
+    fn set_mock_ssid(state: &AppState, ssid: &str) {
+        state.plat.set_state(InterfaceStatus {
+            ssid: Some(ssid.to_string()),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn engine_loop_applies_matching_profile_through_mock() {
+        let cfg = Config {
+            schema: SCHEMA,
+            profiles: vec![ssid_profile("home", "TestNet")],
+            ..Default::default()
+        };
+        let state = state_with(cfg);
+        set_mock_ssid(&state, "TestNet");
+        pass(&state, None);
+        assert!(
+            state
+                .plat
+                .calls()
+                .iter()
+                .any(|c| matches!(c, Call::ApplyNetwork { .. })),
+            "唯一命中的 Profile 应经 3A 下发到 mock 平台（评审 #1：完整 Engine 集成链）"
+        );
+    }
+
+    #[test]
+    fn engine_loop_never_applies_on_conflict() {
+        let cfg = Config {
+            schema: SCHEMA,
+            profiles: vec![ssid_profile("home", "TestNet"), ssid_profile("office", "TestNet")],
+            ..Default::default()
+        };
+        let state = state_with(cfg);
+        set_mock_ssid(&state, "TestNet");
+        pass(&state, None);
+        assert!(
+            !state
+                .plat
+                .calls()
+                .iter()
+                .any(|c| matches!(c, Call::ApplyNetwork { .. })),
+            "多命中（Conflict）绝不能下发任何 Profile"
+        );
+        let eng = state.engine.lock().unwrap();
+        assert!(
+            matches!(eng.decision, Decision::Conflict { .. }),
+            "判定必须是 Conflict"
+        );
+    }
+
+    #[test]
+    fn engine_loop_applies_fallback_when_nothing_matches() {
+        let cfg = Config {
+            schema: SCHEMA,
+            profiles: vec![ssid_profile("home", "TestNet")],
+            fallback: Some(FallbackConfig {
+                enabled: true,
+                network: Some(NetworkConfig {
+                    mode: Mode::Manual,
+                    ip: Some("192.168.0.5".to_string()),
+                    netmask: Some("255.255.255.0".to_string()),
+                    gateway: Some("192.168.0.1".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let state = state_with(cfg);
+        set_mock_ssid(&state, "SomeUnknownNet");
+        pass(&state, None);
+        assert!(
+            state
+                .plat
+                .calls()
+                .iter()
+                .any(|c| matches!(c, Call::ApplyNetwork { .. })),
+            "零命中应走兜底并把兜底网络下发到 mock"
+        );
+    }
+}

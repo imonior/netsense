@@ -33,8 +33,12 @@ const READBACK_SETTLE: Duration = Duration::from_millis(800);
 /// 任一步失败都尝试回滚到快照状态，再返回 [`Stage3A::Failed`]。
 /// 调用方据此**不要**执行 3B。
 pub fn apply_3a<P: NetworkPlatform>(plat: &P, cfg: &NetworkConfig) -> Stage3A {
-    // 1. 快照当前网络状态（用于失败时回滚）
-    let before = plat.get_status();
+    // 1. 快照当前网络状态（含目标网卡与已存在路由，用于失败时按同一张网卡、连同旧路由回滚）
+    // 1. Snapshot current state (including target NIC and pre-existing routes) so a failed
+    //    apply can roll back on the same interface and restore the original routes.
+    let mut before = plat.get_status();
+    before.target = cfg.target;
+    before.routes = plat.get_routes();
     
     // 2. 下发网络配置
     if let Err(e) = plat.apply_network(cfg) {

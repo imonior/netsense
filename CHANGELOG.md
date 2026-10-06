@@ -4,6 +4,54 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-10-07
+
+### Added
+
+- **ARM64 Linux builds.** CI now builds seven targets (was six): the x64 DEB is joined by a native
+  `linux-arm64` DEB, built on an ARM runner rather than cross-compiled. Both keep a portable archive.
+- **A configuration schema migration framework.** `config.json` can be carried forward to a newer schema
+  instead of being rejected as unreadable, so an upgrade no longer turns a working automation file into a
+  load error.
+- **A branch can name the interface it applies to.** The configuration model gained `NetworkTarget`
+  (`Primary` / `Wifi` / `Ethernet`) per branch, and every platform layer honours it when applying — until
+  now the primary interface was the only thing a branch could ever address.
+- **More health-probe modes.** A health check can probe over **TCP** and **DNS**, not only ICMP and HTTP, so
+  a network that blocks echo requests can still be monitored through the service it actually exists for.
+- **IPv6 settings are validated semantically.** An IPv6 configuration that cannot be applied is reported as
+  a configuration problem with the field named, instead of failing later at apply time.
+- **Conflicting static routes are detected.** Two routes that share a destination but name different
+  gateways are reported as a conflict rather than applied in the order they happen to be listed.
+- **The engine now has an end-to-end integration test.** A test-only `engine-mock` feature swaps the
+  compile-time platform implementation for a recording mock, so one pass of the real engine loop —
+  snapshot, decision, 3A apply, fallback — runs in CI without touching a network interface.
+
+### Fixed
+
+- **A failed apply rolls back instead of half-applying.** Applying a branch is transactional: the previous
+  state is snapshotted first, and a failure at apply, at route setup, or at read-back verification restores
+  it — including the routes already present on that interface, which are not ours to remove. Recovery used
+  to be a blanket fall back to automatic configuration, which dropped a working static address and its DNS
+  servers and could strip routes belonging to something else.
+- **Health fallback has a cooldown.** A network that keeps failing its probe no longer re-triggers the
+  fallback on every single round.
+- **Persistent actions on an ELSE branch are rejected, not warned.** An ELSE branch is what runs when a
+  Profile does *not* match, so a persistent action there would start a worker with no Profile to belong to;
+  the configuration is now refused with a clear error.
+- **Repository hygiene.** The clippy `-D warnings` blockers that were failing CI are cleared, and stray
+  `.backup` files left behind by an earlier refactor are removed.
+
+### Changed
+
+- **Configuration is saved durably.** `config.json` and `settings.json` are written to a temporary file,
+  flushed with `fsync` and then renamed into place, so a crash or power loss can no longer leave a
+  half-written file. Before each overwrite the current file is rotated into a timestamped backup and the
+  five most recent are kept.
+- **`ARCHITECTURE.md` is now the single source of truth** for the architecture — module boundaries, the
+  engine state machine, the 3A transaction and the platform abstraction layer. `DEVELOPMENT.md` covers
+  building, running and testing, and the READMEs describe the product; stale statements claiming rollback
+  was not implemented were corrected.
+
 ## [1.0.7] - 2026-10-04
 
 ### Added

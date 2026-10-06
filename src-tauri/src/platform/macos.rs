@@ -37,7 +37,7 @@ use super::{
     TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
-use crate::config::model::NetworkTarget;
+use crate::config::model::{NetworkTarget, RouteConfig};
 use crate::i18n;
 use objc2::rc::Retained;
 use objc2::{class, msg_send};
@@ -1430,6 +1430,65 @@ fn route_tables() -> RouteTables {
     rt
 }
 
+/// 解析 `netstat -rn -f inet` 输出，提取「目的网段 → 下一跳」静态路由（供 3A 回滚恢复用）。
+///
+/// 只保留有下一跳 IPv4 地址的路由；链路本地（169.254.*）、多播（224.*）、广播
+/// （255.255.255.255）这类系统自管、没有有意义下一跳的段跳过 —— 它们本就由内核维护，
+/// 回滚时重加没有意义也会失败。
+/// Parse `netstat -rn -f inet` into (destination -> gateway) static routes for 3A rollback.
+/// Only routes with an IPv4 next-hop are kept; kernel-managed link-local / multicast / broadcast
+/// segments are skipped because re-adding them is meaningless and would fail.
+pub(crate) fn parse_route_table_routes(out: &str) -> Vec<RouteConfig> {
+    let mut routes = Vec::new();
+    for line in out.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.len() < 2 {
+            continue;
+        }
+        // 跳过表头行（Routing tables / Internet: / Destination / Gateway …）。
+        let head = t[0];
+        if head == "Routing"
+            || head == "Internet:"
+            || head == "Internet"
+            || head == "Destination"
+            || head == "Network"
+            || head == "Address"
+        {
+            continue;
+        }
+        // 跳过链路本地 / 多播 / 广播：系统自管，重加无意义。
+        if head.starts_with("169.254")
+            || head.starts_with("224.")
+            || head.starts_with("255.255.255.255")
+            || head.starts_with("fe80::")
+        {
+            continue;
+        }
+        // `link#N` 是点到点隧道的伪下一跳，不是真实网关；这类行不是路由前缀。
+        if head.contains("link#") {
+            continue;
+        }
+        let dest = if head == "default" {
+            "0.0.0.0/0".to_string()
+        } else {
+            head.to_string()
+        };
+        // 网关取带点的 IPv4 下一跳；没有（on-link）则留空，回滚时不会被重加。
+        let gateway = if t.len() >= 2 && t[1].contains('.') && !t[1].starts_with("link#") {
+            Some(t[1].to_string())
+        } else {
+            None
+        };
+        routes.push(RouteConfig {
+            dest,
+            gateway,
+            metric: 0,
+            delete: false,
+        });
+    }
+    routes
+}
+
 /// 解析 `netstat -rn -f inet`。default 行形如
 /// ```text
 /// default            192.168.1.1        UGScg                  en0
@@ -2268,6 +2327,14 @@ impl NetworkPlatform for MacPlatform {
         exec_ops(&[PrivOp::RouteDelete {
             dest: dest.to_string(),
         }])
+    }
+
+    fn get_routes(&self) -> Vec<RouteConfig> {
+        parse_route_table_routes(&run("netstat", &["-rn", "-f", "inet"]).unwrap_or_default())
+    }
+
+    fn restore_from_snapshot(&self, snap: &InterfaceStatus) -> Result<(), String> {
+        crate::platform::restore_snapshot_impl(self, snap)
     }
 
     fn launch_app(&self, app: &str, args: &[String]) -> Result<(), String> {
@@ -3452,5 +3519,29 @@ mod tests {
         assert_eq!(names, vec!["Alpha", "Alpha", "beta", "zeta"]);
         assert_eq!(out[0].path, "/Applications/Alpha.app");
         assert_eq!(out[1].path, "/System/Applications/Alpha.app");
+    }
+
+    #[test]
+    fn parse_route_table_routes_extracts_static_routes() {
+        let out = "\
+Routing tables
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.168.1.1        UGScg                 en0
+127.0.0.1          127.0.0.1          UH                    lo0
+10.0.0.0/8         192.168.1.1        UGSc                  en0
+169.254.0.0/16     link#4             UCS                   en0
+224.0.0/4          link#4             UmCS                  en0";
+        let routes = parse_route_table_routes(out);
+        assert!(
+            routes.iter().any(|r| r.dest == "0.0.0.0/0" && r.gateway.as_deref() == Some("192.168.1.1")),
+            "default 路由应被捕获，网关为 192.168.1.1"
+        );
+        assert!(
+            routes.iter().any(|r| r.dest == "10.0.0.0/8" && r.gateway.as_deref() == Some("192.168.1.1")),
+            "第三方静态路由应被捕获"
+        );
+        assert!(!routes.iter().any(|r| r.dest.starts_with("169.254")), "链路本地应跳过");
+        assert!(!routes.iter().any(|r| r.dest.starts_with("224.")), "多播应跳过");
     }
 }

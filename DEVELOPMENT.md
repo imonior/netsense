@@ -107,6 +107,7 @@ netsense/
 │       │   ├── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec（原生失败时的兜底实现）
 │       │   ├── linux_netlink.rs # Linux 读路径原生实现：rtnetlink 替 `ip link` / `ip neigh`（`ip` 兜底）
 │       │   ├── linux_nm.rs    # Linux NM 写/读路径原生实现：zbus 直连 NetworkManager D-Bus 替 `nmcli`（`nmcli` 兜底）
+│       │   ├── mock.rs        # 跨平台测试替身：实现 NetworkPlatform trait 但不碰任何系统命令（CI / mock_tests 用）
 │       ├── update.rs          # 在线升级：check_update / run_update（下载 + 校验 + 安装）
 │       ├── win_dialog.rs      # Windows 原生对话框桥
 │       ├── log.rs             # daily-rotating log (keep 7 days)
@@ -485,8 +486,13 @@ Key modelling points, each of which is easy to get wrong:
   it notifies and leaves the config alone.
 - Probe modes: `icmp` / `http` / `both`. Under `both` a target is dead only when **both** probes fail
   (many networks block ICMP but pass HTTP; this also keeps captive portals from reading as healthy).
-- Rollback (restore the previous working config instead of the blanket DHCP fallback) is not implemented;
-  see §14.
+- **Rollback is implemented** (since v1.0.7): `apply_3a` snapshots the pre-change `InterfaceStatus`
+  — IP/netmask/gateway/DNS, the `NetworkTarget`, and the routes already present on the NIC
+  (`get_routes`) — before applying, and on any apply/verify failure calls
+  `NetworkPlatform::restore_from_snapshot(&before)`. That re-applies the prior static config on the
+  same `target` and re-adds the routes that existed before the profile ran, so rollback never deletes a
+  route owned by the OS or another app. When the snapshot has no static IP it degrades to DHCP (same
+  path as the health fallback). A verify-after-rollback step is still a future hardening (see §14).
 
 ---
 
@@ -902,7 +908,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **531 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **542 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1396,7 +1402,6 @@ and in-app upgrade.
 
 | Item | Content |
 |------|---------|
-| 3A **rollback** | restore the previous working configuration instead of the blanket DHCP fallback (§7) |
 | More condition kinds | IPv4 / gateway / connectivity / VPN state beyond what `conditions/` matches today |
 | Stronger privilege isolation | if the passwordless sudoers / UAC channel is not enough: a **signed** helper (SMJobBless-style), see §9.2 — Windows already has the plain unsigned elevated helper (§9.6 rule 3), macOS / Linux are the open half |
 | Code signing / notarization | unsigned builds cost every user an accept-the-warning step on each OS |
