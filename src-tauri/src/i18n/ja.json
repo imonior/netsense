@@ -396,6 +396,7 @@
   "cfg.net_bad_v6gateway": "{what}: 有効な IPv6 ゲートウェイではありません：{gateway}",
   "cfg.net_route_no_dest": "{what}: dest が空のルートがあります",
   "cfg.net_route_no_gw": "{what}: ルート {dest} には gateway が必要です（削除するルートだけ省略できます）",
+  "cfg.net_route_conflict": "{what}: ルートの宛先 {dest} が異なる gateway で2回指定されています（{gw1} と {gw2}）",
   "pal.spawn_failed": "{program} を起動できません: {error}",
   "pal.wait_privileged_failed": "特権ヘルパーの終了を待てません: {error}",
   "pal.cmd_failed": "{program} は終了コード {code} で終了しました",

@@ -396,6 +396,7 @@
   "cfg.net_bad_v6gateway": "{what}: 不是合法的 IPv6 网关：{gateway}",
   "cfg.net_route_no_dest": "{what}: routes 里有空的 dest",
   "cfg.net_route_no_gw": "{what}: 路由 {dest} 需要 gateway（删除路由才允许省略）",
+  "cfg.net_route_conflict": "{what}: 路由目的地 {dest} 出现了两次但 gateway 不同（{gw1} 与 {gw2}）",
   "pal.spawn_failed": "无法启动 {program}: {error}",
   "pal.wait_privileged_failed": "无法等待提权助手退出: {error}",
   "pal.cmd_failed": "{program} 退出码 {code}",

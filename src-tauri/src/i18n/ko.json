@@ -396,6 +396,7 @@
   "cfg.net_bad_v6gateway": "{what}: 유효한 IPv6 게이트웨이가 아닙니다: {gateway}",
   "cfg.net_route_no_dest": "{what}: dest가 비어 있는 라우트가 있습니다",
   "cfg.net_route_no_gw": "{what}: 라우트 {dest}에는 gateway가 필요합니다 (삭제하는 라우트만 생략 가능)",
+  "cfg.net_route_conflict": "{what}: 라우트 목적지 {dest}가 서로 다른 gateway로 두 번 지정되었습니다 ({gw1} vs {gw2})",
   "pal.spawn_failed": "{program}을(를) 시작할 수 없습니다: {error}",
   "pal.wait_privileged_failed": "권한 승격 도우미 종료를 기다릴 수 없습니다: {error}",
   "pal.cmd_failed": "{program}이(가) 종료 코드 {code}(으)로 종료되었습니다",

@@ -4,6 +4,7 @@
 
 pub mod model;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::i18n;
@@ -467,6 +468,10 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
             return Err(i18n::tf("cfg.net_bad_v6gateway", &[("what", what), ("gateway", gw)]));
         }
     }
+    // 冲突检测：同一 dest 出现两条 add 路由、但 gateway 不同，是「同一目的地两个下一跳」，
+    // 平台层的选择序各不相同（先加的那条被后加的覆盖，或反过来）。与其让用户赌，
+    // 不如在落盘前拦下 —— 他们此刻改一行就行，跑起来之后排查的是「为什么路由没生效」。
+    let mut seen_routes: HashMap<String, String> = HashMap::new();
     for r in &n.routes {
         if r.dest.trim().is_empty() {
             return Err(i18n::tf("cfg.net_route_no_dest", &what1));
@@ -476,6 +481,21 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
                 ("what", what),
                 ("dest", &r.dest),
             ]));
+        }
+        if !r.delete {
+            let gw = r.gateway.as_deref().unwrap_or("").to_string();
+            if let Some(prev) = seen_routes.get(r.dest.as_str()) {
+                if prev != &gw {
+                    return Err(i18n::tf("cfg.net_route_conflict", &[
+                        ("what", what),
+                        ("dest", &r.dest),
+                        ("gw1", prev),
+                        ("gw2", &gw),
+                    ]));
+                }
+            } else {
+                seen_routes.insert(r.dest.clone(), gw);
+            }
         }
     }
     if let Some(h) = n.verify.as_ref().and_then(|v| v.health.as_ref()) {
@@ -683,6 +703,28 @@ mod tests {
           "then":{"network":{"mode":"dhcp","routes":[{"dest":"10.0.0.0/8"}]}}}]}"#;
         let cfg = Config::from_json(bad).unwrap();
         assert!(cfg.validate().is_err(), "加路由必须有 gateway");
+    }
+
+    /// 同一 dest 配了两条 add 路由、但 gateway 不同，是「一个目的地两个下一跳」。
+    /// 平台层谁覆盖谁不确定，与其让用户赌，不如落盘前拦下；相同 gateway 的重复则不拦（幂等）。
+    #[test]
+    fn conflicting_routes_share_a_dest_with_different_gateways() {
+        dicts_ready();
+        let conflict = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
+          "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
+          "then":{"network":{"mode":"dhcp","routes":[
+            {"dest":"10.0.0.0/8","gateway":"192.168.1.1"},
+            {"dest":"10.0.0.0/8","gateway":"192.168.1.2"}]}}}]}"#;
+        let cfg = Config::from_json(conflict).unwrap();
+        let err = cfg.validate().expect_err("同 dest 不同 gateway 必须被拒绝");
+        assert!(err.contains("10.0.0.0/8"), "报错要点名冲突的目的地: {}", err);
+
+        // 相同 dest + 相同 gateway 是幂等重复，放行。
+        let dup = conflict.replace("192.168.1.2", "192.168.1.1");
+        Config::from_json(&dup)
+            .unwrap()
+            .validate()
+            .expect("同 dest 同 gateway 只是重复，不该被拦");
     }
 
     /// IPv6 三个字段（ipv6 / v6prefix / v6gateway）都要过 `Ipv6Addr` / 0~128 的语义校验：

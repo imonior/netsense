@@ -396,6 +396,7 @@
   "cfg.net_bad_v6gateway": "{what}: not a valid IPv6 gateway: {gateway}",
   "cfg.net_route_no_dest": "{what}: a route has an empty dest",
   "cfg.net_route_no_gw": "{what}: route {dest} needs a gateway (only a deleted route may omit it)",
+  "cfg.net_route_conflict": "{what}: route dest {dest} appears twice with different gateways ({gw1} vs {gw2})",
   "pal.spawn_failed": "cannot start {program}: {error}",
   "pal.wait_privileged_failed": "cannot wait for the privileged helper: {error}",
   "pal.cmd_failed": "{program} exited with code {code}",
