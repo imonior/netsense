@@ -443,6 +443,30 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
     if n.v6mode == Some(V6Mode::Manual) && n.ipv6.as_deref().unwrap_or("").trim().is_empty() {
         return Err(i18n::tf("cfg.net_manual_v6", &what1));
     }
+    // IPv6 强校验：仅「manual 缺地址」不足以拦截「地址/前缀/网关写成了不是 IPv6 的东西」。
+    // 平台层（nmcli / networksetup / netsh）拿到非法值时的表现是各自为政的报错或静默忽略，
+    // 而下发前在这里用 Ipv6Addr 语义拦下，报错才能指向配置文件里确切的那一行。
+    if let Some(ip) = n.ipv6.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !is_ipv6(ip) {
+            return Err(i18n::tf("cfg.net_bad_ipv6", &[("what", what), ("ip", ip)]));
+        }
+    }
+    if let Some(prefix) = n.v6prefix.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match prefix.parse::<u32>() {
+            Ok(p) if p <= 128 => {}
+            _ => {
+                return Err(i18n::tf("cfg.net_bad_v6prefix", &[
+                    ("what", what),
+                    ("prefix", prefix),
+                ]));
+            }
+        }
+    }
+    if let Some(gw) = n.v6gateway.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !is_ipv6(gw) {
+            return Err(i18n::tf("cfg.net_bad_v6gateway", &[("what", what), ("gateway", gw)]));
+        }
+    }
     for r in &n.routes {
         if r.dest.trim().is_empty() {
             return Err(i18n::tf("cfg.net_route_no_dest", &what1));
@@ -463,6 +487,11 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
 fn is_ipv4(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
+}
+
+/// 用标准库的 [`std::net::Ipv6Addr`] 做语义校验：`2001:db8::1` 合法、`not-an-ip` 非法。
+fn is_ipv6(s: &str) -> bool {
+    s.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
 /// `aa:bb:cc:dd:ee:ff` / `aa-bb-cc-dd-ee-ff`（大小写不限）。
@@ -654,6 +683,55 @@ mod tests {
           "then":{"network":{"mode":"dhcp","routes":[{"dest":"10.0.0.0/8"}]}}}]}"#;
         let cfg = Config::from_json(bad).unwrap();
         assert!(cfg.validate().is_err(), "加路由必须有 gateway");
+    }
+
+    /// IPv6 三个字段（ipv6 / v6prefix / v6gateway）都要过 `Ipv6Addr` / 0~128 的语义校验：
+    /// 平台层拿到非法值时的表现各不相同，下发前在这里拦下，报错才能指向确切那一行。
+    #[test]
+    fn ipv6_fields_are_validated_semantically() {
+        dicts_ready();
+        let v6_net = |fields: &str| {
+            format!(
+                r#"{{"schema":1,"profiles":[{{"id":"a","name":"A",
+                  "rules":[{{"id":"r1","conditions":[{{"id":"c1","type":"wifi_ssid","value":"X"}}]}}],
+                  "then":{{"network":{{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
+                    "gateway":"10.0.0.254","v6mode":"manual","ipv6":"2001:db8::1",
+                    "v6prefix":"64","v6gateway":"2001:db8::1"{}}}}}}}]}}"#,
+                fields
+            )
+        };
+
+        // 反面：合法的 IPv6 配置必须放行。
+        Config::from_json(&v6_net(""))
+            .unwrap()
+            .validate()
+            .expect("合法 IPv6 配置必须通过校验");
+
+        // 反面：坏地址。
+
+        let bad_ip = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
+          "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
+          "then":{"network":{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
+            "gateway":"10.0.0.254","v6mode":"manual","ipv6":"not-an-ip","v6prefix":"64"}}}]}"#;
+        let err = Config::from_json(bad_ip).unwrap().validate().expect_err("坏 IPv6 必须被拒绝");
+        assert!(err.contains("not-an-ip"), "报错要点名坏地址: {}", err);
+
+        // 反面：前缀超出 0~128。
+        let bad_prefix = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
+          "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
+          "then":{"network":{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
+            "gateway":"10.0.0.254","v6mode":"manual","ipv6":"2001:db8::1","v6prefix":"200"}}}]}"#;
+        let err = Config::from_json(bad_prefix).unwrap().validate().expect_err("超范围前缀必须被拒绝");
+        assert!(err.contains("v6prefix"), "报错要指向 v6prefix: {}", err);
+
+        // 反面：坏网关地址。
+        let bad_gw = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
+          "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
+          "then":{"network":{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
+            "gateway":"10.0.0.254","v6mode":"manual","ipv6":"2001:db8::1","v6prefix":"64",
+            "v6gateway":"999.999.999.999"}}}]}"#;
+        let err = Config::from_json(bad_gw).unwrap().validate().expect_err("坏网关必须被拒绝");
+        assert!(err.contains("999.999.999.999"), "报错要点名坏网关: {}", err);
     }
 
     /// 一条动作载荷配错了，跑起来的表现是「什么也没发生」，比加载失败更难排查 ——
