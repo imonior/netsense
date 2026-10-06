@@ -40,7 +40,7 @@ impl HealthMonitor {
         let timeout = cfg.timeout;
         let interval = cfg.interval.max(1);
         let retries = cfg.retries.max(1);
-        let cooldown = cfg.cooldown.max(0);
+        let cooldown = cfg.cooldown;
         let do_fallback = cfg.fallback.enabled;
 
         std::thread::spawn(move || {

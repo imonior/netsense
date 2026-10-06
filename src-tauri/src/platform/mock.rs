@@ -15,7 +15,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// 一次平台调用的记录。
+///
+/// 字段/变体在测试中按需断言；未被某次测试读取的字段属正常情况，
+/// 用 `allow(dead_code)` 避免 clippy 在 `-D warnings` 下报错。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Call {
     GetStatus,
     ApplyNetwork { cfg: NetworkConfig },
@@ -74,6 +78,8 @@ pub struct MockPlatform {
     inner: Arc<Mutex<MockInner>>,
 }
 
+// 注入用的 setter 是测试夹具 API，部分在当前测试集中未被调用，属正常情况。
+#[allow(dead_code)]
 impl MockPlatform {
     pub fn new() -> Self {
         Self {
@@ -190,7 +196,7 @@ impl NetworkPlatform for MockPlatform {
             target: target.clone(),
             timeout_ms,
         });
-        self.inner.lock().unwrap().probe_result.clone()
+        self.inner.lock().unwrap().probe_result
     }
 
     fn tunnel_is_up(&self, target: &TunnelTarget) -> bool {

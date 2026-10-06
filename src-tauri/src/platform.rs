@@ -498,16 +498,11 @@ pub struct ProbeTarget {
     pub dns_target: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Health {
+    #[default]
     Ok,
     Fail,
-}
-
-impl Default for Health {
-    fn default() -> Self {
-        Health::Ok
-    }
 }
 
 /// SSID 监视句柄：`stop()` 后后台线程会在下一轮退出。
@@ -1873,7 +1868,7 @@ mod mock_tests {
     fn mock_platform_records_calls() {
         let m = MockPlatform::new();
         m.get_status();
-        m.set_dhcp();
+        m.set_dhcp().unwrap();
         let calls = m.calls();
         assert_eq!(calls.len(), 2);
         assert!(matches!(calls[0], Call::GetStatus));
@@ -1925,7 +1920,7 @@ mod mock_tests {
     fn mock_platform_clear_calls() {
         let m = MockPlatform::new();
         m.get_status();
-        m.set_dhcp();
+        m.set_dhcp().unwrap();
         assert_eq!(m.calls().len(), 2);
         m.clear_calls();
         assert!(m.calls().is_empty());
