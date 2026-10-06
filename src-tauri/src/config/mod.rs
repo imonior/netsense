@@ -39,24 +39,50 @@ impl Config {
         Self::from_json(&data)
     }
 
+    /// 从 JSON 字符串读配置（含 schema 迁移）。
+    ///
+    /// 调用方（`load` / 编辑器 / 测试）都走这一条路：迁移与校验分开，
+    /// 迁移只改结构、校验才判语义。
     pub fn from_json(data: &str) -> Result<Config, String> {
         // 句子的措辞随界面语言走，句中的 `schema` / `config.example.json` 这类**字段名与
         // 文件名原样保留**：用户排查时对着的是配置文件本身，被翻译过的字段名反而找不到。
         let raw: serde_json::Value = serde_json::from_str(data).map_err(|e| {
-            i18n::tf("cfg.json_parse", &[("error", &e.to_string())])
+            i18n::tf("cfg.bad_structure", &[("error", &e.to_string())])
         })?;
         let Some(found) = raw.get("schema").and_then(|v| v.as_u64()) else {
             return Err(i18n::tf("cfg.schema_missing", &[("schema", &SCHEMA.to_string())]));
         };
-        if found as u32 != SCHEMA {
-            return Err(i18n::tf("cfg.schema_unknown", &[
+        let found = found as u32;
+        if found > SCHEMA {
+            return Err(i18n::tf("cfg.schema_future", &[
                 ("found", &found.to_string()),
                 ("schema", &SCHEMA.to_string()),
             ]));
         }
-        serde_json::from_value(raw).map_err(|e| {
+        // 迁移：把旧 schema 升到当前版本。
+        let migrated = Self::migrate(raw, found)?;
+        serde_json::from_value(migrated).map_err(|e| {
             i18n::tf("cfg.bad_structure", &[("error", &e.to_string())])
         })
+    }
+
+    /// 把一份旧 schema 的配置升到当前版本。
+    ///
+    /// 每一步迁移只做「结构」上的事 —— 字段改名、加默认值、删废弃字段。
+    /// 语义校验（`validate()`）在迁移之后跑，所以迁移本身不必判断「值合不合理」。
+    fn migrate(raw: serde_json::Value, from: u32) -> Result<serde_json::Value, String> {
+        // schema 0 → 1：第一版。原配置里没有 schema 字段时，`from_json` 已经拦下，
+        // 所以这里不会见到 0。
+        if from == 0 {
+            return Err(i18n::tf("cfg.schema_unknown", &[
+                ("found", &from.to_string()),
+                ("schema", &SCHEMA.to_string()),
+            ]));
+        }
+        // 未来版本迁移按顺序叠加：
+        // if from < 2 { raw = migrate_1_to_2(raw)?; }
+        // if from < 3 { raw = migrate_2_to_3(raw)?; }
+        Ok(raw)
     }
 
     /// 写回磁盘（pretty JSON，并带上 schema）。

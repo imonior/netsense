@@ -356,6 +356,7 @@
   "cfg.json_parse": "JSON 解析失败: {error}",
   "cfg.schema_missing": "config.json 没有顶层的 \"schema\" 字段（本版本需要 \"schema\": {schema}）。不会替你猜：请照着 config.example.json 补上这个字段。",
   "cfg.schema_unknown": "config.json 声明的是 schema={found}，本版本不认识它（需要 schema={schema}）。这里故意不做自动迁移：别的 schema 对「同时命中多个」的读法可能和这一版相反（判成冲突、什么都不下发），把猜出来的语义用到网卡上比停下来更危险。请对照 config.example.json 检查这份文件。",
+  "cfg.schema_future": "config.json 声明的是 schema={found}，来自未来版本（本版本最高支持 schema={schema}）—— 请升级 NetSense 以打开这份配置",
   "cfg.bad_structure": "配置结构不合法: {error}",
   "cfg.mkdir_failed": "无法创建目录 {dir}: {error}",
   "cfg.write_failed": "无法写入 {path}: {error}",

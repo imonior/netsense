@@ -356,6 +356,7 @@
   "cfg.json_parse": "JSON 解析エラー: {error}",
   "cfg.schema_missing": "config.json に最上位の \"schema\" フィールドがありません（このバージョンは \"schema\": {schema} を必要とします）。推測はしません：config.example.json を見てフィールドを追加してください。",
   "cfg.schema_unknown": "config.json は schema={found} を宣言していますが、このバージョンは理解できません（schema={schema} が必要）。自動移行を敢えて拒否しています：他の schema は「同時に複数一致」の読み取りがこの版と逆になり得ます（衝突と判定し、何も適用しない）。推測した意味論をネットワークインターフェースに適用するのは、停止するより危険です。config.example.json と照合してください。",
+  "cfg.schema_future": "config.json は schema={found} を宣言していますが、将来のバージョンです（このプログラムが対応しているのは schema={schema} まで）— NetSense をアップグレードしてこの設定を開いてください",
   "cfg.bad_structure": "設定の構造が不正です: {error}",
   "cfg.mkdir_failed": "ディレクトリを作成できません {dir}: {error}",
   "cfg.write_failed": "書き込めません {path}: {error}",

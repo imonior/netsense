@@ -356,6 +356,7 @@
   "cfg.json_parse": "JSON 구문 분석 오류: {error}",
   "cfg.schema_missing": "config.json에 최상위 \"schema\" 필드가 없습니다 (이 버전은 \"schema\": {schema}가 필요합니다). 추측하지 않습니다: config.example.json을 참고해 필드를 추가하세요.",
   "cfg.schema_unknown": "config.json이 schema={found}를 선언했지만 이 버전은 이해하지 않습니다 (schema={schema} 필요). 자동 마이그레이션은 의도적으로 거부합니다: 다른 schema는 '여러 개가 동시에 일치'하는 읽기가 이 버전과 반대일 수 있습니다 (충돌로 판정, 아무것도 적용하지 않음). 추측한 의미를 네트워크 인터페이스에 적용하는 것은 중단하는 것보다 위험합니다. config.example.json과 비교해 확인하세요.",
+  "cfg.schema_future": "config.json이 schema={found}를 선언했지만 미래 버전입니다 (이 프로그램이 지원하는 것은 schema={schema}까지) — NetSense를 업그레이드해 이 설정을 열어주세요",
   "cfg.bad_structure": "설정 구조가 올바르지 않습니다: {error}",
   "cfg.mkdir_failed": "디렉터리를 만들 수 없습니다 {dir}: {error}",
   "cfg.write_failed": "쓸 수 없습니다 {path}: {error}",

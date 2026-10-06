@@ -356,6 +356,7 @@
   "cfg.json_parse": "JSON parse error: {error}",
   "cfg.schema_missing": "config.json has no top-level \"schema\" field (this version needs \"schema\": {schema}). It is not guessed: add the field by following config.example.json.",
   "cfg.schema_unknown": "config.json declares schema={found}, which this version does not understand (it needs schema={schema}). Auto-migrating is refused on purpose: other schemas may not read multiple simultaneous matches the way this one does (conflict, apply nothing), and applying a guessed semantics to a network interface is worse than stopping. Check your file against config.example.json.",
+  "cfg.schema_future": "config.json declares schema={found}, which is from a future version (this program speaks up to {schema}) — upgrade NetSense to open this config",
   "cfg.bad_structure": "Invalid config structure: {error}",
   "cfg.mkdir_failed": "cannot create directory {dir}: {error}",
   "cfg.write_failed": "cannot write {path}: {error}",
