@@ -37,6 +37,7 @@ use super::{
     TunnelTarget, WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
+use crate::config::model::NetworkTarget;
 use crate::i18n;
 use objc2::rc::Retained;
 use objc2::{class, msg_send};
@@ -889,6 +890,39 @@ fn probe_dns(target: Option<&str>, timeout_ms: u64) -> bool {
     };
     let secs = timeout_secs(timeout_ms);
     run("timeout", &[&secs, "nslookup", t]).is_ok()
+}
+
+/// 取默认出口对应的网络服务。
+fn primary_service() -> Result<String, String> {
+    let hw = hardware_ports();
+    // `route get default` 的 stdout 里有一行 `      interface: en0`，
+    // 拿它去硬件端口表里反查服务名。
+    let out = run("route", &["-n", "get", "default"]).map_err(|e| {
+        i18n::tf("pal.primary_iface_failed", &[("error", &e)])
+    })?;
+    let iface = out
+        .lines()
+        .find(|l| l.contains("interface:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("en0");
+    service_for_dev(iface, &hw).ok_or_else(|| {
+        i18n::tf("pal.no_service_for_iface", &[("dev", iface)])
+    })
+}
+
+/// 取以太网对应的网络服务（可能为 None）。
+fn ethernet_service() -> Option<String> {
+    let out = run("networksetup", &["-listallnetworkservices"]).ok()?;
+    for line in out.lines() {
+        let l = line.trim_start_matches('*').trim();
+        if l.is_empty() {
+            continue;
+        }
+        if l.contains("Ethernet") || l.contains("LAN") {
+            return Some(l.to_string());
+        }
+    }
+    None
 }
 
 /// 无线接口名。**绝不能硬编码 en0**：带以太网的机型（iMac / Mac mini / Mac Studio）上
@@ -1973,7 +2007,11 @@ impl NetworkPlatform for MacPlatform {
     }
 
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {
-        let svc = wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?;
+        let svc = match p.target.unwrap_or_default() {
+            NetworkTarget::Primary => primary_service()?,
+            NetworkTarget::Wifi => wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?,
+            NetworkTarget::Ethernet => ethernet_service().ok_or_else(|| i18n::t("pal.no_ethernet_service"))?,
+        };
         exec_ops(&apply_ops(&svc, p)?)
     }
 

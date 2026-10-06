@@ -631,6 +631,7 @@ pub trait NetworkPlatform: Send + Sync {
         if let (Some(ip), Some(netmask), Some(gw)) = (&snap.ipv4, &snap.netmask, &snap.gateway) {
             let cfg = NetworkConfig {
                 mode: crate::config::Mode::Manual,
+                target: None,
                 ip: Some(ip.clone()),
                 netmask: Some(netmask.clone()),
                 gateway: Some(gw.clone()),

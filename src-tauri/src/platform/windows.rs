@@ -25,6 +25,7 @@ use super::{
     WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
+use crate::config::model::NetworkTarget;
 use crate::i18n;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -291,6 +292,29 @@ fn wifi_iface() -> Option<String> {
         .ok()?;
     let name = out.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
     Some(name.to_string())
+}
+
+/// 当前默认出口适配器名。
+fn primary_iface() -> Option<String> {
+    ps("Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1 | ForEach-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex).Name }")
+        .ok()?
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// 当前以太网适配器名（挑已连接的）。
+fn ethernet_iface() -> Option<String> {
+    let out = ps("$ErrorActionPreference='SilentlyContinue';\
+         $a = Get-NetAdapter -Physical | Where-Object { $_.MediaType -ne 'Native 802.11' -and $_.Status -eq 'Up' } | Select-Object -First 1;\
+         if (-not $a) { $a = Get-NetAdapter | Where-Object { $_.Name -match 'Ethernet|LAN' -and $_.Status -eq 'Up' } | Select-Object -First 1 };\
+         if ($a) { $a.Name }")
+        .ok()?;
+    out.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// 「profile 名 → 空中 SSID」这张表由 WLAN profile 文件自己给，拼在读状态与读网卡的脚本前面。
@@ -1376,7 +1400,11 @@ impl NetworkPlatform for WindowsPlatform {
     }
 
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {
-        let iface = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_adapter_hint"))?;
+        let iface = match p.target.unwrap_or_default() {
+            NetworkTarget::Primary => primary_iface().ok_or_else(|| i18n::t("pal.no_primary_iface"))?,
+            NetworkTarget::Wifi => wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_adapter_hint"))?,
+            NetworkTarget::Ethernet => ethernet_iface().ok_or_else(|| i18n::t("pal.no_ethernet_adapter"))?,
+        };
         exec_ops(&apply_ops(&iface, p)?)
     }
 

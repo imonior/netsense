@@ -210,6 +210,16 @@ pub struct Rule {
     pub conditions: Vec<Condition>,
 }
 
+/// 配置应用到哪张网卡。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkTarget {
+    #[default]
+    Primary,
+    Wifi,
+    Ethernet,
+}
+
 /// 一条条件的种类。第一版只有这四种，全部是「与当前网络的某个标识做字符串比较」。
 /// 新增种类只需在此加变体 + 在 `conditions::evaluator` 里加一个比较分支。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -272,6 +282,10 @@ pub struct Branch {
 pub struct NetworkConfig {
     #[serde(default)]
     pub mode: Mode,
+    /// 配置应用到哪张网卡。`primary` 表示「当前默认出口那张」；
+    /// `wifi` / `ethernet` 表示按类型挑一张。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<NetworkTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -16,6 +16,7 @@ use super::{
     WatcherHandle,
 };
 use crate::config::{Mode, NetworkConfig, V6Mode};
+use crate::config::model::NetworkTarget;
 use crate::i18n;
 use crate::platform::linux_nm::{self, DeviceIp};
 use std::sync::OnceLock;
@@ -368,6 +369,34 @@ fn wifi_iface() -> Option<String> {
     for line in out.lines() {
         let f = split_t(line);
         if f.len() >= 3 && f[1].trim() == "wifi" {
+            let dev = f[0].trim().to_string();
+            if f[2].trim() == "connected" {
+                return Some(dev);
+            }
+            if fallback.is_none() {
+                fallback = Some(dev);
+            }
+        }
+    }
+    fallback
+}
+
+/// 当前默认出口设备名。
+fn primary_iface() -> Option<String> {
+    let out = run("ip", &["-4", "route", "show", "default"]).ok()?;
+    out.lines()
+        .find(|l| l.starts_with("default"))
+        .and_then(|l| l.split_whitespace().nth(4))
+        .map(|s| s.to_string())
+}
+
+/// 当前以太网设备名（挑已连接的）。
+fn ethernet_iface() -> Option<String> {
+    let out = nmcli(&["-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"]).ok()?;
+    let mut fallback: Option<String> = None;
+    for line in out.lines() {
+        let f = split_t(line);
+        if f.len() >= 3 && f[1].trim() == "ethernet" {
             let dev = f[0].trim().to_string();
             if f[2].trim() == "connected" {
                 return Some(dev);
@@ -841,7 +870,11 @@ impl NetworkPlatform for LinuxPlatform {
     }
 
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {
-        let dev = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_device_hint"))?;
+        let dev = match p.target.unwrap_or_default() {
+            NetworkTarget::Primary => primary_iface().ok_or_else(|| i18n::t("pal.no_primary_iface"))?,
+            NetworkTarget::Wifi => wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_device_hint"))?,
+            NetworkTarget::Ethernet => ethernet_iface().ok_or_else(|| i18n::t("pal.no_ethernet_iface"))?,
+        };
         let conn = active_connection(&dev)
             .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", &dev)]))?;
 
