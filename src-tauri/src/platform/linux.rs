@@ -1034,10 +1034,28 @@ impl NetworkPlatform for LinuxPlatform {
                 Err(_) => false,
             }
         };
+        let tcp = || -> bool {
+            let t = match target.tcp_target.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => return false,
+            };
+            let secs = timeout_secs(timeout_ms);
+            run("timeout", &[&secs, "nc", "-z", "-w", "1", t]).is_ok()
+        };
+        let dns = || -> bool {
+            let t = match target.dns_target.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => return false,
+            };
+            let secs = timeout_secs(timeout_ms);
+            run("timeout", &[&secs, "nslookup", t]).is_ok()
+        };
         let dead = match target.mode {
             ProbeMode::Icmp => !icmp(),
             ProbeMode::Http => !http(),
-            ProbeMode::Both => !(icmp() || http()),
+            ProbeMode::Tcp => !tcp(),
+            ProbeMode::Dns => !dns(),
+            ProbeMode::Both => !(icmp() || http() || tcp() || dns()),
         };
         if dead {
             Health::Fail

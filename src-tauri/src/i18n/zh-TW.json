@@ -377,6 +377,8 @@
   "cfg.cond_not_mac": "profile「{name}」的條件「{id}」需要 MAC 形態的值（目前: {value}）",
   "cfg.health_icmp": "{what}: 健康度探測 mode=icmp 卻沒填 icmp_target",
   "cfg.health_http": "{what}: 健康度探測 mode=http 卻沒填 http_target",
+  "cfg.health_tcp": "{what}: 健康度探测 mode=tcp 卻沒填 tcp_target",
+  "cfg.health_dns": "{what}: 健康度探测 mode=dns 卻沒填 dns_target",
   "cfg.health_both": "{what}: 健康度探測 mode=both 至少要有一個探測目標",
   "cfg.health_interval": "{what}: 健康度探測 interval 必須大於 0",
   "cfg.health_retries": "{what}: 健康度探測 retries 必須大於 0（0 意味著永遠不會判定為失敗）",

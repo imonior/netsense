@@ -91,6 +91,8 @@ pub enum ProbeMode {
     Both,
     Icmp,
     Http,
+    Tcp,
+    Dns,
 }
 
 fn default_true() -> bool {
@@ -337,6 +339,10 @@ pub struct HealthConfig {
     pub http_target: Option<String>,
     #[serde(default, rename = "icmp_target", skip_serializing_if = "Option::is_none")]
     pub icmp_target: Option<String>,
+    #[serde(default, rename = "tcp_target", skip_serializing_if = "Option::is_none")]
+    pub tcp_target: Option<String>,
+    #[serde(default, rename = "dns_target", skip_serializing_if = "Option::is_none")]
+    pub dns_target: Option<String>,
     #[serde(default = "default_interval")]
     pub interval: u64,
     #[serde(default = "default_retries")]
@@ -358,6 +364,8 @@ impl Default for HealthConfig {
             mode: ProbeMode::Both,
             http_target: None,
             icmp_target: None,
+            tcp_target: None,
+            dns_target: None,
             interval: 30,
             retries: 3,
             timeout: 5,

@@ -494,6 +494,8 @@ pub struct ProbeTarget {
     pub mode: crate::config::ProbeMode,
     pub http_target: Option<String>,
     pub icmp_target: Option<String>,
+    pub tcp_target: Option<String>,
+    pub dns_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

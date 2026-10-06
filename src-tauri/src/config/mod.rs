@@ -268,7 +268,13 @@ fn validate_health(what: &str, h: &HealthConfig) -> Result<(), String> {
             ProbeMode::Http if !has(&h.http_target) => {
                 return Err(i18n::tf("cfg.health_http", &what1));
             }
-            ProbeMode::Both if !has(&h.icmp_target) && !has(&h.http_target) => {
+            ProbeMode::Tcp if !has(&h.tcp_target) => {
+                return Err(i18n::tf("cfg.health_tcp", &what1));
+            }
+            ProbeMode::Dns if !has(&h.dns_target) => {
+                return Err(i18n::tf("cfg.health_dns", &what1));
+            }
+            ProbeMode::Both if !has(&h.icmp_target) && !has(&h.http_target) && !has(&h.tcp_target) && !has(&h.dns_target) => {
                 return Err(i18n::tf("cfg.health_both", &what1));
             }
             _ => {}

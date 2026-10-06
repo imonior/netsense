@@ -377,6 +377,8 @@
   "cfg.cond_not_mac": "プロファイル「{name}」の条件「{id}」は MAC 形式の値が必要です（現在: {value}）",
   "cfg.health_icmp": "{what}: ヘルスチェックの mode=icmp に icmp_target が入力されていません",
   "cfg.health_http": "{what}: ヘルスチェックの mode=http に http_target が入力されていません",
+  "cfg.health_tcp": "{what}: ヘルスチェックの mode=tcp に tcp_target が入力されていません",
+  "cfg.health_dns": "{what}: ヘルスチェックの mode=dns に dns_target が入力されていません",
   "cfg.health_both": "{what}: ヘルスチェックの mode=both では少なくとも 1 つのプローブ先が必要です",
   "cfg.health_interval": "{what}: ヘルスチェックの interval は 0 より大きくなければなりません",
   "cfg.health_retries": "{what}: ヘルスチェックの retries は 0 より大きくなければなりません（0 だと失敗と判定されません）",

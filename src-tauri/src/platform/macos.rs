@@ -870,6 +870,27 @@ fn probe_http(target: Option<&str>, timeout_ms: u64) -> bool {
     }
 }
 
+/// TCP 端口探测：`host:port` 形式，用 `nc` 测试连通性。
+fn probe_tcp(target: Option<&str>, timeout_ms: u64) -> bool {
+    let t = match target {
+        Some(s) if !s.is_empty() => s,
+        _ => return false,
+    };
+    let secs = timeout_secs(timeout_ms);
+    // macOS 自带的 nc 不支持 -w 秒数，用 timeout 包一层。
+    run("timeout", &[&secs, "nc", "-z", "-w", "1", t]).is_ok()
+}
+
+/// DNS 解析探测：用 `nslookup` 解析一个域名，成功即返回 true。
+fn probe_dns(target: Option<&str>, timeout_ms: u64) -> bool {
+    let t = match target {
+        Some(s) if !s.is_empty() => s,
+        _ => return false,
+    };
+    let secs = timeout_secs(timeout_ms);
+    run("timeout", &[&secs, "nslookup", t]).is_ok()
+}
+
 /// 无线接口名。**绝不能硬编码 en0**：带以太网的机型（iMac / Mac mini / Mac Studio）上
 /// en0 是以太网、Wi-Fi 落在 en1，硬编码会让 SSID / IP / 网关全部取错接口。
 /// 设备名只解析一次并缓存。
@@ -2119,19 +2140,27 @@ impl NetworkPlatform for MacPlatform {
         use crate::config::ProbeMode;
         let mut icmp_ok = false;
         let mut http_ok = false;
+        let mut tcp_ok = false;
+        let mut dns_ok = false;
         match target.mode {
             ProbeMode::Icmp => icmp_ok = probe_icmp(target.icmp_target.as_deref(), timeout_ms),
             ProbeMode::Http => http_ok = probe_http(target.http_target.as_deref(), timeout_ms),
+            ProbeMode::Tcp => tcp_ok = probe_tcp(target.tcp_target.as_deref(), timeout_ms),
+            ProbeMode::Dns => dns_ok = probe_dns(target.dns_target.as_deref(), timeout_ms),
             ProbeMode::Both => {
                 icmp_ok = probe_icmp(target.icmp_target.as_deref(), timeout_ms);
                 http_ok = probe_http(target.http_target.as_deref(), timeout_ms);
+                tcp_ok = probe_tcp(target.tcp_target.as_deref(), timeout_ms);
+                dns_ok = probe_dns(target.dns_target.as_deref(), timeout_ms);
             }
         }
         let dead = match target.mode {
             ProbeMode::Icmp => !icmp_ok,
             ProbeMode::Http => !http_ok,
-            // both：两端同时失败才判死（避免 ICMP 被墙时误杀）
-            ProbeMode::Both => !(icmp_ok || http_ok),
+            ProbeMode::Tcp => !tcp_ok,
+            ProbeMode::Dns => !dns_ok,
+            // both：只要任意一种探测通过就认为网络是通的（避免某种协议被墙时误杀）
+            ProbeMode::Both => !(icmp_ok || http_ok || tcp_ok || dns_ok),
         };
         if dead {
             Health::Fail

@@ -377,6 +377,8 @@
   "cfg.cond_not_mac": "프로파일 '{name}'의 조건 '{id}'에는 MAC 형식 값이 필요합니다 (현재: {value})",
   "cfg.health_icmp": "{what}: 헬스 점검 mode=icmp에 icmp_target이 비어 있습니다",
   "cfg.health_http": "{what}: 헬스 점검 mode=http에 http_target이 비어 있습니다",
+  "cfg.health_tcp": "{what}: 헬스 점검 mode=tcp에 tcp_target이 비어 있습니다",
+  "cfg.health_dns": "{what}: 헬스 점검 mode=dns에 dns_target이 비어 있습니다",
   "cfg.health_both": "{what}: 헬스 점검 mode=both는 최소 하나의 점검 대상이 필요합니다",
   "cfg.health_interval": "{what}: 헬스 점검 interval은 0보다 커야 합니다",
   "cfg.health_retries": "{what}: 헬스 점검 retries는 0보다 커야 합니다 (0이면 절대 실패로 판정되지 않습니다)",

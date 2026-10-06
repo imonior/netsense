@@ -377,6 +377,8 @@
   "cfg.cond_not_mac": "condition '{id}' in profile '{name}' needs a MAC-shaped value (current: {value})",
   "cfg.health_icmp": "{what}: health probe mode=icmp has no icmp_target",
   "cfg.health_http": "{what}: health probe mode=http has no http_target",
+  "cfg.health_tcp": "{what}: health probe mode=tcp has no tcp_target",
+  "cfg.health_dns": "{what}: health probe mode=dns has no dns_target",
   "cfg.health_both": "{what}: health probe mode=both needs at least one probe target",
   "cfg.health_interval": "{what}: health probe interval must be greater than 0",
   "cfg.health_retries": "{what}: health probe retries must be greater than 0 (0 can never be judged a failure)",

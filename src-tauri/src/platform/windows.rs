@@ -1632,12 +1632,32 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
                 Err(_) => false,
             }
         };
+        // TCP 端口探测：用 curl 的 TCP 连接能力
+        let tcp = || -> bool {
+            let t = match target.tcp_target.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => return false,
+            };
+            let secs = timeout_secs(timeout_ms);
+            // curl --connect-only 只建 TCP 连接，不发请求
+            run("curl.exe", &["-sS", "-m", &secs, "--connect-only", t]).is_ok()
+        };
+        // DNS 解析探测：用 nslookup
+        let dns = || -> bool {
+            let t = match target.dns_target.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => return false,
+            };
+            run("nslookup", &[t]).is_ok()
+        };
 
         let dead = match target.mode {
             ProbeMode::Icmp => !icmp(),
             ProbeMode::Http => !http(),
-            // both：两端同时失败才判死
-            ProbeMode::Both => !(icmp() || http()),
+            ProbeMode::Tcp => !tcp(),
+            ProbeMode::Dns => !dns(),
+            // both：只要任意一种探测通过就认为网络是通的
+            ProbeMode::Both => !(icmp() || http() || tcp() || dns()),
         };
         if dead {
             Health::Fail

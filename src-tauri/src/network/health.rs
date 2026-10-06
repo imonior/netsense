@@ -34,6 +34,8 @@ impl HealthMonitor {
             mode: cfg.mode.clone(),
             http_target: cfg.http_target.clone(),
             icmp_target: cfg.icmp_target.clone(),
+            tcp_target: cfg.tcp_target.clone(),
+            dns_target: cfg.dns_target.clone(),
         };
         let timeout = cfg.timeout;
         let interval = cfg.interval.max(1);
