@@ -105,6 +105,9 @@ fn default_retries() -> u32 {
 fn default_timeout() -> u64 {
     5
 }
+fn default_cooldown() -> u64 {
+    60
+}
 
 // —————————————————————————————— Profile ——————————————————————————————
 
@@ -340,6 +343,11 @@ pub struct HealthConfig {
     pub retries: u32,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// 回落后的冷却期（秒）。这段时间里不再探测、不再触发回落 ——
+    /// 网络刚被改回 DHCP 时，链路还在重新协商，立刻探测只会把抖动判成「又失败了」，
+    /// 于是反复触发回落 DHCP，把网卡当开关按。
+    #[serde(default = "default_cooldown")]
+    pub cooldown: u64,
 }
 
 impl Default for HealthConfig {
@@ -353,6 +361,7 @@ impl Default for HealthConfig {
             interval: 30,
             retries: 3,
             timeout: 5,
+            cooldown: 60,
         }
     }
 }

@@ -381,6 +381,7 @@
   "cfg.health_interval": "{what}: health probe interval must be greater than 0",
   "cfg.health_retries": "{what}: health probe retries must be greater than 0 (0 can never be judged a failure)",
   "cfg.health_timeout": "{what}: health probe timeout must be greater than 0",
+  "cfg.health_cooldown": "{what}: health probe cooldown must be non-negative",
   "cfg.action_no_id": "{what}: a {kind} action has no id",
   "cfg.action_dup_id": "{what}: duplicate action id: {id}",
   "cfg.action_no_field": "{what}: action '{id}' is {type} but {field} is empty",

@@ -381,6 +381,7 @@
   "cfg.health_interval": "{what}: 헬스 점검 interval은 0보다 커야 합니다",
   "cfg.health_retries": "{what}: 헬스 점검 retries는 0보다 커야 합니다 (0이면 절대 실패로 판정되지 않습니다)",
   "cfg.health_timeout": "{what}: 헬스 점검 timeout은 0보다 커야 합니다",
+  "cfg.health_cooldown": "{what}: 헬스 점검 cooldown은 음수가 될 수 없습니다",
   "cfg.action_no_id": "{what}: {kind} 동작에 id가 없습니다",
   "cfg.action_dup_id": "{what}: 동작 id 중복: {id}",
   "cfg.action_no_field": "{what}: 동작 '{id}'은(는) {type}인데 {field}이(가) 비어 있습니다",

@@ -381,6 +381,7 @@
   "cfg.health_interval": "{what}: 健康度探測 interval 必須大於 0",
   "cfg.health_retries": "{what}: 健康度探測 retries 必須大於 0（0 意味著永遠不會判定為失敗）",
   "cfg.health_timeout": "{what}: 健康度探測 timeout 必須大於 0",
+  "cfg.health_cooldown": "{what}: 健康度探測 cooldown 必須為非負數",
   "cfg.action_no_id": "{what}: {kind} 動作缺少 id",
   "cfg.action_dup_id": "{what}: 動作 id 重複: {id}",
   "cfg.action_no_field": "{what}: 動作「{id}」是 {type} 卻沒填 {field}",

@@ -38,6 +38,7 @@ impl HealthMonitor {
         let timeout = cfg.timeout;
         let interval = cfg.interval.max(1);
         let retries = cfg.retries.max(1);
+        let cooldown = cfg.cooldown.max(0);
         let do_fallback = cfg.fallback.enabled;
 
         std::thread::spawn(move || {
@@ -62,7 +63,21 @@ impl HealthMonitor {
                     if do_fallback {
                         on_fallback();
                     }
-                    return; // 处置完就收工，等下一次激活重新起监测
+                    // 冷却期：回落后等待一段时间再退出。
+                    // 网络刚被改回 DHCP 时，链路还在重新协商，立刻探测只会把抖动判成「又失败了」，
+                    // 于是反复触发回落 DHCP，把网卡当开关按。
+                    if cooldown > 0 {
+                        let mut slept = 0u64;
+                        while slept < cooldown {
+                            if stop.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let step = (cooldown - slept).min(1);
+                            std::thread::sleep(Duration::from_secs(step));
+                            slept += step;
+                        }
+                    }
+                    return; // 冷却结束，收工；等下一次激活重新起监测
                 }
                 // 分片睡眠：`stop()` 之后最多 1s 退出，而不是等完整个 interval
                 let mut slept = 0u64;

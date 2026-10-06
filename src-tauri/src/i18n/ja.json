@@ -381,6 +381,7 @@
   "cfg.health_interval": "{what}: ヘルスチェックの interval は 0 より大きくなければなりません",
   "cfg.health_retries": "{what}: ヘルスチェックの retries は 0 より大きくなければなりません（0 だと失敗と判定されません）",
   "cfg.health_timeout": "{what}: ヘルスチェックの timeout は 0 より大きくなければなりません",
+  "cfg.health_cooldown": "{what}: ヘルスチェックの cooldown は非負でなければなりません",
   "cfg.action_no_id": "{what}: {kind} アクションに id がありません",
   "cfg.action_dup_id": "{what}: アクション id が重複しています: {id}",
   "cfg.action_no_field": "{what}: アクション「{id}」は {type} ですが {field} が空です",
