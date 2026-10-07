@@ -4,6 +4,16 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] - 2026-10-07
+
+### Fixed
+
+- **Public / egress IP now reliably displays.** The tray panel's public-IP row used a single third-party
+  endpoint with a short timeout and hid the whole row on any failure, so on networks where that host was
+  blocked or slow the row disappeared and looked like the feature was missing. It now probes four
+  endpoints in turn (first plausible reply wins) and keeps the row visible, showing a placeholder when
+  none succeed. (`get_public_ip` gained the endpoint chain behind 1.6.0's tray-panel addition.)
+
 ## [1.6.0] - 2026-10-07
 
 ### Added

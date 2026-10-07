@@ -1231,7 +1231,7 @@ fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<String, String> {
 fn fetch_text(url: &str, proxy_args: &[String]) -> Result<String, String> {
     use std::process::Command;
     let mut cmd = Command::new("curl");
-    cmd.args(["-fsSL", "--proto", "=https", "--max-time", "4", "-H", "User-Agent: netsense"])
+    cmd.args(["-fsSL", "--proto", "=https", "--max-time", "5", "-H", "User-Agent: netsense"])
         .args(proxy_args)
         .arg(url);
     #[cfg(windows)]
@@ -1263,20 +1263,34 @@ fn is_plausible_ip(s: &str) -> bool {
 /// Probes the current egress public IP. Respects system proxy, short timeout, display-only.
 #[tauri::command]
 pub fn get_public_ip(state: State<'_, std::sync::Arc<AppState>>) -> Option<String> {
-    const PUBLIC_IP_URL: &str = "https://api.ipify.org";
+    // 出口公网 IP 探测：依次尝试多个端点，第一个拿到像样结果即用。
+    // 单一第三方端点可能在部分网络下被墙 / 限流 / 超时，链起来更稳；任一端点返回非 IP 文本
+    // （如 JSON）会被 `is_plausible_ip` 挡掉、继续下一个。取不到时返回 `None`，前端整行保持
+    // 可见并显示「—」（不再整行收起，免得看起来像功能没做）。
+    // Probes egress public IP: tries several endpoints in order, first plausible wins. A single
+    // third-party host can be blocked/rate-limited/timeout on some networks, so we chain; any
+    // non-IP reply is skipped. None => frontend keeps the row visible showing a placeholder.
+    const ENDPOINTS: &[&str] = &[
+        "https://api.ipify.org",
+        "https://checkip.amazonaws.com",
+        "https://icanhazip.com",
+        "https://wtfismyip.com/text",
+    ];
     let choice = proxy_choice_of(&state);
-    let body = if cfg!(windows) {
-        fetch_text(PUBLIC_IP_URL, &crate::netproxy::curl_proxy_args(&choice))
+    let proxy = if cfg!(windows) {
+        crate::netproxy::curl_proxy_args(&choice)
     } else {
-        fetch_text(PUBLIC_IP_URL, &crate::netproxy::proxy_args(&choice, None))
+        crate::netproxy::proxy_args(&choice, None)
     };
-    match body {
-        Ok(s) => {
+    for url in ENDPOINTS {
+        if let Ok(s) = fetch_text(url, &proxy) {
             let ip = s.trim();
-            if is_plausible_ip(ip) { Some(ip.to_string()) } else { None }
+            if is_plausible_ip(ip) {
+                return Some(ip.to_string());
+            }
         }
-        Err(_) => None,
     }
+    None
 }
 
 /// 这一次对外请求走哪个出口（软件设置里的那三态）。

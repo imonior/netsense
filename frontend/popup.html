@@ -256,11 +256,13 @@
     };
 
     /// 一行明细：值为空就整行不给看（面板窄，`—` 排成一片等于没有信息）
-    const setRow = (id, v) => {
+    const setRow = (id, v, alwaysShow = false) => {
       const el = document.getElementById("v-" + id);
       el.textContent = v || "—";
       const row = el.closest(".row");
-      if (row) row.hidden = !v;
+      // 公网 IP 那一行永远留着：取不到时显示「—」而不是整行消失，免得看起来像功能没做。
+      // The public-IP row stays visible (shows "—" on miss) so the feature reads as present.
+      if (row) row.hidden = !v && !alwaysShow;
       return el;
     };
 
@@ -292,8 +294,8 @@
       if (now - publicIpFetched < 120000) return; // 2 min throttle / 2 分钟节流
       publicIpFetched = now;
       invoke("get_public_ip")
-        .then((ip) => setRow("public", ip || ""))
-        .catch(() => setRow("public", ""));
+        .then((ip) => setRow("public", ip || "", true))
+        .catch(() => setRow("public", "", true));
     }
 
     /// 一张网卡的卡片：名称 + 类型标签 + 连接状态（状态在标题行右侧）+ 关键字段
