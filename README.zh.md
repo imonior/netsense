@@ -44,7 +44,7 @@ Windows 用 PowerShell CIM + `netsh`，Linux 用 `nmcli`。
 - 每个 Profile 的静态 IP / DHCP / 自定义 DNS / IPv6（automatic、manual、off）/ 静态路由，并分
   THEN 与 ELSE 两条分支。
 - 回读校验与健康度监测在下发步骤里、按分支配置：只有系统确认落地了，Profile 才报「已应用」。
-- 托盘弹窗面板：当前在用的网络（网络接口、SSID、MAC、IPv4 / 掩码 / 网关 / IPv6 / DNS）、
+- 托盘弹窗面板：当前在用的网络（网络接口、SSID、MAC、IPv4 / 掩码 / 网关 / IPv6 / DNS / 公网 IP（出口））、
   其余在用网卡、VPN 隧道、带匹配徽章的一键切换 Profile，以及全部入口 —— 设置、日志、DHCP、探测、
   升级、退出。点图标（左右键都一样）弹出，失焦收起；没有原生托盘菜单。
 - 覆盖整个模型的配置编辑器 —— Rules、Conditions、3A、路由、动作、ELSE 与全局 fallback —— 并把引擎

@@ -43,7 +43,7 @@
 - 每個 Profile 的靜態 IP / DHCP / 自訂 DNS / IPv6（automatic、manual、off）/ 靜態路由，並分出
   THEN 與 ELSE 兩條分支。
 - 回讀驗證與健康度監測在下發步驟裡、按分支設定：只有系統確認落地了，Profile 才報「已套用」。
-- 托盤彈出面板：目前使用中的網路（網路介面、SSID、MAC、IPv4 / 遮罩 / 閘道 / IPv6 / DNS）、
+- 托盤彈出面板：目前使用中的網路（網路介面、SSID、MAC、IPv4 / 遮罩 / 閘道 / IPv6 / DNS / 公網 IP（出口））、
   其餘使用中的網卡、VPN 通道、帶命中徽章的一鍵切換 Profile，以及所有入口 —— 設定、紀錄、DHCP、
   探測、升級、結束。點圖示（左右鍵皆同）開啟，失焦時收起；沒有原生托盤選單。
 - 覆蓋整個模型的配置編輯器 —— Rules、Conditions、3A、路由、動作、ELSE 與全域 fallback —— 並把

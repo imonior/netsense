@@ -4,6 +4,35 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-10-07
+
+### Added
+
+- **A target-interface selector in the automation editor.** Each branch's network config now has a
+  "Target interface" dropdown (Primary by default, plus Wi-Fi / Ethernet when the machine actually has
+  them). The options come from the same system-aware interface list the condition matcher uses, so a
+  branch can address a specific interface, not only the primary one. (`NetworkTarget` entered the config
+  model in 1.5.0; this release exposes it through the editor and i18n.)
+- **Public / egress IP in the tray panel.** The current-network card now shows the machine's public
+  (exit) IP, probed on demand through the system proxy with a short timeout. It is display-only — never
+  persisted and never used for condition matching.
+
+### Fixed
+
+- **Local-network IPv6 ordering.** The current-network panel now lists IPv6 as
+  address → prefix → gateway → DNS (previously address → gateway → prefix).
+- **VPN card shows routes only.** The VPN section now lists its routes (a route's next hop) and drops the
+  separate "Gateway" rows, matching the Interface / Address / Route / VPN / Egress model where a gateway
+  is just a route's next hop.
+- **Matched-condition status no longer lags.** Condition match badges now recompute on every
+  network-status and engine-evaluation broadcast, so the green "matched" markers refresh as the network
+  changes instead of only after a condition is edited by hand.
+
+### Changed
+
+- i18n: added `popup.public_ip` and `editor.target_*` keys; removed the now-unused `popup.default_egress`.
+  The backend gained a `get_public_ip` IPC command (47 commands total).
+
 ## [1.5.0] - 2026-10-07
 
 ### Added

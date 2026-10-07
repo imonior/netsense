@@ -156,6 +156,12 @@ pub struct NicInfo {
     /// 该网卡上的**全局** IPv6 地址（不含 `fe80::` 链路本地地址：它每台机器都长一样，
     /// 既没有识别价值，也不代表这台机器真的能走 IPv6）。取不到即为 `None`。
     pub ipv6: Option<String>,
+    /// 上面那个 IPv6 地址的**前缀长度**（`64` 这类，不带斜杠）。取不到即为 `None`。
+    ///
+    /// 它和 `netmask` 不是一个东西：v6 没有点分掩码，面板那一格要显示的是 `/64`。
+    /// Prefix length of the address above (`64`, no slash). `None` when unavailable. Not the same
+    /// as `netmask`: IPv6 has no dotted mask, and the panel wants the `/64` form.
+    pub prefix6: Option<String>,
     /// 该网卡上的默认网关（多网卡时只有走默认路由的那张有值）
     pub gateway: Option<String>,
     /// 该网卡上的 **IPv6 默认网关**（`::/0` 的下一跳），取不到即为 `None`。

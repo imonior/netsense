@@ -283,6 +283,7 @@ fn main() {
             ipc::apply_profile,
             ipc::force_dhcp,
             ipc::probe_network,
+            ipc::get_public_ip,
             ipc::get_networks,
             ipc::get_printers,
             ipc::get_installed_apps,

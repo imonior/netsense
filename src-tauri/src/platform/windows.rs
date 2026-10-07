@@ -635,6 +635,9 @@ fn nic_from_row(
     let name = get("name")?;
     let ipv4 = get("ip");
     let ipv6 = get("v6");
+    // IPv6 的前缀长度（`/64` 那一格）。v4 的 `prefix` 在下面换算成点分掩码，v6 没有掩码
+    // 这回事，所以两格各走各的 —— 别拿 `netmask` 去顶 v6 那一格。
+    let prefix6 = get("v6prefix");
     let media = get("media").unwrap_or_default();
     let desc = get("desc").unwrap_or_default();
     // 三层来源（与 `read_status` 同一口径）：netsh 按 MAC 认领 > profile XML 的空中名字 > profile 名
@@ -691,6 +694,7 @@ fn nic_from_row(
         ipv4,
         netmask,
         ipv6,
+        prefix6,
         gateway,
         gateway6,
         routes,
@@ -1472,7 +1476,7 @@ foreach ($n in @(Get-NetAdapter)) {
   $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
   $list.Add([pscustomobject]@{
     name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status;
-    ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; gw=$rt.NextHop; gw6=$rt6.NextHop;
+    ip=$ip.IPAddress; prefix=$ip.PrefixLength; v6=$v6.IPAddress; v6prefix=$v6.PrefixLength; gw=$rt.NextHop; gw6=$rt6.NextHop;
     routes=($rts -join ',');
     dns=(($dns | ForEach-Object { $_.ServerAddresses }) -join ',');
     ssid=$wlanSsid[[string]$prof.Name]; prof=$prof.Name;

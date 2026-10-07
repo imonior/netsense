@@ -534,6 +534,23 @@ jobs:
             exit 1
           fi
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RID}" -f draft=false
+          # 显式把这条发布标成 Latest，不要指望默认值。
+          #
+          # PATCH 不带 `make_latest` 时走的是 legacy 启发式（按 release 创建时间 + semver 判定），
+          # 而我们的流程是「先建草稿 → 装完全部资源 → 才转正」：草稿在转正前根本没资格当 Latest，
+          # 这条启发式在这种流程下并不可靠 —— v1.5.0 转正后就没有自动带上 Latest 标记，最后是手工点的。
+          #
+          # Explicitly mark it Latest instead of relying on the default. A PATCH without
+          # `make_latest` falls back to the legacy heuristic (creation date + semver), which is
+          # unreliable in a draft-then-publish flow: a draft cannot be Latest before it is
+          # published, and v1.5.0 indeed came out without the badge (set by hand afterwards).
+          #
+          # 失败只告警不置红：到这里 release 已经公开了，为「标记没打上」去阻断下游 cask 同步不划算。
+          # Warning, not failure: the release is already public at this point; blocking the cask
+          # sync downstream would cost more than a missing badge.
+          if ! gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RID}" -f make_latest=true >/dev/null; then
+            echo "::warning::published release ${RID}, but marking it Latest failed; set it by hand on the release page"
+          fi
           echo "published release id=${RID}"
 
   # The Homebrew cask follows the release. It has to run *after* publish: the cask's url points at

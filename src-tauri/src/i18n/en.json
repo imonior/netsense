@@ -50,8 +50,6 @@
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "Other",
   "popup.vpn_egress": "Interface",
-  "popup.default_egress": "(default egress)",
-  "popup.vpn_routes": "Gateway / routes",
   "editor.loading_status": "Loading hardware status...",
   "editor.global_fallback": "Fallback (zero match)",
   "editor.ipv6_config": "2. IPv6 Configuration",
@@ -415,7 +413,6 @@
   "pal.no_ethernet_adapter": "no Ethernet adapter was found",
   "pal.no_ethernet_service": "no Ethernet network service was found",
   "pal.no_ethernet_iface": "no Ethernet interface was found",
-  "pal.no_wifi_adapter_hint": "no Wi-Fi adapter was found — check that the Wi-Fi adapter is enabled",
   "pal.vpn_iface_not_switchable": "interface {dev} is a VPN tunnel: its address is handed out by the VPN client and cannot be switched to DHCP",
   "pal.no_service_for_iface": "no network service maps to interface {dev}",
   "pal.no_active_conn_on": "device {dev} has no active connection",
@@ -541,5 +538,12 @@
   "logs.printers_failed": "Could not read the printer list: {error}",
   "logs.apps_failed": "Could not read the installed-app list: {error}",
   "logs.win_helper_fallback": "The resident elevation helper is unreachable ({reason}); network changes will ask UAC every time until NetSense is restarted",
-  "pal.priv_unsupported": "this platform has no password-free change channel to remove"
+  "pal.priv_unsupported": "this platform has no password-free change channel to remove",
+  "popup.prefix6": "IPv6 Prefix",
+  "popup.routes": "Routes",
+  "editor.target_nic": "Target interface",
+  "editor.target_primary": "Primary (default)",
+  "editor.target_wifi": "Wi-Fi",
+  "editor.target_ethernet": "Ethernet",
+  "popup.public_ip": "Public IP"
 }

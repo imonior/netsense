@@ -681,11 +681,18 @@ fn device_ip_nmcli(dev: &str) -> DeviceIp {
         out.dns = Some(dns.join(","));
     }
     // 全局 IPv6：跳过 link-local（`fe80:`），取第一条真正全局地址（与 `list_interfaces` 同判据）。
-    out.ipv6 = get_field_all(dev, "IP6.ADDRESS")
+    // `IP6.ADDRESS` 形如 `2001:db8::1/64`：地址与前缀都在这一格里，一次拆完。
+    let v6addr = get_field_all(dev, "IP6.ADDRESS")
         .into_iter()
-        .find(|a| !a.trim().to_ascii_lowercase().starts_with("fe80:"))
-        .map(|a| a.split('/').next().unwrap_or("").trim().to_string())
-        .filter(|a| !a.is_empty());
+        .find(|a| !a.trim().to_ascii_lowercase().starts_with("fe80:"));
+    if let Some(a) = v6addr {
+        out.ipv6 = Some(a.split('/').next().unwrap_or("").trim().to_string()).filter(|s| !s.is_empty());
+        out.prefix6 = a
+            .split('/')
+            .nth(1)
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+    }
     out.gateway6 = get_field(dev, "IP6.GATEWAY").filter(|g| g != "::");
     out.mac = get_field(dev, "GENERAL.HWADDR");
     out.routes = route_prefixes(&get_field_all(dev, "IP4.ROUTE"));
@@ -1011,6 +1018,7 @@ impl NetworkPlatform for LinuxPlatform {
                         ipv4: dip.ipv4.clone(),
                         netmask: dip.netmask.clone(),
                         ipv6: dip.ipv6.clone(),
+                        prefix6: dip.prefix6.clone(),
                         gateway: dip.gateway.clone(),
                         gateway6: dip.gateway6.clone(),
                         routes,

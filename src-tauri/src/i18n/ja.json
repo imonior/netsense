@@ -50,8 +50,6 @@
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "その他",
   "popup.vpn_egress": "インターフェース",
-  "popup.default_egress": "(デフォルト出口)",
-  "popup.vpn_routes": "ゲートウェイ / ルート",
   "editor.loading_status": "ハードウェア状態を読み込み中...",
   "editor.global_fallback": "フォールバック（0 件）",
   "editor.ipv6_config": "2. IPv6 設定",
@@ -540,5 +538,12 @@
   "logs.printers_failed": "プリンタ一覧の読み取りに失敗しました：{error}",
   "logs.apps_failed": "インストール済みアプリ一覧の読み取りに失敗しました：{error}",
   "logs.win_helper_fallback": "常駐の特権アシスタントに接続できません（{reason}）。NetSense を再起動するまで、ネットワーク設定の適用のたびに UAC の承認を求めます",
-  "pal.priv_unsupported": "このプラットフォームには取り消すためのパスワード不要の仕組みがありません"
+  "pal.priv_unsupported": "このプラットフォームには取り消すためのパスワード不要の仕組みがありません",
+  "popup.prefix6": "IPv6 プレフィックス",
+  "popup.routes": "ルート",
+  "editor.target_nic": "対象インターフェース",
+  "editor.target_primary": "プライマリ（デフォルト）",
+  "editor.target_wifi": "Wi-Fi",
+  "editor.target_ethernet": "イーサネット",
+  "popup.public_ip": "グローバル IP"
 }

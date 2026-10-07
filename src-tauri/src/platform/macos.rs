@@ -828,22 +828,47 @@ fn dns_of_service(svc: &str) -> Option<String> {
 /// - `fe80::` 与隐私临时地址（每分钟轮换）都不适合作为展示值。
 ///
 /// 注意键名是 `IPv6 IP address:`，不是 `IPv6:`（后者是 off / automatic / manual 模式）。
-fn v6_of_service(svc: &str) -> Option<String> {
-    let o = run("networksetup", &["-getinfo", svc]).ok()?;
+/// 一个网络服务当前的 IPv6 地址与前缀长度：`networksetup -getinfo` 里的
+/// `IPv6 IP address:` 与 `IPv6 Prefix Length:` 两行。
+///
+/// 一次调用同时取回两格：面板要显示「IPv6 地址 / 前缀」，而这两行本来就在同一份输出里，
+/// 为前缀再起一遍 `networksetup` 只是白搭一次子进程（`list_interfaces` 每张卡都要问）。
+/// The IPv6 address and prefix length of one network service: the `IPv6 IP address:` and
+/// `IPv6 Prefix Length:` lines of `networksetup -getinfo`. Both are read in one pass — they are
+/// in the same output, and `list_interfaces` asks once per interface.
+struct V6Info {
+    addr: Option<String>,
+    prefix: Option<String>,
+}
+
+fn v6_of_service(svc: &str) -> V6Info {
+    let mut out = V6Info { addr: None, prefix: None };
+    let Ok(o) = run("networksetup", &["-getinfo", svc]) else {
+        return out;
+    };
     for line in o.lines() {
-        let Some(rest) = line.trim().strip_prefix("IPv6 IP address:") else {
-            continue;
-        };
-        let v = rest.trim();
-        if v.eq_ignore_ascii_case("none")
-            || v.is_empty()
-            || v.to_ascii_lowercase().starts_with("fe80:")
-        {
-            continue;
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("IPv6 Prefix Length:") {
+            let v = rest.trim();
+            // 只收整数：`networksetup` 在取不到时会写 `none`，那一格不该显示成前缀。
+            if v.parse::<u32>().is_ok() {
+                out.prefix = Some(v.to_string());
+            }
+        } else if out.addr.is_none() {
+            let Some(rest) = t.strip_prefix("IPv6 IP address:") else {
+                continue;
+            };
+            let v = rest.trim();
+            if v.eq_ignore_ascii_case("none")
+                || v.is_empty()
+                || v.to_ascii_lowercase().starts_with("fe80:")
+            {
+                continue;
+            }
+            out.addr = Some(v.split('%').next().unwrap_or(v).to_string());
         }
-        return Some(v.split('%').next().unwrap_or(v).to_string());
     }
-    None
+    out
 }
 
 fn probe_icmp(target: Option<&str>, timeout_ms: u64) -> bool {
@@ -2167,7 +2192,10 @@ impl NetworkPlatform for MacPlatform {
                 let route_list = rt.prefixes.get(&dev).cloned().unwrap_or_default();
                 let gateway_mac = gateway.as_deref().and_then(gateway_mac_for);
                 let dns = port.and_then(|p| p.service.as_deref()).and_then(dns_of_service);
-                let ipv6 = port.and_then(|p| p.service.as_deref()).and_then(v6_of_service);
+                // 地址与前缀出自同一次 `networksetup -getinfo`：一次取全，不为前缀再起子进程。
+                let v6 = port.and_then(|p| p.service.as_deref()).map(v6_of_service);
+                let ipv6 = v6.as_ref().and_then(|v| v.addr.clone());
+                let prefix6 = v6.as_ref().and_then(|v| v.prefix.clone());
                 out.push(super::NicInfo {
                     name: dev,
                     label: port.map(|p| p.port.clone()),
@@ -2178,6 +2206,7 @@ impl NetworkPlatform for MacPlatform {
                     ipv4,
                     netmask,
                     ipv6,
+                    prefix6,
                     gateway,
                     gateway6,
                     routes: route_list,

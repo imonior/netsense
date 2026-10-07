@@ -50,8 +50,6 @@
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "其他",
   "popup.vpn_egress": "介面",
-  "popup.default_egress": "(預設出口)",
-  "popup.vpn_routes": "閘道或路由",
   "editor.loading_status": "載入硬體真實狀態中...",
   "editor.global_fallback": "後備（零命中）",
   "editor.ipv6_config": "二、IPv6 協定配置",
@@ -540,5 +538,12 @@
   "logs.printers_failed": "讀取印表機清單失敗：{error}",
   "logs.apps_failed": "讀取已安裝程式清單失敗：{error}",
   "logs.win_helper_fallback": "常駐提權助手連不上（{reason}）；重新啟動 NetSense 之前，套用網路設定會逐次彈出 UAC 授權",
-  "pal.priv_unsupported": "本平台沒有可撤銷的免密通道"
+  "pal.priv_unsupported": "本平台沒有可撤銷的免密通道",
+  "popup.prefix6": "IPv6 前綴",
+  "popup.routes": "路由",
+  "editor.target_nic": "目標網卡",
+  "editor.target_primary": "主網卡（預設）",
+  "editor.target_wifi": "Wi-Fi",
+  "editor.target_ethernet": "乙太網路",
+  "popup.public_ip": "公網 IP"
 }

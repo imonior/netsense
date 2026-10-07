@@ -43,6 +43,8 @@ pub struct DeviceIp {
     pub ipv4: Option<String>,
     pub netmask: Option<String>,
     pub ipv6: Option<String>,
+    /// 上面那个 IPv6 地址的前缀长度（`64`，不带斜杠）。
+    pub prefix6: Option<String>,
     pub gateway: Option<String>,
     pub gateway6: Option<String>,
     pub dns: Option<String>,
@@ -137,6 +139,7 @@ pub fn device_ip(dev: &str) -> Option<DeviceIp> {
         if ip6p.as_str() != "/" {
             if let Some(ip6) = read_ip6(&conn, ip6p.as_str()) {
                 out.ipv6 = ip6.ipv6;
+                out.prefix6 = ip6.prefix6;
                 out.gateway6 = ip6.gateway6;
             }
         }
@@ -230,6 +233,7 @@ fn read_ip4(conn: &Connection, path: &str) -> Option<Ip4Parts> {
 
 struct Ip6Parts {
     ipv6: Option<String>,
+    prefix6: Option<String>,
     gateway6: Option<String>,
 }
 
@@ -237,6 +241,7 @@ fn read_ip6(conn: &Connection, path: &str) -> Option<Ip6Parts> {
     let ip = Proxy::new(conn, NM_SERVICE, path, IP6_IFACE).ok()?;
     let mut out = Ip6Parts {
         ipv6: None,
+        prefix6: None,
         gateway6: None,
     };
 
@@ -246,6 +251,12 @@ fn read_ip6(conn: &Connection, path: &str) -> Option<Ip6Parts> {
             if let Some(addr) = a.get("address").and_then(str_of) {
                 if !addr.trim().to_ascii_lowercase().starts_with("fe80:") {
                     out.ipv6 = Some(addr.split('/').next().unwrap_or(&addr).trim().to_string());
+                    // NM 的 `address` 形如 `2001:db8::1/64`：前缀就在斜杠后面，不用另外取属性。
+                    out.prefix6 = addr
+                        .split('/')
+                        .nth(1)
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty());
                     break;
                 }
             }

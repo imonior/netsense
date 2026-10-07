@@ -50,8 +50,6 @@
   "popup.kind_vpn": "VPN",
   "popup.kind_other": "기타",
   "popup.vpn_egress": "인터페이스",
-  "popup.default_egress": "(기본 출구)",
-  "popup.vpn_routes": "게이트웨이 / 경로",
   "editor.loading_status": "하드웨어 상태 불러오는 중...",
   "editor.global_fallback": "폴백 (일치 없음)",
   "editor.ipv6_config": "2. IPv6 구성",
@@ -540,5 +538,12 @@
   "logs.printers_failed": "프린터 목록을 읽지 못했습니다: {error}",
   "logs.apps_failed": "설치된 프로그램 목록을 읽지 못했습니다: {error}",
   "logs.win_helper_fallback": "상주 권한 어시스턴트에 연결할 수 없습니다({reason}). NetSense를 다시 시작할 때까지 네트워크 설정을 적용할 때마다 UAC 승인을 요구합니다",
-  "pal.priv_unsupported": "이 플랫폼에는 삭제할 비밀번호 없는 변경 경로가 없습니다"
+  "pal.priv_unsupported": "이 플랫폼에는 삭제할 비밀번호 없는 변경 경로가 없습니다",
+  "popup.prefix6": "IPv6 접두사",
+  "popup.routes": "경로",
+  "editor.target_nic": "대상 인터페이스",
+  "editor.target_primary": "기본 (기본값)",
+  "editor.target_wifi": "Wi-Fi",
+  "editor.target_ethernet": "이더넷",
+  "popup.public_ip": "공인 IP"
 }

@@ -1226,6 +1226,59 @@ fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<String, String> {
     }
 }
 
+/// 短超时纯文本 GET：公网 IP 探测专用，不复用 [`fetch_url_curl`] 的 GitHub 专用头与 15s 上限。
+/// Short-timeout plain-text GET for the public-IP probe (no GitHub headers, 4s cap).
+fn fetch_text(url: &str, proxy_args: &[String]) -> Result<String, String> {
+    use std::process::Command;
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsSL", "--proto", "=https", "--max-time", "4", "-H", "User-Agent: netsense"])
+        .args(proxy_args)
+        .arg(url);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // 不闪控制台 / no console flash
+    }
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// 出口公网 IP 是否像样（架构上的 Egress / Public IP 层）：只放行 IPv4 / IPv6 文本，
+/// 挡掉任何带空格或异常字符的响应（外部服务被劫持时不能把脏东西喂给面板）。
+/// Whether a probed value looks like a public IP: IPv4 / IPv6 text only, rejecting anything odd.
+fn is_plausible_ip(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 45
+        && s.bytes().all(|b| b == b'.' || b == b':' || b.is_ascii_digit())
+}
+
+/// 探测当前出口公网 IP（Egress / Public IP 层，独立于任何网卡）。
+///
+/// 走系统代理设置（与更新下载同一套出口），短超时，结果只用于面板展示，不落盘、不参与条件匹配。
+/// 端点可换（见 [`PUBLIC_IP_URL`]）；取不到时返回 `None`，前端整行收起。
+/// Probes the current egress public IP. Respects system proxy, short timeout, display-only.
+#[tauri::command]
+pub fn get_public_ip(state: State<'_, std::sync::Arc<AppState>>) -> Option<String> {
+    const PUBLIC_IP_URL: &str = "https://api.ipify.org";
+    let choice = proxy_choice_of(&state);
+    let body = if cfg!(windows) {
+        fetch_text(PUBLIC_IP_URL, &crate::netproxy::curl_proxy_args(&choice))
+    } else {
+        fetch_text(PUBLIC_IP_URL, &crate::netproxy::proxy_args(&choice, None))
+    };
+    match body {
+        Ok(s) => {
+            let ip = s.trim();
+            if is_plausible_ip(ip) { Some(ip.to_string()) } else { None }
+        }
+        Err(_) => None,
+    }
+}
+
 /// 这一次对外请求走哪个出口（软件设置里的那三态）。
 ///
 /// 「跟随系统」不缓存：每次发请求现问一次操作系统，代理客户端开关与换网络因此立刻生效，

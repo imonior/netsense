@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 542 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 547 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -214,7 +214,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，46 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，47 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -229,6 +229,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `delete_profile` | `id` | 删除并按 id 找不到时报错 |
 | `apply_profile` | `id` | 请求「立即应用」。**不绕过条件**：引擎重评该 Profile 自己的 Rules/Conditions，禁用中直接拒、冲突中拒绝并回 `netsense://action` |
 | `force_dhcp` | — | 把当前网络（主网卡）切回 DHCP **并让自动化暂停**：引擎停止自动评估、下发与健康监测，直到网络下一次变化（采样照旧，变化即解除；面板/编辑器显示 PAUSED）。异步，结果走 `netsense://action` |
+| `get_public_ip` | — | 现探现回当前出口公网 IP（架构 Egress / Public IP 层，独立于任何网卡）：走系统代理设置，4s 超时，只用于面板展示、不落盘、不参与条件匹配。取不到回 `null`，面板整行收起。端点见 `ipc.rs` 的 `PUBLIC_IP_URL` |
 | `probe_network` | — | 重新采样并立即评估当前网络：唯一命中就走「立即应用」那条链路（网络 + 3B），多命中只报告名字、零命中只报告，都不动网卡。不受 DHCP 暂停约束，也不解除暂停（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字）。交的是**空中那个名字**，与面板「当前网络」那一格同源，判据见上面那段 |
 | `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |

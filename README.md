@@ -52,7 +52,7 @@ network ──▶ │  Rule = enabled Conditions ANDed         │ ──▶ 1 m
 - Read-back verification and health monitoring, configured per branch inside the apply step, so a
   Profile only reports "applied" when the system agrees it did.
 - Tray popup panel: the network actually in use (interface, SSID, MAC,
-  IPv4 / netmask / gateway / IPv6 / DNS), the other active interfaces, VPN tunnels, one-click
+  IPv4 / netmask / gateway / IPv6 / DNS / public IP (egress)), the other active interfaces, VPN tunnels, one-click
   Profile switching with match badges, and every entry point - settings, logs, DHCP, probe,
   update, quit. Any click on the icon opens it, blur collapses it; there is no native tray menu.
 - A configuration editor covering the whole model — Rules, Conditions, 3A, routes, actions, ELSE

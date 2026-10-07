@@ -168,7 +168,10 @@
     <div class="row"><span class="k" id="k-netmask" data-i18n="popup.netmask">Netmask</span><span class="v" id="v-netmask">—</span></div>
     <div class="row"><span class="k" id="k-gateway" data-i18n="popup.gateway">Gateway</span><span class="v" id="v-gateway">—</span></div>
     <div class="row"><span class="k" id="k-ipv6" data-i18n="popup.ipv6">IPv6</span><span class="v" id="v-ipv6">—</span></div>
+    <div class="row"><span class="k" id="k-prefix6" data-i18n="popup.prefix6">IPv6 Prefix</span><span class="v" id="v-prefix6">—</span></div>
+    <div class="row"><span class="k" id="k-gateway6" data-i18n="popup.gateway6">Gateway (IPv6)</span><span class="v" id="v-gateway6">—</span></div>
     <div class="row"><span class="k" id="k-dns" data-i18n="popup.dns">DNS</span><span class="v" id="v-dns">—</span></div>
+    <div class="row"><span class="k" id="k-public" data-i18n="popup.public_ip">Public IP</span><span class="v" id="v-public">—</span></div>
   </div>
 
   <div class="section" id="sec-other" data-i18n="popup.other_nics" hidden>Other active interfaces</div>
@@ -279,15 +282,30 @@
       return !s || s.startsWith("link#") || s === "0.0.0.0" || s === "::" ? null : s;
     };
 
+    /// 当前出口公网 IP（架构上的 Egress / Public IP 层，独立于任何网卡）：后端现探现回，
+    /// 本端只做 2 分钟缓存，避免每条状态广播都去打一次外部服务。取不到时整行收起。
+    /// The current egress public IP (the architecture's Egress / Public IP layer, independent of any NIC):
+    /// fetched on demand from the backend, throttled to once per 2 minutes on this side.
+    let publicIpFetched = 0;
+    function refreshPublicIp() {
+      const now = Date.now();
+      if (now - publicIpFetched < 120000) return; // 2 min throttle / 2 分钟节流
+      publicIpFetched = now;
+      invoke("get_public_ip")
+        .then((ip) => setRow("public", ip || ""))
+        .catch(() => setRow("public", ""));
+    }
+
     /// 一张网卡的卡片：名称 + 类型标签 + 连接状态（状态在标题行右侧）+ 关键字段
     /// （取不到的字段整行不显示）。
     ///
-    /// VPN 卡的标题就是**归属软件名**，明细按「接口 → 地址 → 网关 → 路由」排：两个网关行
-    /// 只在下一跳是真地址时出现，带「(默认出口)」注记说明它来自这张卡的默认路由
-    /// （`0.0.0.0/0` / `::/0`，各平台都只从那里采它）；「网关或路由」只剩前缀表里具体的
-    /// 网段（诸如 10.30.35.0/24）。这一段现在也列「装了但没连」的会话，一张不带地址的卡
-    /// 看着像采集失败而它其实是准的，所以状态必须写在卡上；没连的会话没有出口设备，那一行
-    /// 整个不给看（标题位置上是它的会话标签，那是用户自己在客户端里取的名字）。
+    /// VPN 卡的标题就是**归属软件名**，明细按「接口 → 地址 → 路由」排：架构上 Gateway 即
+    /// Route 的 Next Hop，VPN 的出口下一跳就是它默认路由的下一跳，所以不再单列「网关」一行，
+    /// 统一走「路由」；「路由」只剩前缀表里具体的网段（诸如 10.30.35.0/24），`0.0.0.0/0` /
+    /// `::/0` 那种「一切」在前端被过滤掉（真正的默认出口由网关行指代，这里不再重复）。这一段
+    /// 现在也列「装了但没连」的会话，一张不带地址的卡看着像采集失败而它其实是准的，所以状态
+    /// 必须写在卡上；没连的会话没有出口设备，那一行整个不给看（标题位置上是它的会话标签，
+    /// 那是用户自己在客户端里取的名字）。
     /// 认不出归属软件时标题退回设备名、标签仍是通用的「VPN」：少一格信息可以，给这条隧道
     /// 安一个错牌子不行（判据见 `platform::macos::attribute_vpn`）。
     function nicCard(n) {
@@ -299,16 +317,14 @@
         : "";
       const rows = [];
       if (vpn) {
-        const gw = routableGateway(n.gateway);
-        const gw6 = routableGateway(n.gateway6);
-        const egress = " " + t("popup.default_egress", "(default egress)");
+        const routes = routeText(n.routes);
         if (n.up) rows.push([t("popup.vpn_egress", "Interface"), n.name]);
         if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
+        // 「网关」这一描述不再单列：架构上 Gateway 即 Route 的 Next Hop，VPN 的出口下一跳
+        // 就是它默认路由的下一跳，归进「路由」语义即可；单列反倒让人误以为 VPN 还有一层
+        // 独立的网关。IPv6 地址跟在 IPv4 之下，路由明细直接接在地址下面。
         if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
-        if (gw) rows.push([t("popup.gateway", "Gateway"), gw + egress]);
-        if (gw6) rows.push([t("popup.gateway6", "Gateway (IPv6)"), gw6 + egress]);
-        const routes = routeText(n.routes);
-        if (routes) rows.push([t("popup.vpn_routes", "Gateway / routes"), routes]);
+        if (routes) rows.push([t("popup.routes", "Routes"), routes]);
         if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
       } else {
         if (n.ssid) rows.push([t("status.ssid", "SSID"), n.ssid]);
@@ -431,7 +447,10 @@
       setRow("netmask", (primary && primary.netmask) || st.netmask);
       setRow("gateway", st.gateway || (primary && primary.gateway));
       setRow("ipv6", primary && primary.ipv6);
+      setRow("prefix6", primary && primary.prefix6);
+      setRow("gateway6", st.gateway6 || (primary && primary.gateway6));
       setRow("dns", st.dns || (primary && primary.dns));
+      refreshPublicIp();
 
       // 快速切换区只列 Profile 上勾了「放入快速切换区」的那些（`quick`，默认勾选）。
       // 取消勾选只是在面板收起，编辑器里它仍然存在、仍然参与条件匹配。
@@ -729,6 +748,8 @@
       applyI18n();
       showVersion();
       refresh();
+      // 公网 IP 现探现回，本端已做 2 分钟节流；再补一个同间隔的定时器，面板长时间开着时也保鲜。
+      setInterval(refreshPublicIp, 120000);
       // 启动后静默检查一次：发现新版本才弹窗，且本次会话只提示一次
       setTimeout(() => {
         invoke("check_update").then(r => {
