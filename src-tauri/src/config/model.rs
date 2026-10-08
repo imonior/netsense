@@ -19,6 +19,7 @@
 //! 会 → 这份；不会 → 那份。混在一起的代价是每次换语言都惊动配置热重载与网络重评估。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 本版本认识的配置 schema。
 pub const SCHEMA: u32 = 1;
@@ -47,6 +48,12 @@ pub struct Config {
     /// 挂在某一份 Profile 的动作下，改来改去总会漏掉某一支。
     #[serde(default, rename = "allowed_scripts", skip_serializing_if = "Vec::is_empty")]
     pub allowed_scripts: Vec<String>,
+    /// 用户手动维护的「隧道接口名 → 显示名」映射。裸 tun 设备（如 Clash Verge 的
+    /// `utun1024`）拿不到进程名时，用它代替自动识别的家族名（"Clash" / "VPN"）。
+    /// 用户显式写的优先级最高，盖过平台层的自动归属（见 `Platform::list_interfaces`
+    /// 在 IPC 边界套用的覆盖逻辑）。
+    #[serde(default, rename = "tunnel_names", skip_serializing_if = "HashMap::is_empty")]
+    pub tunnel_names: HashMap<String, String>,
 }
 
 /// 零命中时的处置。全空 = 什么都不做（保持现状）。

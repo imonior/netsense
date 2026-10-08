@@ -231,6 +231,9 @@
     .modal.wide { width: 520px; max-height: 86vh; overflow-y: auto; }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 11px; color: var(--text-label); line-height: 1.5; }
+    .tun-row { display: flex; gap: 6px; margin: 4px 0; align-items: center; }
+    .tun-row .tun-dev { flex: 0 0 38%; }
+    .tun-row .tun-name { flex: 1; }
     .modal ul, .modal ol { margin: 8px 0; padding-left: 18px; font-size: 12px; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
   </style>
@@ -253,7 +256,7 @@
     <div class="panel">
       <div class="panel-header">
         <span id="hdr-profiles" data-i18n="editor.profiles_column">Profiles</span>
-        <span class="rowhead"><span id="obj-badge"></span><button class="mini-btn" id="btn-new" data-i18n="editor.new_profile">+ New</button></span>
+        <span class="rowhead"><span id="obj-badge"></span><button class="mini-btn" id="btn-tun" data-act="open-tun" data-i18n="editor.tunnel_names">Tunnel names</button><button class="mini-btn" id="btn-new" data-i18n="editor.new_profile">+ New</button></span>
       </div>
       <div class="panel-content pad0" id="col-profiles"></div>
     </div>
@@ -298,6 +301,9 @@
 </div>
 <div class="modal-mask" id="del-mask" hidden>
   <div class="modal" id="del-modal"></div>
+</div>
+<div class="modal-mask" id="tun-mask" hidden>
+  <div class="modal wide" id="tun-modal"></div>
 </div>
 
 <script>
@@ -349,13 +355,13 @@
      所以广播只更新状态条、徽标与按钮；表单只在切换选中项、增删条目或保存成功时重建。
      另有一种：后端说配置换代了（手改文件触发的热重载 / 导入备份），而用户手上没有
      未保存的改动 —— 那时重建正是他要的，读的是新那一份（见广播处的代际号比对）。 */
-  let cfg = { schema: 1, profiles: [], fallback: null, allowed_scripts: [] };
+  let cfg = { schema: 1, profiles: [], fallback: null, allowed_scripts: [], tunnel_names: {} };
   let cfgLoaded = false; // 上面这份 cfg 是否成功落地过；false 时下一次广播会自动重读（首屏某一步失败的自愈）
   let cfgRev = null;       // 手上这份 cfg 的代际号（`get_config` 同趟带回，见 [`cfgOutdated`]）
   let cfgSeenRev = null;   // 广播里见过的最大代际号（只往上记：迟到的旧广播不该把新世界降回去）
   let cfgFetching = false; // loadAll 是否在途：挡住广播那边再叠一趟
   let cfgAgain = false;    // 在途期间又来了一次重读请求：这一趟结束后自己补一趟
-  let globalDraft = { fallback: null, allowed_scripts: [] };
+  let globalDraft = { fallback: null, allowed_scripts: [], tunnel_names: {} };
   let view = null;      // EngineView：{state, active, conflict, snapshot, profiles, warnings, last_run, workers}
   let preview = null;   // 表单即时预览（preview_match）：和 EngineView.profiles 同形状，但算的是草稿
   let wifiList = [];    // 系统已保存的 SSID —— SSID 条件值的候选
@@ -368,6 +374,11 @@
   let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
   let dirty = false;
+  // DNS 三态下拉的「当前选中项」记忆：数据模型只有一个 `net.dns` 字段（undefined=保持 /
+  // ""=系统给 / 非空=指定），「指定但还没填」与「系统给」在模型里都是 `""`，无法区分。
+  // 用户点了「指定」后 net.dns 仍是空串，重渲染会把它读回「系统给」、下拉跳回去。这条
+  // 瞬态记忆只记「用户刚选了指定」，让下拉保持选中，直到真输入（net.dns 非空后模型自洽）。
+  let dnsOverride = {};
   let langShown = null; // 界面上现在显示的是哪种语言
   let verifyOpen = false;
 
@@ -452,6 +463,7 @@
     conflict: ["b-conflict", "editor.status_conflict"],
     error: ["b-error", "editor.status_error"],
     suspended: ["b-dim", "editor.status_suspended"],
+    fallback: ["b-active", "status.fallback_active"],
   };
   const badge = (key) => {
     const m = BADGE[key];
@@ -465,6 +477,8 @@
     const st = view && view.state;
     return st && st.state === "active" ? st.id : null;
   }
+  // 兜底当前是否生效（后端用 fallback_fp 判定，比一次性的 decision 更可靠）。
+  const fallbackActive = () => !!(view && view.fallback_active);
   const savedProfile = (id) => (cfg.profiles || []).find(p => p.id === id) || null;
   const nameOf = (id) => { const p = savedProfile(id); return p ? (p.name || p.id) : id; };
 
@@ -509,6 +523,7 @@
       // ACTIVE / 红叉，后面直接讲清楚在等什么。
       p1 = `${badge("suspended")} <b>${esc(nameOf(aid))}</b> <span class="empty">${esc(t("status.suspended"))}</span>`;
     else if (aid) p1 = `${badge(ap && ap.status)} <b>${esc(nameOf(aid))}</b>`;
+    else if (fallbackActive()) p1 = `${badge("fallback")} <b>${esc(t("editor.global_fallback"))}</b>`;
     else p1 = `${badge("not_matched")} <span>${esc(t("status.no_profile"))}</span>`;
     $("st-profile").innerHTML = p1;
 
@@ -590,11 +605,15 @@
 
     // 格 4：生效方案的 THEN 此刻在跑什么（3B1 的结果 + 3B2 的维持状态）
     const lr = view && view.last_run;
-    const shown = lr && aid && lr.profile_id === aid ? lr : null;
-    const saved = aid ? (savedProfile(aid) || {}) : {};
-    const th = saved.then || {};
+    const fbOn = fallbackActive();
+    // 兜底走的也是合成 Profile（id = __fallback__），所以按 profile_id 认它；
+    // 动作清单则直接取兜底顶层的 one_shot（兜底没有 THEN/ELSE 分支，见后端 fallback_holder）。
+    const shown = lr && ((aid && lr.profile_id === aid) || (fbOn && lr.profile_id === FALLBACK_ID)) ? lr : null;
+    const oneShots = aid
+      ? (((savedProfile(aid) || {}).then || {}).one_shot || [])
+      : (fbOn ? (((cfg.fallback || globalDraft.fallback || {}).one_shot) || []) : []);
     let p4 = "";
-    for (const a of (th.one_shot || [])) {
+    for (const a of oneShots) {
       const o = shown && (shown.outcomes || []).find(x => x.id === a.id);
       const cls = o ? (o.ok ? "ok" : "bad") : (shown && shown.running && a.enabled !== false ? "run" : "");
       const txtv = o ? (o.ok ? t("editor.action_ok") : t("editor.action_failed"))
@@ -640,12 +659,12 @@
     // 也就是零命中时才走它，所以它永远不参与匹配与冲突判定。
     const fon = sel && sel.kind === "fallback";
     const fb = globalDraft.fallback;
-    html += `<div class="prow fb ${fon ? "active" : ""} ${fon && dirty ? "dirty" : ""}" data-act="sel-fallback">
+    html += `<div class="prow fb ${fallbackActive() ? "live" : ""} ${fon ? "active" : ""} ${fon && dirty ? "dirty" : ""}" id="prow-fallback" data-act="sel-fallback">
       ${fon
         ? `<input type="checkbox" data-bind="enabled" data-cast="bool" ${!fb || fb.enabled !== false ? "checked" : ""} title="${esc(t("editor.enabled"))}">`
         : `<input type="checkbox" data-row-fb-en="1" ${!fb || fb.enabled !== false ? "checked" : ""} title="${esc(t("editor.enabled"))}">`}
       <span class="li-name ${fb && fb.enabled === false ? "li-off" : ""}">${esc(t("editor.global_fallback"))}</span>
-      <span class="badge-slot"></span><span style="width:13px"></span></div>`;
+      <span class="badge-slot" id="pbadge-fallback">${fallbackActive() ? badge("fallback") : ""}</span><span style="width:13px"></span></div>`;
     $("col-profiles").innerHTML = html;
     $("obj-badge").innerHTML = sel && sel.kind === "profile"
       ? badge(rowBadge(draft.id)) : "";
@@ -661,6 +680,13 @@
       // 要到下次整列重绘才对得上 —— 两处都在这里换。
       const row = $("prow-" + p.id);
       if (row) row.classList.toggle("live", !!pv && pv.status === "active");
+    }
+    // 兜底行：绿框 + 徽标只跟着「是否在生效」走，和选中态是两码事。
+    const fbRow = $("prow-fallback");
+    if (fbRow) {
+      fbRow.classList.toggle("live", fallbackActive());
+      const slot = $("pbadge-fallback");
+      if (slot) slot.innerHTML = fallbackActive() ? badge("fallback") : "";
     }
     $("obj-badge").innerHTML = sel && sel.kind === "profile"
       ? badge(rowBadge(draft.id)) : "";
@@ -930,7 +956,9 @@
     if (!net) return html + chk(pre_(pre, "network__new"), false, "editor.network_enable");
     const p = pre_(pre, "network");
     const manual = net.mode === "manual";
-    const dnsState = net.dns === undefined ? "keep" : (String(net.dns).trim() === "" ? "auto" : "set");
+    const dnsState = dnsOverride[pre] === "set" ? "set"
+      : net.dns === undefined ? "keep"
+      : (String(net.dns).trim() === "" ? "auto" : "set");
     html += `<div class="group-title"><span>${esc(t("editor.network_title"))}</span>` +
       `<button class="mini-btn" data-act="drop-network" data-pre="${pre}">${esc(t("editor.action_delete"))}</button></div>`;
     // 配置应用到哪张网卡：`NetworkTarget` 挂在 `network.target`，模型里是 `Option<NetworkTarget>`
@@ -1027,6 +1055,26 @@
       `<div style="display:flex;justify-content:flex-end;margin-top:10px;">
         <button class="secondary" data-act="close-verify">${esc(t("editor.close"))}</button></div>`;
     $("verify-mask").hidden = false;
+  }
+
+  // 隧道名覆盖：把裸 tun 接口（utun*）手动对应到 VPN 卡片上显示的名字。
+  // 优先级最高，盖过平台层的自动归属（"Clash" / "VPN"）；后端在 get_interfaces 边界套用。
+  function renderTunModal() {
+    const rows = Object.entries(globalDraft.tunnel_names || {});
+    const body = rows.length
+      ? rows.map(([dev, name]) =>
+          `<div class="tun-row"><input class="tun-dev" value="${esc(dev)}" placeholder="${esc(t("editor.tunnel_dev"))}">` +
+          `<input class="tun-name" value="${esc(name)}" placeholder="${esc(t("editor.tunnel_display"))}">` +
+          `<button class="mini-btn" data-act="tun-del">${esc(t("editor.tunnel_remove"))}</button></div>`).join("")
+      : `<div class="empty">${esc(t("editor.tunnel_empty"))}</div>`;
+    $("tun-modal").innerHTML = `<h3>${esc(t("editor.tunnel_names_title"))}</h3>
+      <div class="mv">${esc(t("editor.tunnel_hint"))}</div>
+      <div id="tun-rows" style="margin:10px 0">${body}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="mini-btn" data-act="tun-add">${esc(t("editor.tunnel_add"))}</button>
+        <button class="mini-btn primary" data-act="tun-save">${esc(t("editor.save"))}</button>
+      </div>`;
+    $("tun-mask").hidden = false;
   }
 
   /* —————————————————————— 第 4 列：3B 动作（先 THEN 后 ELSE；兜底只有一块） —————————————————————— */
@@ -1502,7 +1550,7 @@
       // 值写进去的结果，从来不是任何人的网络名 —— 读进来时清掉。
       for (const r of cfg.profiles.flatMap(p => p.rules || []))
         for (const c of r.conditions || []) if (c.value === "__manual__") delete c.value;
-      globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice() };
+      globalDraft = { fallback: clone(cfg.fallback), allowed_scripts: (cfg.allowed_scripts || []).slice(), tunnel_names: Object.assign({}, cfg.tunnel_names || {}) };
       langShown = rawLang || langShown;
       setLang(langShown);
       applyTheme(rawTheme);
@@ -1611,9 +1659,9 @@
   function setDnsMode(pre, mode) {
     const net = scope(pre).network;
     if (!net) return;
-    if (mode === "keep") delete net.dns;
-    else if (mode === "auto") net.dns = "";
-    else net.dns = typeof net.dns === "string" ? net.dns : "";
+    if (mode === "keep") { delete net.dns; delete dnsOverride[pre]; }
+    else if (mode === "auto") { net.dns = ""; delete dnsOverride[pre]; }
+    else { net.dns = typeof net.dns === "string" ? net.dns : ""; dnsOverride[pre] = "set"; }
     dirty = true;
     renderNetColumn();
   }
@@ -1707,6 +1755,37 @@
       case "sel-fallback": globalDraft.fallback ||= { enabled: true }; pick("fallback"); return;
       case "open-verify": verifyOpen = true; renderVerifyModal(); return;
       case "close-verify": verifyOpen = false; renderVerifyModal(); return;
+      case "open-tun": renderTunModal(); return;
+      case "tun-add": {
+        const rows = $("tun-rows");
+        const empty = rows.querySelector(".empty");
+        if (empty) empty.remove();
+        rows.insertAdjacentHTML("beforeend",
+          `<div class="tun-row"><input class="tun-dev" placeholder="${esc(t("editor.tunnel_dev"))}">` +
+          `<input class="tun-name" placeholder="${esc(t("editor.tunnel_display"))}">` +
+          `<button class="mini-btn" data-act="tun-del">${esc(t("editor.tunnel_remove"))}</button></div>`);
+        return;
+      }
+      case "tun-del": {
+        const row = el.closest(".tun-row");
+        if (row) row.remove();
+        const rows = $("tun-rows");
+        if (rows && !rows.querySelector(".tun-row"))
+          rows.innerHTML = `<div class="empty">${esc(t("editor.tunnel_empty"))}</div>`;
+        return;
+      }
+      case "tun-save": {
+        const map = {};
+        document.querySelectorAll("#tun-rows .tun-row").forEach((r) => {
+          const dev = r.querySelector(".tun-dev").value.trim();
+          const name = r.querySelector(".tun-name").value.trim();
+          if (dev) map[dev] = name;
+        });
+        globalDraft.tunnel_names = map;
+        $("tun-mask").hidden = true;
+        saveGlobal(globalDraft.fallback);
+        return;
+      }
       case "combo-toggle": {
         // 先收掉所有已展开的，再决定被点的这个要不要重新打开 —— 于是同一个箭头
         // 点两下就是开、关，两个组合框不会同时挂着浮层。
@@ -1922,7 +2001,7 @@
       const per = cleanActionList(fallback.persistent, "persist");
       if (per.length) fb.persistent = per;
     }
-    const payload = { fallback: fb, allowed_scripts: globalDraft.allowed_scripts };
+    const payload = { fallback: fb, allowed_scripts: globalDraft.allowed_scripts, tunnel_names: globalDraft.tunnel_names };
     try {
       await invoke("save_global", { payload: JSON.stringify(payload) });
       toast(t("editor.saved", { name: t("editor.global_fallback") }));

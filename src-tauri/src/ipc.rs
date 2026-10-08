@@ -11,6 +11,7 @@
 //!    因此这些命令的 `Ok(())` 只表示「已受理」，结果由 `netsense://action` 播报。
 
 use serde_json::json;
+use std::collections::HashMap;
 use tauri::{Manager, State};
 
 use crate::config::{FallbackConfig, Profile};
@@ -84,6 +85,21 @@ pub fn preview_match(
 #[tauri::command(async)]
 pub fn get_interfaces(state: State<'_, std::sync::Arc<AppState>>) -> String {
     let mut nics = state.plat.list_interfaces();
+    // 用户手动映射的隧道名优先级最高：盖过平台层的自动归属（"Clash" / "VPN"）。
+    // 只在 IPC 边界套一次，平台枚举本身保持无状态。
+    let tun = {
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        cfg.tunnel_names.clone()
+    };
+    if !tun.is_empty() {
+        for n in nics.iter_mut() {
+            if n.kind == crate::platform::NicKind::Vpn {
+                if let Some(name) = tun.get(&n.name) {
+                    n.app = Some(name.clone());
+                }
+            }
+        }
+    }
     let primary = crate::automation::primary_nic(&nics)
         .map(|p| p.name.clone())
         .and_then(|name| nics.iter().position(|n| n.name == name));
@@ -118,6 +134,7 @@ pub fn get_config(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "profiles": cfg.profiles,
         "fallback": cfg.fallback,
         "allowed_scripts": cfg.allowed_scripts,
+        "tunnel_names": cfg.tunnel_names,
         "config_path": state.config_path.display().to_string(),
         // 代际号在这把锁内读（写者也在锁内自增，见 [`AppState::config_replaced`]）：
         // 编辑器拿到的「内容 + 号」是同一代，重读后不会把旧内容当成新的。
@@ -176,9 +193,9 @@ pub fn save_global(
     // 缺字段即保留既有值：fallback 与 allowed_scripts 语义必须一致，绝不能因为一份
     // 不含某字段的保存就悄悄清掉用户之前的配置（否则保存全局项时会无声撤销零命中兜底
     // 或脚本白名单）。
-    let (existing_fallback, existing_scripts) = {
+    let (existing_fallback, existing_scripts, existing_tun) = {
         let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        (cfg.fallback.clone(), cfg.allowed_scripts.clone())
+        (cfg.fallback.clone(), cfg.allowed_scripts.clone(), cfg.tunnel_names.clone())
     };
     let fallback: Option<FallbackConfig> = match patch.get("fallback") {
         Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("fallback: {}", e))?,
@@ -193,11 +210,16 @@ pub fn save_global(
                 .collect()
         })
         .unwrap_or(existing_scripts);
+    let tun: HashMap<String, String> = patch
+        .get("tunnel_names")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(existing_tun);
     {
         let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = cfg.clone();
         next.fallback = fallback;
         next.allowed_scripts = scripts;
+        next.tunnel_names = tun;
         next.validate()?;
         next.save(&state.config_path)?;
         *cfg = next;

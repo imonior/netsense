@@ -4,6 +4,30 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.2] - 2026-10-08
+
+### Fixed
+
+- **DNS "specify" mode is now selectable and editable.** In the network editor the DNS tri-state dropdown
+  (keep / system / specify) jumped back to "system" the moment you picked "specify", because an empty
+  "specify" value and "system" mapped to the same empty `dns` field. The selected mode is now remembered
+  separately until you actually type servers, so "specify" stays chosen and its input box is usable.
+- **Clash / Clash Verge tunnels are now attributed by name.** A bare `utun` created by Clash's tun (e.g.
+  `utun1024`, with the `198.18.0.0/15` fake-IP pool) was shown only as the generic "VPN" label. It is now
+  recognized by that fake-IP range — the same address-based evidence used for Tailscale — and labelled
+  "Clash" instead of falling back to "VPN".
+- **Fallback log no longer overstates what it applied.** The zero-match fallback log said "applied the
+  fallback network settings" even when only the one-shot / persistent actions ran (no network change). It
+  now reads "applied the fallback settings".
+- **Fallback is now shown as the active profile in the UI.** When the zero-match fallback is applied, the
+  engine state (decision = NoActiveProfile) previously hid it from every panel: the status strip read
+  "No profile", the profile list marked nothing active, and the "What it runs" cell hid the fallback's
+  launched actions. The engine view now reports `fallback_active`, so the editor shows "Fallback" as the
+  active profile with a live highlight, and the tray popup shows it as the applied profile.
+- **Manual tunnel-name overrides.** Editor → Tunnel names lets you map a bare tunnel interface
+  (e.g. `utun1024`) to a display name (e.g. "Clash Verge"); it overrides auto-detection and shows on the
+  VPN card.
+
 ## [1.6.1] - 2026-10-07
 
 ### Fixed

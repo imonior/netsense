@@ -1724,6 +1724,9 @@ fn attribute_vpn(
     if let Some(name) = product_from_address(v6) {
         return Some(name);
     }
+    if let Some(name) = product_from_ipv4(addr) {
+        return Some(name);
+    }
     if wg_sock {
         return Some("WireGuard".to_string());
     }
@@ -1748,6 +1751,26 @@ fn product_from_address(v6: &[String]) -> Option<String> {
         .iter()
         .find(|(pfx, _)| v6.iter().any(|a| a.starts_with(pfx)))
         .map(|(_, name)| (*name).to_string())
+}
+
+/// 第 3 条证据（IPv4 版）：隧道 IPv4 落在某家产品的「假 IP」段里。
+///
+/// Clash / mihomo / Clash Verge 的 tun 默认把 `198.18.0.0/15`（含默认 /16）当 fake-IP
+/// 池：本机出站的每一跳都先落进这条隧道、再由用户态代理决定真往哪走。这段地址取自
+/// RFC 2544 的 benchmarks 段，正常网络不会拿它做真实地址，于是它成了「这条隧道是 Clash
+/// 家建的」的强信号 —— 与 Tailscale 的 ULA 段（见 [`PRODUCT_ADDRESS_PREFIXES`]）是同一类
+/// 「地址自己带着产品常数」的归属证据，不依赖任何进程查询。
+///
+/// 只认这段地址、不认别的「看起来像代理」的段：据它归属是把「这台机器上这条隧道确实带着
+/// 这个地址」当事实，而不是把「长得像」当成「是」。
+fn product_from_ipv4(ip: Option<&str>) -> Option<String> {
+    let ip = ip?;
+    let (a, rest) = ip.split_once('.')?;
+    let a: u8 = a.parse().ok()?;
+    let (b, _) = rest.split_once('.')?;
+    let b: u8 = b.parse().ok()?;
+    // 198.18.0.0/15 → 198.18.x.x 与 198.19.x.x
+    (a == 198 && (b == 18 || b == 19)).then(|| "Clash".to_string())
 }
 
 /// wireguard-go 给每条它管的隧道留一个控制套接字（上游约定：`<dir>/<dev>.sock`）。
@@ -3145,6 +3168,28 @@ mod tests {
             attribute_vpn(&VpnEvidence::default(), None, false, None, &[]),
             None
         );
+    }
+
+    /// Clash / mihomo / Clash Verge 的 tun 默认把 `198.18.0.0/15` 当 fake-IP 池：这条隧道的
+    /// IPv4 落在这段里就认成 "Clash"，与 Tailscale 的 ULA 段是同一类地址证据。裸 `utun`
+    /// 没有 network 服务、没有 wireguard 套接字、也没有 owner 进程可问，所以这一条是它
+    /// 唯一能归上名的路径——否则界面只会退回通用的「VPN」。
+    #[test]
+    fn clash_fakeip_tun_is_attributed() {
+        let ev = VpnEvidence::default();
+        // utun1024 实战地址：198.18.0.1（/15 内）
+        assert_eq!(
+            attribute_vpn(&ev, Some("198.18.0.1"), false, None, &[]).as_deref(),
+            Some("Clash")
+        );
+        // /15 的另一半：198.19.x.x 也算
+        assert_eq!(
+            attribute_vpn(&ev, Some("198.19.5.5"), false, None, &[]).as_deref(),
+            Some("Clash")
+        );
+        // 段外的地址不认（交给别的证据或退回 VPN）
+        assert_eq!(attribute_vpn(&ev, Some("198.17.0.1"), false, None, &[]), None);
+        assert_eq!(attribute_vpn(&ev, Some("10.0.0.1"), false, None, &[]), None);
     }
 
     /// IPv4 是能把「这条隧道」和「那个服务」连起来的当面证据：报出这条隧道的地址的那个

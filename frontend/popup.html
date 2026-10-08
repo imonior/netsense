@@ -411,6 +411,9 @@
         pv.textContent = t("status.conflict", "Conflict: {names}")
           .replace("{names}", (dec.ids || []).map(id => nameOf(data, id)).join(", "));
         pv.classList.add("warn");
+      } else if (data.engine && data.engine.fallback_active) {
+        // 零命中兜底已落地：它和某个 Profile 一样是当前生效的那一套。
+        pv.textContent = t("editor.global_fallback", "Fallback");
       } else {
         pv.textContent = t("status.no_profile", "No profile applied");
       }

@@ -594,6 +594,7 @@ impl Engine {
         EngineView {
             state: self.decision.clone(),
             active,
+            fallback_active: self.fallback_fp.is_some(),
             conflict,
             snapshot: self.snapshot.clone(),
             profiles,
@@ -1034,6 +1035,14 @@ pub struct EngineView {
     pub state: Decision,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+    /// 兜底当前是否处于「已生效」状态。`true` 表示零命中且兜底已落地
+    ///（网络回落 / 3B 已跑）。前端据此把兜底当成「当前生效的那一套」来呈现
+    ///（active profile、列表高亮、what-it-runs 等）。
+    ///
+    /// 来源是 [`Engine::fallback_fp`]（一旦被某个 Profile 接管、设为 DHCP 或改配置即清空），
+    /// 而不是一次性的 `decision` —— 后者每轮评估都会被 [`decide`] 重置成 `NoActiveProfile`，
+    /// 撑不到下一轮广播，所以不能直接用它判断「兜底是否在生效」。
+    pub fallback_active: bool,
     pub conflict: Vec<String>,
     pub snapshot: NetworkSnapshot,
     pub profiles: Vec<ProfileView>,
