@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 556 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 560 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -214,7 +214,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，47 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，48 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -242,7 +242,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `get_app_settings` | — | 软件设置窗口的一次性快照（JSON 字符串）：语言（以及它是不是「跟随系统」在起作用）、配色那一档（存的是选择，不是算出来的那一个值 —— 这条命令每次窗口获得焦点都会被调，不在这里问操作系统）、开机启动的**系统实况**（问不出来时 `autostart:false` + `autostart_error`）、三份路径与受信脚本目录、备份目录、日志保留天数及上下限、提权通道、平台、版本 |
 | `set_autostart` | `enable` | 开 / 关「登录时启动」，返回系统里**实际**的状态（写 plist / `.desktop` / 注册表，真相不在本进程里） |
 | `set_log_retention` | `days` | 设日志保留天数（越界按 1–365 夹紧），落盘 + 立刻按新窗口清一次，返回夹紧后的值 |
-| `uninstall_priv_channel` | — | 撤销 macOS 的免密通道：在一次授权之内删掉白名单包装脚本与 `/etc/sudoers.d/netsense`，并把 `notify.priv_removed` 记进日志。**没有配套的「安装」命令**：通道不在的时候，下一次应用配置会在那个本来就要弹的授权框里顺手把它装好（`platform::macos` 的 bootstrap 分支），所以装是下发的副产品，不是独立入口。非 macOS 平台回一条 `pal.priv_unsupported`；界面上那颗按钮在 `platform == "macos"` 且 `priv` 为 `"direct"` 或 `"outdated"` 时出现（旧版通道也留着那条 sudoers 规则，删得掉；等一次应用它会先被换成本版） |
+| `set_silent_execution` | `enable` | 开 / 关「静默执行」：把偏好写进**软件配置**，开启时并尽量建立免密通道（Windows 常驻 helper / macOS sudoers / Linux sudo），之后应用网络配置不再逐次弹 UAC / 授权框。通道建不起来时偏好照存、`priv` 回落成 `prompt`，下一次应用仍走原生授权（不会静默失败）；返回当前通道状态。关闭只改偏好、不撤销已建通道（撤销走 `uninstall_priv_channel`） |
+| `uninstall_priv_channel` | — | 撤销 macOS 的免密通道：在一次授权之内删掉白名单包装脚本与 `/etc/sudoers.d/netsense`，并把 `notify.priv_removed` 记进日志。安装通道有两条路：设置里的「静默执行」开关（`set_silent_execution`，主动装一次）与下一次应用配置时顺手装好（`platform::macos` 的 bootstrap 分支，装是下发的副产品）。非 macOS 平台回一条 `pal.priv_unsupported`；界面上那颗按钮在 `platform == "macos"` 且 `priv` 为 `"direct"` 或 `"outdated"` 时出现（旧版通道也留着那条 sudoers 规则，删得掉；等一次应用它会先被换成本版） |
 | `open_config_folder` | — | 在系统文件管理器里打开 `config.json` 所在目录（路径由后端现算，界面不自己拼） |
 | `open_app_settings_folder` | — | 打开 `settings.json` 所在目录。**不**复用上一条：自动化配置可以来自可执行文件同级，那时两条路径不是一个目录 |
 | `get_proxy_state` | — | 升级请求出口的现状，JSON 字符串 `{mode,url,system_proxy}`：`mode` 是磁盘上那三态之一，`system_proxy` 只在 mode 为 system 时**现问**操作系统（macOS 一条 `scutil --proxy`，Linux 几条 `gsettings`），问不到就是 `null`。这条命令只在设置窗口打开与保存之后各调一次 —— 不进 `get_app_settings`，那个每次窗口获得焦点都会被调，popup.html 也调它 |

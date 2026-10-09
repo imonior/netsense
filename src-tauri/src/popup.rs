@@ -119,6 +119,11 @@ fn show_window(app: &AppHandle, label: &str) {
             if !w.is_visible().unwrap_or(false) {
                 apply_geometry(&w, label);
             }
+            // 从未显示 / 最小化的窗口直接 `show()` 在 Windows 上常常不会还原到前台，
+            // 而 `set_focus()` 在非前台进程里也常被系统拒绝 —— 于是「双击托盘打开编辑器」
+            // 看起来像「点了没反应」（窗口其实在别的窗后面）。先 `unminimize` 兜底，再
+            // show + set_focus，保证窗口真正被拉到最前。
+            let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
         }

@@ -65,7 +65,7 @@ All notable changes to NetSense are documented here. The format is based on
 ### Changed
 
 - i18n: added `popup.public_ip` and `editor.target_*` keys; removed the now-unused `popup.default_egress`.
-  The backend gained a `get_public_ip` IPC command (47 commands total).
+  The backend gained a `get_public_ip` IPC command.
 
 ## [1.5.0] - 2026-10-07
 

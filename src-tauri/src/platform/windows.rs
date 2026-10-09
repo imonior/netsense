@@ -100,12 +100,55 @@ fn ps_exec_arg(s: &str) -> String {
     psq(&format!("\"{}\"", s.replace('"', "\\\"")))
 }
 
-/// 一行 `netsh.exe` 调用 + 退出码检查（失败即终止整段脚本，避免"部分成功"被当成功）。
-fn netsh_line(args: &[&str]) -> String {
+/// 走 `netsh` 下发网络配置时，**不能**用 netsh 的退出码判成败：Windows 在「接口已经是目标状态
+/// （无需变更）」时会打印一句成功提示却返回**退出码 1**（本地化提示如中文"已在此接口上启用 DHCP。"，
+/// 退出码仍是 1）；而真正的错误（接口不存在、参数非法、权限不足）退出码也是 1 —— 两者只看退出码
+/// 无法区分。因此这里一律改用 CIM 回查接口**实际是否到达目标状态**（`Get-NetIPInterface` 等返回的
+/// `Dhcp`/`IPAddress` 是 .NET 枚举/值，恒定英文 `Enabled`/`Disabled` 与具体 IP，与系统语言无关）：
+/// 到达即成功，没到达才把 netsh 原文抛出。这样"已是 DHCP 再设 DHCP"这类幂等操作不再误报失败
+/// （修复 v1.6.2 起 DHCP 配置永远下发失败的问题）。
+fn netsh_addr_dhcp(iface: &str) -> String {
     format!(
-        "& netsh.exe {}; if ($LASTEXITCODE -ne 0) {{ throw \"netsh exit $LASTEXITCODE\" }};",
-        ps_arr(args)
+        "& netsh.exe @('interface','ipv4','set','address',{0},'source=dhcp') | Out-Null;\r\n$__d=(Get-NetIPInterface -InterfaceAlias {1} -AddressFamily IPv4 -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Dhcp);\r\nif($__d -ne 'Enabled'){{ throw \"set address dhcp failed: Dhcp=$__d\" }};",
+        psq(&format!("name={iface}")),
+        psq(iface),
     )
+}
+
+fn netsh_addr_static(iface: &str, ip: &str, mask: &str, gw: &str) -> String {
+    format!(
+        "& netsh.exe @('interface','ipv4','set','address',{0},'static',{1},{2},{3}) | Out-Null;\r\n$__a=(Get-NetIPAddress -InterfaceAlias {4} -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {{ $_.IPAddress -eq {5} }}|Select-Object -ExpandProperty IPAddress);\r\nif(-not $__a){{ throw \"set address static failed: {5} not applied\" }};",
+        psq(&format!("name={iface}")),
+        psq(ip), psq(mask), psq(gw),
+        psq(iface), psq(ip),
+    )
+}
+
+/// DNS 清空为 DHCP：netwsh 同样会因"已是 DHCP"返回 1；这里只核验接口存在（能拦下"接口不存在"
+/// 的真错误），DNS 清空本身是幂等且安全的。
+fn netsh_dns_clear(iface: &str) -> String {
+    format!(
+        "& netsh.exe @('interface','ipv4','set','dnsservers',{0},'source=dhcp') | Out-Null;\r\n$null=Get-NetAdapter -Name {1} -ErrorAction Stop;",
+        psq(&format!("name={iface}")),
+        psq(iface),
+    )
+}
+
+/// DNS 设静态：逐服务器核验它确实进了 `ServerAddresses`（语言无关）。
+fn netsh_dns_static(iface: &str, servers: &[String]) -> String {
+    let n = psq(&format!("name={iface}"));
+    let a = psq(iface);
+    let mut s = format!(
+        "& netsh.exe @('interface','ipv4','set','dnsservers',{0},'static',{1},'primary') | Out-Null;\r\n$__d=(Get-DnsClientServerAddress -InterfaceAlias {2} -AddressFamily IPv4 -ErrorAction SilentlyContinue|Select-Object -ExpandProperty ServerAddresses);\r\nif($__d -notcontains {1}){{ throw \"set dnsservers static failed: {1} not applied\" }};",
+        n, psq(&servers[0]), a,
+    );
+    for (i, sv) in servers.iter().enumerate().skip(1) {
+        s.push_str(&format!(
+            "& netsh.exe @('interface','ipv4','add','dnsservers',{0},{1},'index={2}') | Out-Null;\r\n$__d=(Get-DnsClientServerAddress -InterfaceAlias {3} -AddressFamily IPv4 -ErrorAction SilentlyContinue|Select-Object -ExpandProperty ServerAddresses);\r\nif($__d -notcontains {1}){{ throw \"add dnsservers failed: {1} not applied\" }};",
+            n, psq(sv), i + 1, a,
+        ));
+    }
+    s
 }
 
 /// `-PrefixLength` 只接受整数。在配置进入 PowerShell 之前把 `v6prefix` 收敛成数字：
@@ -788,51 +831,13 @@ enum WinOp {
 impl WinOp {
     fn render(&self) -> String {
         match self {
-            WinOp::SetDhcp { iface } => netsh_line(&[
-                "interface",
-                "ipv4",
-                "set",
-                "address",
-                &format!("name={}", iface),
-                "source=dhcp",
-            ]),
-            WinOp::SetManual {
-                iface,
-                ip,
-                mask,
-                gw,
-            } => netsh_line(&[
-                "interface",
-                "ipv4",
-                "set",
-                "address",
-                &format!("name={}", iface),
-                "static",
-                ip,
-                mask,
-                gw,
-            ]),
+            WinOp::SetDhcp { iface } => netsh_addr_dhcp(iface),
+            WinOp::SetManual { iface, ip, mask, gw } => netsh_addr_static(iface, ip, mask, gw),
             WinOp::SetDns { iface, servers } => {
-                let n = format!("name={}", iface);
                 if servers.is_empty() {
-                    netsh_line(&["interface", "ipv4", "set", "dnsservers", &n, "source=dhcp"])
+                    netsh_dns_clear(iface)
                 } else {
-                    let mut s = netsh_line(&[
-                        "interface", "ipv4", "set", "dnsservers", &n, "static", &servers[0],
-                        "primary",
-                    ]);
-                    for (i, sv) in servers.iter().enumerate().skip(1) {
-                        s.push_str(&netsh_line(&[
-                            "interface",
-                            "ipv4",
-                            "add",
-                            "dnsservers",
-                            &n,
-                            sv,
-                            &format!("index={}", i + 1),
-                        ]));
-                    }
-                    s
+                    netsh_dns_static(iface, servers)
                 }
             }
             // 关闭 IPv6：禁用适配器上的 ms_tcpip6 绑定（等价于"关掉 IPv6"）
@@ -1298,23 +1303,40 @@ fn set_default_printer_script(printer: &str) -> String {
 /// 「这台机器装着哪些能启动的程序」，一条一个 JSON 对象 `{name, path}`。
 ///
 /// 只扫**开始菜单**（全机 + 当前用户两份）里的 `.lnk`：每一个快捷方式都是安装器写下的
-/// 「给人启动的入口」，名字就是它写在菜单里的那个；而 `Start-Process` 恰好直接受理
-/// `.lnk` 的完整路径 —— 枚举出来的形状与要下发的形状是同一个，中间没有翻译。
-/// 不扫 `Program Files` 的裸 `.exe`：卸载器、运行时、辅助进程会一起进来，下拉变垃圾场；
-/// 那些没登记入口的程序照样可以手输路径或走 [`WindowsPlatform::pick_app`]。
+/// 「给人启动的入口」。但 `.lnk` 本身不是程序 —— 用户要的是「真实 exe 的路径 + 可读名」，
+/// 和 macOS 的 `.app` 列表一个口径，于是这里把每个 `.lnk` 解析成它指向的 `.exe`：
+/// - `path` 写成 **exe 的真实路径**（而不是 `.lnk` 路径），悬停 / 下发都看这一条、跑这一条；
+/// - `name` 优先取 exe 的 `FileDescription`（装好之后的可读名，比如「Google Chrome」），
+///   取不到再退回 exe 文件名（去扩展名），不退回 `.lnk` 的「Uninstall …」这种噪音；
+/// - 过滤掉卸载类入口：`.lnk` 名或目标路径里含 `uninstall` / `卸载` 的一律不要，否则下拉里
+///   一半是「Uninstall <App>」。
 ///
-/// `Get-ChildItem -Recurse` 对单个目录递归（两个根各自走），`SilentlyContinue` 让某个根
-/// 读不动时还有另一个；两个都空才输出 `[]`。
+/// 解析 `.lnk` 走 `WScript.Shell` COM，需要 STA 线程，所以外层的调用方走 [`ps_sta`]
+/// （不是 [`ps`]）。`Get-ChildItem -Recurse` 对两个根各自递归，`SilentlyContinue` 让某个根
+/// 读不动时还有另一个；两个都空才输出 `[]`。`.lnk` 解析失败或目标不是 `.exe`（文档 / 目录 /
+/// URL 快捷方式）的直接丢，不进下拉。
 const INSTALLED_APPS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
+$shell = New-Object -ComObject WScript.Shell;
 $appDirs=@(
   (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
   (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
 );
-$appItems=@(foreach ($d in $appDirs) {
-  Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |
-    ForEach-Object { [pscustomobject]@{ name=$_.BaseName; path=$_.FullName } }
+$rows=@(foreach ($d in $appDirs) {
+  Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    $lnk = $_.FullName;
+    try { $target = $shell.CreateShortcut($lnk).TargetPath } catch { $target = '' }
+    if (-not $target) { return }
+    if ($target -notmatch '\.exe$') { return }
+    $base = $_.BaseName;
+    # i18n-exempt: matching a localized Start-Menu entry name (system output), not UI text
+    if ($base -match '(?i)uninstall|卸载') { return }
+    if ($target -match '(?i)uninstall|卸载') { return }
+    try { $desc = (Get-Item -LiteralPath $target).VersionInfo.FileDescription } catch { $desc = '' }
+    if (-not $desc) { $desc = [System.IO.Path]::GetFileNameWithoutExtension($target) }
+    [pscustomobject]@{ name=$desc; path=$target }
+  }
 });
-if ($appItems.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $appItems -Compress }"#;
+if ($rows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rows -Compress }"#;
 
 /// 解析 [`INSTALLED_APPS_PS`] 的 JSON。
 ///
@@ -1790,7 +1812,9 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
     }
 
     fn list_installed_apps(&self) -> Vec<AppEntry> {
-        match ps(INSTALLED_APPS_PS) {
+        // 用 `ps_sta` 而不是 `ps`：脚本里用 `WScript.Shell` 解析 `.lnk` 目标，那个 COM 对象
+        // 需要 STA 线程，否则解析会静默失败、整个列表空掉。
+        match ps_sta(INSTALLED_APPS_PS) {
             Ok(out) => parse_installed_apps(&out),
             Err(e) => {
                 // 空下拉对用户说的是「这台机器没装东西」，而真实原因可能是脚本起不来 ——

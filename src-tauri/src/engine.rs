@@ -2754,4 +2754,40 @@ mod mock_engine {
             "零命中应走兜底并把兜底网络下发到 mock"
         );
     }
+
+    /// 回归（问题 3A「兜底命中不显示」）：零命中走兜底后，`EngineView.fallback_active`
+    /// 必须为 true。前端 panel 顶部「当前生效配置」与编辑器 profile 行的激活徽标都读这
+    /// 一个字段；它若停在 false，兜底明明生效、界面却像没有任何配置在跑。三端共用同一份
+    /// `view()`，所以这一条同时锁定 Mac / Windows / Linux 的兜底显示前提。
+    #[test]
+    fn fallback_applied_reports_fallback_active_in_view() {
+        let cfg = Config {
+            schema: SCHEMA,
+            profiles: vec![ssid_profile("home", "TestNet")],
+            fallback: Some(FallbackConfig {
+                enabled: true,
+                network: Some(NetworkConfig {
+                    mode: Mode::Manual,
+                    ip: Some("192.168.0.5".to_string()),
+                    netmask: Some("255.255.255.0".to_string()),
+                    gateway: Some("192.168.0.1".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let state = state_with(cfg);
+        set_mock_ssid(&state, "SomeUnknownNet");
+        pass(&state, None);
+
+        // `view()` 的入参是配置快照；引擎与配置各一把锁，pass() 已返回、两把锁都未持有。
+        let cfg = state.config.lock().unwrap().clone();
+        let eng = state.engine.lock().unwrap();
+        let view = eng.view(&cfg);
+        assert!(
+            view.fallback_active,
+            "零命中兜底生效后 fallback_active 必须为 true，否则前端顶部/名称区显示不出兜底（问题 3A）"
+        );
+    }
 }

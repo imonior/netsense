@@ -768,8 +768,12 @@ fn spawn_helper() -> Result<(), String> {
         Ok(_) => Ok(()),
         // 用户点了「否」：报已取消，本批不再另弹第二个框。
         Err(e) if e.contains("1223") => Err(uac_cancelled(e)),
-        // 其他拉起失败（罕见，比如 exe 路径都读不出来）：交给轮询超时去退回逐次 UAC。
-        Err(_) => Ok(()),
+        // 其他拉起失败（罕见，但会表现为 helper 永远连不上却毫无痕迹）：记下原因再退回
+        // 逐次 UAC，否则只能看到下游的 CreateFile=2，根本定位不到是拉起这步出的问题。
+        Err(e) => {
+            crate::log::warn(&i18n::tf("pal.spawn_priv_failed", &[("error", &e)]));
+            Ok(())
+        }
     }
 }
 

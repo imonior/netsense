@@ -1399,6 +1399,34 @@ pub fn uninstall_priv_channel() -> Result<(), String> {
     Err(crate::i18n::t("pal.priv_unsupported"))
 }
 
+/// 建立免密通道：让后续的网络配置应用不再逐次弹 UAC / 授权框。
+///
+/// 与 [`uninstall_priv_channel`] 相对，但「安装」是幂等的、且失败不致命（退回逐次授权）。
+/// 各平台实现：
+/// - Windows：拉起常驻提权助手（一次 UAC），它跨应用重启存活，之后整段免确认；
+/// - macOS：写入 sudoers 白名单脚本（一次授权），之后 `sudo -n` 免密；
+/// - Linux：免密取决于系统已有的 sudoers / polkit 配置，这里不擅自改写系统策略，
+///   只返回成功，由 `run_priv` 在可用时走 `sudo -n` / `pkexec`。
+#[cfg(target_os = "windows")]
+pub fn install_priv_channel() -> Result<(), String> {
+    match win_helper::run_batch("") {
+        win_helper::Outcome::Done(r) => r,
+        // 助手连不上（用户取消授权 / 进程早退）时退回逐次 UAC，这一趟照常能下发，
+        // 所以当成成功，避免让调用方把这次切换判成失败。
+        win_helper::Outcome::Unavailable(_) => Ok(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn install_priv_channel() -> Result<(), String> {
+    macos::install_priv_channel()
+}
+
+#[cfg(target_os = "linux")]
+pub fn install_priv_channel() -> Result<(), String> {
+    Ok(())
+}
+
 // —————————————————————————— WebView 渲染运行时 ——————————————————————————
 
 /// WebView2 运行时下载页（Windows 专用；其它平台不会用到，故允许 dead_code）。

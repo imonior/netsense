@@ -247,6 +247,10 @@
       <div class="row"><span class="k" id="k-platform" data-i18n="sett.platform">Platform</span><span class="val" id="v-platform">—</span></div>
       <div class="row"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
       <div class="row" id="row-priv-remove" hidden><span class="k"></span><button class="tiny" id="btn-priv-remove" data-i18n="sett.priv_remove">Remove password-free changes</button></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chk-silent"><span id="k-silent" data-i18n="sett.silent_execution">Silent execution</span></label>
+      </div>
+      <div class="hint" id="hint-silent" data-i18n="sett.silent_hint">Apply network changes without repeatedly asking for authorization. The first time you turn this on, the app requests one authorization to set up a password-free channel; after that everything is silent.</div>
       <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
     </div>
   </main>
@@ -330,6 +334,7 @@
       // 一次才能撤销」—— 那一趟会把脚本换成本版，撤销窗口就关了。
       // Windows 的免密来自常驻提权助手、Linux 来自 sudo 策略，两边都没有一条 sudoers 规则可删。
       el("row-priv-remove").hidden = !(d.platform === "macos" && (d.priv === "direct" || d.priv === "outdated"));
+      el("chk-silent").checked = !!d.silent_execution;
       el("v-version").textContent = d.version || "—";
       // 三态与手填地址住在软件配置文件里，跟着这一趟一起回来。「跟随系统此刻会走哪条路」
       // 不在此列 —— 那得现问操作系统，见 loadProxy。
@@ -385,6 +390,28 @@
         toast(t("sett.saved", "Saved"));
       } catch (e) {
         ev.target.checked = !want;   // 系统没答应，勾选框就不许看起来答应了
+        toast(String(e));
+      } finally {
+        ev.target.disabled = false;
+      }
+    };
+
+    // 静默执行：开 = 建立免密通道（首次一次授权），关 = 只改偏好、不撤销已建通道。
+    // 开启后通道没建起来时，后端会把 priv 回落成 prompt；这里重拉一次设置让「提权通道」
+    // 那一行如实刷新，并提示用户「仍会逐次请求授权」，而不是假装成功。
+    el("chk-silent").onchange = async (ev) => {
+      const want = ev.target.checked;
+      ev.target.disabled = true;
+      try {
+        const priv = await invoke("set_silent_execution", { enable: want });
+        await load();   // 重新拉一遍，刷新「提权通道」显示
+        if (want && priv !== "direct" && priv !== "outdated") {
+          toast(t("sett.silent_failed", "The password-free channel could not be set up; each change will still ask for authorization"));
+        } else {
+          toast(t("sett.saved", "Saved"));
+        }
+      } catch (e) {
+        ev.target.checked = !want;   // 后端报错，勾选框就不许停在没写进去的那一档
         toast(String(e));
       } finally {
         ev.target.disabled = false;

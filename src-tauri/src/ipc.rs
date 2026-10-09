@@ -522,13 +522,14 @@ pub fn set_theme(
 /// 假的关闭态而不给解释。
 #[tauri::command(async)]
 pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
-    let (language, language_auto, theme, log_retention_days) = {
+    let (language, language_auto, theme, log_retention_days, silent_execution) = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
             i18n::current().code().to_string(),
             s.language.is_none(),
             crate::appconfig::normalize_theme(&s.theme).to_string(),
             s.log_retention_days,
+            s.silent_execution,
         )
     };
     let (autostart_on, autostart_error) = match crate::appconfig::autostart_enabled() {
@@ -577,6 +578,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "priv": priv_channel().code(),
         "platform": platform_name(),
         "version": env!("CARGO_PKG_VERSION"),
+        "silent_execution": silent_execution,
     });
     serde_json::to_string(&payload).unwrap_or_default()
 }
@@ -607,6 +609,38 @@ pub fn uninstall_priv_channel() -> Result<(), String> {
     crate::platform::uninstall_priv_channel()?;
     log::info(&i18n::t("notify.priv_removed"));
     Ok(())
+}
+
+/// 切换「静默执行」：开启时尽量建立免密通道（Windows 常驻 helper / macOS sudoers /
+/// Linux sudo），之后应用网络配置不再逐次弹 UAC / 授权框；关闭时只改偏好，不撤销已建立的通道。
+///
+/// 开启后若通道建立失败（用户取消那次授权、或平台不支持），设置仍然保存，但 `priv` 会回落成
+/// `prompt` 让界面如实反映 —— 下一次应用仍会走原生授权，而不是静默失败。返回当前的
+/// `priv` 通道状态，界面据此刷新「提权通道」那一行。
+#[tauri::command(async)]
+pub fn set_silent_execution(
+    state: State<'_, std::sync::Arc<AppState>>,
+    enable: bool,
+) -> Result<String, String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = s.clone();
+        next.silent_execution = enable;
+        next.save(&state.settings_path)?;
+        *s = next;
+    }
+    if enable {
+        // 日志文案复用既有 key（与 macos.rs 的通道安装同源）：这三条本就是同一件事的
+        // 结果，各写一份新 key 只会让同一个语义在字典里出现两次。
+        if let Err(e) = crate::platform::install_priv_channel() {
+            // 保存照常成功：通道没建起来只是退回逐次授权，不该让这次切换看起来像失败。
+            log::warn(&crate::i18n::tf("notify.priv_unverified", &[("error", &e)]));
+        } else {
+            log::info(&crate::i18n::t("notify.priv_installed"));
+        }
+    }
+    crate::state::publish_status(state.inner());
+    Ok(crate::platform::priv_channel().code().to_string())
 }
 
 /// 设置日志保留天数：写软件配置 + 立刻按新值清一次。

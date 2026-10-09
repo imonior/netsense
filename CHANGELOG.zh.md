@@ -35,7 +35,7 @@ NetSense 的所有重要变更记录于此。格式基于
 
 ### Changed
 
-- i18n：新增 `popup.public_ip` 与 `editor.target_*` key；删除已无用的 `popup.default_egress`。后端新增 `get_public_ip` IPC 命令（共 47 条命令）。
+- i18n：新增 `popup.public_ip` 与 `editor.target_*` key；删除已无用的 `popup.default_egress`。后端新增 `get_public_ip` IPC 命令。
 
 ## [1.5.0] - 2026-10-07
 

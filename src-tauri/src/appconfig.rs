@@ -136,6 +136,11 @@ pub struct AppConfig {
     /// 它改变的是界面怎么显示，不改任何下发内容 —— 与上面几个字段同一条判据。
     #[serde(default, skip_serializing_if = "WindowSizes::is_empty")]
     pub window_sizes: WindowSizes,
+    /// 静默执行：开启时尽量建立并使用免密通道（Windows 常驻 helper / macOS sudoers /
+    /// Linux sudo），应用网络配置不再逐次弹 UAC / 授权框。首次开启会请求一次授权以建立通道，
+    /// 之后全部静默。它只控制「要不要走免密通道」，不改变任何 Profile 的匹配或下发内容。
+    #[serde(default)]
+    pub silent_execution: bool,
 }
 
 fn default_retention() -> u32 {
@@ -154,6 +159,7 @@ impl Default for AppConfig {
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
             proxy: crate::netproxy::ProxySetting::default(),
             window_sizes: WindowSizes::default(),
+            silent_execution: false,
         }
     }
 }

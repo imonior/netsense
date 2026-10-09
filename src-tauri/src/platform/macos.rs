@@ -602,6 +602,33 @@ pub fn uninstall_priv_channel() -> Result<(), String> {
     .map(|_| ())
 }
 
+/// 只装免密通道、不附带任何本批下发：把 sudoers 白名单脚本与 `/usr/local/libexec/netsense-priv.sh`
+/// 用**一次**系统授权写进去，之后 `sudo -n` 免密。
+///
+/// 与 [`exec_ops_bootstrap`] 拆开，是因为「静默执行开关」需要的只是「把通道建好」——
+/// 它不该顺带触发一次网络下发。装不上（用户名取不到 / 临时目录不可用 / 用户取消那次授权）
+/// 时返回 Err，由调用方保存偏好、把 `priv` 回落成 `prompt` 如实反映；下一次应用配置仍会
+/// 在那个本来就要弹的授权框里顺手把通道装回来（见 [`exec_ops_bootstrap`]），所以不会变成
+/// 「再也装不上」。
+///
+/// 装完跑一次 [`nopasswd_probe`] 把真实结果写进日志：文件都到位不等于这台机器的 sudoers
+/// 真的免密（账号名、已被占用的 sudoers 文件、或压根不给该用户 sudo 的策略都会让通道
+/// 看着装好了却每次仍要密码）。查出来的结果只写日志，因为下发侧本来就有回落。
+pub fn install_priv_channel() -> Result<(), String> {
+    let user = current_user_name().ok_or_else(|| i18n::t("pal.priv_no_user"))?;
+    let installer = write_priv_installer(&user)?;
+    let cmd = format!("/bin/sh {}", sh_q(&installer.display().to_string()));
+    let r = run_via_osascript(&cmd).map(|_| ());
+    let _ = std::fs::remove_file(&installer);
+    if r.is_ok() && priv_channel() == PrivChannel::Direct {
+        match nopasswd_probe() {
+            Ok(()) => crate::log::info(&i18n::t("notify.priv_installed")),
+            Err(e) => crate::log::warn(&i18n::tf("notify.priv_unverified", &[("error", &e)])),
+        }
+    }
+    r
+}
+
 /// 把一份配置编译成按序执行的特权操作，不做任何 I/O。
 ///
 /// DNS 是这里唯一**三态**的字段：`dns` 缺失就不产生 DNS 操作（服务上现在挂着什么

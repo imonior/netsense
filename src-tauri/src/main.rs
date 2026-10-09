@@ -300,6 +300,7 @@ fn main() {
             ipc::set_autostart,
             ipc::set_log_retention,
             ipc::uninstall_priv_channel,
+            ipc::set_silent_execution,
             ipc::open_config_folder,
             ipc::open_app_settings_folder,
             ipc::get_proxy_state,
