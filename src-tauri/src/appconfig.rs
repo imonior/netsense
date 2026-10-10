@@ -619,6 +619,7 @@ mod tests {
                 url: "http://127.0.0.1:7890".into(),
             },
             window_sizes: WindowSizes::default(),
+            silent_execution: false,
         };
         cfg.save(&p).unwrap();
         assert_eq!(AppConfig::load(&p).unwrap(), cfg);
@@ -649,6 +650,7 @@ mod tests {
                 url: "file:///etc/passwd".into(),
             },
             window_sizes: WindowSizes::default(),
+            silent_execution: false,
         }
         .clamped();
         assert_eq!(bad.proxy, ProxySetting::Direct);
@@ -660,6 +662,7 @@ mod tests {
                 url: "SOCKS5://10.0.0.1:1080".into(),
             },
             window_sizes: WindowSizes::default(),
+            silent_execution: false,
         }
         .clamped();
         assert_eq!(
@@ -715,6 +718,7 @@ mod tests {
                 log_retention_days: 0,
                 proxy: ProxySetting::default(),
                 window_sizes: WindowSizes::default(),
+                silent_execution: false,
             }
             .clamped()
             .log_retention_days,
