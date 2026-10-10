@@ -4,6 +4,12 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.4] - 2026-10-10
+
+### Fixed
+
+- **VPN card `Routes` row is right-aligned again.** The 1.6.3 wrap change left it left-aligned, which broke the visual alignment with the IPv4 / Gateway rows above it. A long route still wraps instead of being clipped mid-route — only the alignment changed. (`popup.html`)
+
 ## [1.6.3] - 2026-10-10
 
 ### Fixed

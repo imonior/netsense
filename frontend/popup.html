@@ -83,13 +83,13 @@
     .nic-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
     .nic-row .k { color: var(--muted); }
     .nic-row .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 66%; }
-    /* 路由那一行和 IP / 网关不同：它本来就可能是好几条前缀（routeText 已收成「3 条 +N」），
-       再被 nowrap + ellipsis 二次截断成 `...` 就丢信息了。这里放开宽度上限、允许 flex 收缩换行，
-       把全部前缀摊开，宁可多占一两行，也不让「WireGuard Plus 的路由」看着像被截断了。
+    /* 路由行和 IP / 网关一样右对齐（视觉上跟上面几行对齐），但它可能包含好几条前缀
+       （routeText 已收成「3 条 +N」）。这里放开宽度上限、允许 flex 收缩换行，把长前缀摊开，
+       宁可多占一两行也不让单条路由被 nowrap + ellipsis 从中间截成 `...` 丢信息。
        flex 子项默认 min-width:auto 不会缩到内容以下，必须显式 min-width:0 才允许换行收缩；
-       长前缀（如 fe80::.../64）用 overflow-wrap:anywhere 兜底断行。多行路由左对齐比右对齐更可读。 */
+       长前缀（如 fe80::.../64）用 overflow-wrap:anywhere 兜底断行，断行仍右对齐、不截断单条。 */
     .nic-row .v.route {
-      flex: 1 1 auto; min-width: 0; max-width: none; margin-left: 8px; text-align: left;
+      flex: 1 1 auto; min-width: 0; max-width: none; margin-left: 8px; text-align: right;
       overflow: visible; text-overflow: clip;
       white-space: normal; word-break: break-word; overflow-wrap: anywhere; line-height: 1.35;
     }
