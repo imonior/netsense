@@ -4,6 +4,15 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다.
 
+## [1.6.3] - 2026-10-10
+
+### 수정
+
+- **트레이 아이콘 더블 클릭으로 자동화 설정이 열립니다.** Windows에서 트레이 패널은 그동안 `show()` + `set_focus()`만 호출했고, 창이 표시된 적 없거나 최소화되어 있으면 숨은 채로 남아 더블 클릭이 먹지 않는 것처럼 보였습니다. 이제 먼저 `unminimize()`를 호출하므로 패널이 확실하게 앞으로 나옵니다. (`popup.rs`)
+- **VPN / WireGuard Plus 경로가 더 이상 잘리지 않습니다.** 트레이 팝업은 그동안 경로 접두사를 `text-overflow: ellipsis`와 `max-width`로 그려 긴 경로 목록을 `...`로 잘랐습니다. 이제 경로 값은 줄 바꿈되므로 모든 접두사(원래 3개 + "N개 더"로 모아짐)가 표시됩니다. (`popup.html`)
+- **Windows 앱 선택기가 시작 메뉴 바로가기를 실제 실행 파일로 풉니다.** 자동화 "앱 실행" 목록은 그동안 `.lnk`를 메뉴 이름으로 나열하고 생 `.lnk` 경로를 노출했으며, 수많은 `uninstall` 바로가기가 섞여 있었습니다. 이제 각 항목을 COM을 통해 실제 `.exe` 대상으로 풀고, 친근한 이름(exe의 `FileDescription`, 못 얻으면 파일 이름)으로 표시하며 exe 경로를 툴팁으로 보여줍니다. (`windows.rs`)
+- **"자동(무음) 실행" 토글이 비밀번호 없는 채널을 설정합니다.** 설정에서 이제 자동 실행을 켤 수 있습니다. 첫 적용은 한 번만 확인을 묻고, 이후 비밀번호 없는 채널(Windows helper / macOS `sudoers` / Linux `sudo`)이 유지되어 이후 저장·적용 시 확인이 뜨지 않습니다. (`set_silent_execution`, `settings.html`)
+
 ## [1.6.2] - 2026-10-08
 
 ### Fixed

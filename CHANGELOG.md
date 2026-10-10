@@ -4,6 +4,15 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.3] - 2026-10-10
+
+### Fixed
+
+- **Tray icon double-click now opens the automation config.** On Windows the tray panel only called `show()` + `set_focus()`; if the window was never shown or was minimized it stayed hidden, so the double-click looked dead. It now calls `unminimize()` first, so the panel reliably comes to the front. (`popup.rs`)
+- **VPN / WireGuard Plus routes are no longer truncated.** The tray popup rendered route prefixes with `text-overflow: ellipsis` and a `max-width`, cutting longer route lists to `...`. The route value now wraps, so all prefixes (already capped at three + "N more") are shown. (`popup.html`)
+- **Windows app picker resolves Start-Menu shortcuts to real executables.** The automation "launch app" list enumerated `.lnk` files by their menu name and exposed the raw `.lnk` path, with many `uninstall` shortcuts mixed in. Each entry is now resolved through COM to its real `.exe` target, shown by a friendly name (the exe's `FileDescription`, falling back to its file name) with the exe path as the tooltip. (`windows.rs`)
+- **A "silent execution" toggle sets up the password-free channel.** In Settings you can now enable silent execution; the first apply still prompts once, after which the password-free channel (Windows helper / macOS `sudoers` / Linux `sudo`) is kept, so subsequent saves and applies no longer ask for confirmation. (`set_silent_execution`, `settings.html`)
+
 ## [1.6.2] - 2026-10-08
 
 ### Fixed

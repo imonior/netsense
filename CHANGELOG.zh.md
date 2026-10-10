@@ -4,6 +4,15 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.6.3] - 2026-10-10
+
+### 修复
+
+- **托盘图标双击现在会打开自动化配置。** Windows 上托盘面板之前只调用 `show()` + `set_focus()`；若窗口从未显示或处于最小化状态，它就一直隐藏，导致双击像没反应。现在先调用 `unminimize()`，面板就能稳定地提到前台。（`popup.rs`）
+- **VPN / WireGuard Plus 路由不再被截断。** 托盘弹窗原本用 `text-overflow: ellipsis` 加 `max-width` 渲染路由前缀，把较长的路由列表截成 `...`。现在路由值改为换行，所以全部前缀（本就收成三条 +「还有 N 条」）都能显示。（`popup.html`）
+- **Windows 程序选择器把开始菜单快捷方式解析成真实 exe。** 自动化「启动程序」列表原先按菜单名枚举 `.lnk` 文件、暴露的是裸 `.lnk` 路径，还混进大量 `uninstall` 快捷方式。现在每条都经 COM 解析到真实的 `.exe` 目标，以友好名（exe 的 `FileDescription`，取不到退回文件名）显示、并把 exe 路径作为悬停提示。（`windows.rs`）
+- **「静默执行」开关会建立免密通道。** 设置里现在可以开启静默执行；首次应用仍弹一次授权，之后免密通道（Windows helper / macOS `sudoers` / Linux `sudo`）会一直保持，后续保存和应用的授权提示不再出现。（`set_silent_execution`、`settings.html`）
+
 ## [1.6.2] - 2026-10-08
 
 ### Fixed

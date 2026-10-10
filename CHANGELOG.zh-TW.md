@@ -4,6 +4,15 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [1.6.3] - 2026-10-10
+
+### 修復
+
+- **托盤圖示雙擊現在會開啟自動化設定。** Windows 上托盤面板之前只呼叫 `show()` + `set_focus()`；若視窗從未顯示或處於最小化狀態，它就一直隱藏，導致雙擊像沒反應。現在先呼叫 `unminimize()`，面板就能穩定地提到前景。（`popup.rs`）
+- **VPN / WireGuard Plus 路由不再被截斷。** 托盤彈窗原本用 `text-overflow: ellipsis` 加 `max-width` 渲染路由前綴，把較長的路由清單截成 `...`。現在路由值改為換行，所以全部前綴（本就收成三條 +「還有 N 條」）都能顯示。（`popup.html`）
+- **Windows 程式選擇器把開始選單捷徑解析成真實 exe。** 自動化「啟動程式」清單原先按選單名列舉 `.lnk` 檔案、暴露的是裸 `.lnk` 路徑，還混進大量 `uninstall` 捷徑。現在每條都經 COM 解析到真實的 `.exe` 目標，以友好名（exe 的 `FileDescription`，取不到退回檔名）顯示、並把 exe 路徑作為懸停提示。（`windows.rs`）
+- **「靜默執行」開關會建立免密通道。** 設定裡現在可以開啟靜默執行；首次應用仍彈一次授權，之後免密通道（Windows helper / macOS `sudoers` / Linux `sudo`）會一直保持，後續儲存和應用的授權提示不再出現。（`set_silent_execution`、`settings.html`）
+
 ## [1.6.2] - 2026-10-08
 
 ### Fixed
