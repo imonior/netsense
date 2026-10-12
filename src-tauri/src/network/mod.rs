@@ -113,16 +113,16 @@ pub fn apply_3a<P: NetworkPlatform>(
     // 补完**必须再回读一次**：`apply_dns_only` 返回 Ok 只代表命令被接受，不代表 DNS 真的
     // 到位了。这里若不看结果就放行，「说补上了其实没补」比老实报失败更糟。
     if let Some(f) = &last {
-        if f.dns_left_empty && !dns_fallback.is_empty() {
-            if plat.apply_dns_only(cfg.target, dns_fallback).is_ok()
-                && readback_match(plat, cfg).is_ok()
-            {
-                let servers = dns_fallback.join(", ");
-                crate::log::warn(&i18n::tf("net.dns_fallback_used", &[("servers", &servers)]));
-                return Stage3A::Applied {
-                    note: Some(i18n::tf("net.dns_fallback_note", &[("servers", &servers)])),
-                };
-            }
+        if f.dns_left_empty
+            && !dns_fallback.is_empty()
+            && plat.apply_dns_only(cfg.target, dns_fallback).is_ok()
+            && readback_match(plat, cfg).is_ok()
+        {
+            let servers = dns_fallback.join(", ");
+            crate::log::warn(&i18n::tf("net.dns_fallback_used", &[("servers", &servers)]));
+            return Stage3A::Applied {
+                note: Some(i18n::tf("net.dns_fallback_note", &[("servers", &servers)])),
+            };
         }
     }
 

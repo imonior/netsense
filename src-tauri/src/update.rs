@@ -1874,7 +1874,7 @@ mod tests {
         hex_decode(&m.signature, &mut sig).expect("sig hex");
 
         // 攻击者把 seq 抬到 999（想绕过单调水位），但没 root 私钥改签名。
-        let mut body = TrustBody {
+        let body = TrustBody {
             schema: m.schema,
             seq: 999,
             signing_key: &m.signing_key,
@@ -1883,7 +1883,6 @@ mod tests {
         let forged = serde_json::to_vec(&body).expect("serialize");
         assert!(verify_ed25519(&forged, &sig, &root_pk).is_err());
         // 换一个 root 公钥同样验不过。
-        body.seq = m.seq;
         let other_root = SigningKey::from(SecretKey::from([0x77u8; 32])).verifying_key().to_bytes();
         assert!(verify_ed25519(&forged, &sig, &other_root).is_err());
     }

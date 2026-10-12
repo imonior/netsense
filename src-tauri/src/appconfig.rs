@@ -229,6 +229,7 @@ pub struct AppConfig {
 /// 默认**关闭**，且**不预置任何公共解析器**：
 /// - 开着却往企业内网塞 1.1.1.1 会打断内网域名解析，用户只会看到「网络坏了」；
 /// - 把查询静默导向用户没指定的第三方解析器，本身就是不该由本应用替他做的决定。
+///
 /// 所以服务器由用户自己填，本应用只负责在真正没有 DNS 的时候用上它。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -911,8 +912,10 @@ mod tests {
         let s = serde_json::to_string(&AppConfig::default()).unwrap();
         assert!(!s.contains("update_mirror"), "unexpected key in: {s}");
 
-        let mut with = AppConfig::default();
-        with.update_mirror = UpdateMirror::Prefix("https://gh-proxy.com/".into());
+        let with = AppConfig {
+            update_mirror: UpdateMirror::Prefix("https://gh-proxy.com/".into()),
+            ..AppConfig::default()
+        };
         let s = serde_json::to_string(&with).unwrap();
         assert!(s.contains("update_mirror"), "mirror was dropped: {s}");
         let back: AppConfig = serde_json::from_str(&s).unwrap();

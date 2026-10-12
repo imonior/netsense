@@ -818,19 +818,20 @@ pub fn proxy_speed_test(urls: Vec<String>) -> Result<String, String> {
         // 应答落到临时文件而不是 /dev/null：那个路径名 Windows 上叫 NUL，而这里不该为了
         // 丢字节去分叉 —— body 写走之后 stdout 只剩 `-w` 那一个数，读回来不用解析两掺。
         let dest = std::env::temp_dir().join(format!("netsense-psprobe-{}.out", std::process::id()));
-        let args = vec![
-            "-s".to_string(),
-            "-o".to_string(),
-            dest.to_string_lossy().to_string(),
-            "-w".to_string(),
-            "%{time_total}".to_string(),
-            "--max-time".to_string(),
-            "8".to_string(),
-            "--proxy".to_string(),
-            url.clone(),
-            PROBE.to_string(),
+        // curl 的参数全是常量、长度固定：数组就够，`vec!` 只多一次堆分配。
+        let dest_arg = dest.to_string_lossy().into_owned();
+        let argv: [&str; 10] = [
+            "-s",
+            "-o",
+            &dest_arg,
+            "-w",
+            "%{time_total}",
+            "--max-time",
+            "8",
+            "--proxy",
+            &url,
+            PROBE,
         ];
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let ms = crate::platform::run("curl", &argv)
             .ok()
             .and_then(|t| t.trim().parse::<f64>().ok())
