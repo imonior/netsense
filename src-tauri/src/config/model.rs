@@ -336,7 +336,12 @@ pub struct RouteConfig {
 }
 
 /// 3A 的校验策略。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+///
+/// `Default` **手写**而不是 derive：`bool` 的派生默认是 `false`，而回读是 3A 的基本校验。
+/// serde 的 `default_true` 只管「配置里显式写了 `verify: {}`」的情况；`verify` 整块缺省时
+/// `cfg.verify` 是 `None`，`apply_3a` 的 `unwrap_or_default()` 走的是这里的 `Default` ——
+/// 派生实现会把回读整个关掉，「没写 verify 块」反而成了最不被校验的配置。
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VerifyConfig {
     /// 下发后回读实际参数并与期望比对。这是 3A 的**基本**校验，默认开。
     #[serde(default = "default_true")]
@@ -344,6 +349,15 @@ pub struct VerifyConfig {
     /// 主动探测（ICMP/HTTP）+ 连续失败时的处置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthConfig>,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            readback: true,
+            health: None,
+        }
+    }
 }
 
 /// 健康度探测：既是 3A 的可选校验手段，也是 Active 期间的持续监测。
