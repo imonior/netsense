@@ -531,6 +531,23 @@ fn helper_seen() -> &'static AtomicBool {
     &A
 }
 
+/// 常驻通道此刻是否真的通着 —— 跑成功一批就置位，连不上就清掉。
+///
+/// 这一位是给 [`crate::platform::windows::priv_channel`] 用的。那个函数回答的是
+/// 「**现在**还要不要弹框」，而 helper 有没有活起来是纯粹运行时的事：只看 `is_admin()`
+/// 的话，用户打开「静默执行」、helper 已经拉起之后，界面仍然会报这一档 —— 开关生效了，
+/// 设置页却说通道没建立。（macOS 那一侧不存在这个问题：它的 `priv_channel` 每次现读
+/// sudoers 脚本，不存在「记着第一次的答案」。）
+fn helper_live() -> &'static AtomicBool {
+    static A: AtomicBool = AtomicBool::new(false);
+    &A
+}
+
+/// 供 PAL 查询：常驻通道此刻是不是已经接上、后续批次不用再弹框。
+pub(crate) fn channel_live() -> bool {
+    helper_live().load(Ordering::Relaxed)
+}
+
 /// 连续「这一批没能走常驻通道」的次数：一次成功的调用清零，攒到 [`GIVE_UP_AFTER`]
 /// 就不再**拉起** helper（封顶的只是会弹授权框的那一步；免费的开管尝试每批都留，见
 /// [`ensure_conn`]）。封顶的理由不是省几次重试，而是**少弹框** —— 拉起 helper 本身
@@ -598,14 +615,22 @@ pub(crate) fn run_batch(body: &str) -> Outcome {
     let mut conn = match g.take() {
         Some(c) => c,
         None => match ensure_conn() {
-            Err(msg) => return Outcome::Done(Err(msg)),
-            Ok(None) => return Outcome::Unavailable(note_failure()),
+            Err(msg) => {
+                helper_live().store(false, Ordering::Relaxed);
+                return Outcome::Done(Err(msg));
+            }
+            Ok(None) => {
+                helper_live().store(false, Ordering::Relaxed);
+                return Outcome::Unavailable(note_failure());
+            }
             Ok(Some(c)) => c,
         },
     };
     match conn.call(&req) {
         Ok(resp) => {
             *g = Some(conn);
+            // 这一批确实是从常驻通道出去的 —— 从这里开始，「要不要弹框」的答案就是不要。
+            helper_live().store(true, Ordering::Relaxed);
             helper_fails().store(0, Ordering::Relaxed);
             if resp.get("ok").and_then(Value::as_bool).unwrap_or(false) {
                 return Outcome::Done(Ok(()));
@@ -619,6 +644,8 @@ pub(crate) fn run_batch(body: &str) -> Outcome {
         }
         Err(e) => {
             helper_seen().store(false, Ordering::Relaxed);
+            // 对面已经失联：从这一刻起「要不要弹框」变回要，界面那一档也要跟着回去。
+            helper_live().store(false, Ordering::Relaxed);
             // 没有 raw_os_error 的那一路是我们自己造的（应答不是 JSON / 应答前对面退场）。
             last_connect_err().store(e.raw_os_error().unwrap_or(109) as u32, Ordering::Relaxed);
             Outcome::Unavailable(note_failure())

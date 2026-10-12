@@ -155,6 +155,13 @@
         <input type="text" id="in-proxy-url" disabled spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
       </div>
       <div class="row">
+        <span class="k" id="k-proxy-presets" data-i18n="sett.proxy_presets">Common local proxies</span>
+        <select id="sel-proxy-preset"></select>
+        <button id="btn-proxy-test" data-i18n="sett.proxy_speed_test">Test speed</button>
+      </div>
+      <div class="hint" id="hint-proxy-speed" data-i18n="sett.proxy_speed_hint">Times the real update request through each candidate, so you can pick whichever is actually fastest right now.</div>
+      <div class="hint" id="hint-proxy-result" hidden></div>
+      <div class="row">
         <label class="chk"><input type="radio" name="proxy" value="direct" id="rd-proxy-direct"><span id="k-proxy-direct" data-i18n="sett.proxy_direct">Direct</span></label>
       </div>
       <div class="hint" id="hint-proxy-now" hidden></div>
@@ -229,6 +236,18 @@
     <div class="card">
       <h3 id="sec-update" data-i18n="sett.section_update">Updates</h3>
       <div class="row">
+        <span class="k" id="k-mirror" data-i18n="sett.mirror">Download mirror</span>
+        <select id="sel-mirror">
+          <option value="" id="opt-mirror-direct" data-i18n="sett.mirror_direct">Direct (GitHub)</option>
+          <option value="__custom" id="opt-mirror-custom" data-i18n="sett.mirror_custom">Custom prefix</option>
+        </select>
+      </div>
+      <div class="row" id="row-mirror-custom" hidden>
+        <input type="text" id="in-mirror" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.mirror_placeholder" placeholder="https://gh-proxy.com/">
+      </div>
+      <div class="hint" id="hint-mirror" data-i18n="sett.mirror_hint">Both the installer and its checksum and signature travel through the mirror. The signature is checked against a key built into this app, so a mirror can slow or break a download, but it cannot make a fake installer pass.</div>
+      <div class="err" id="err-mirror" hidden></div>
+      <div class="row">
         <span class="k" id="k-update-note" data-i18n="sett.update_note">The panel checks quietly once after start-up; this button asks again, right now.</span>
         <button id="btn-update-check" data-i18n="popup.check_update">Check for Updates</button>
       </div>
@@ -251,6 +270,15 @@
         <label class="chk"><input type="checkbox" id="chk-silent"><span id="k-silent" data-i18n="sett.silent_execution">Silent execution</span></label>
       </div>
       <div class="hint" id="hint-silent" data-i18n="sett.silent_hint">Apply network changes without repeatedly asking for authorization. The first time you turn this on, the app requests one authorization to set up a password-free channel; after that everything is silent.</div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chk-dnsfb"><span id="k-dnsfb" data-i18n="sett.dns_fallback">DNS fallback</span></label>
+      </div>
+      <div class="hint" id="hint-dnsfb" data-i18n="sett.dns_fallback_hint">If a profile asks for automatic DNS on a static address and the system ends up with no name server at all, these servers are applied instead. Off by default, and the app ships no public resolver of its own: you fill in the servers yourself.</div>
+      <div class="row">
+        <span class="k" id="k-dnsfb-servers" data-i18n="sett.dns_fallback_servers">Servers</span>
+        <input type="text" id="in-dnsfb" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.dns_fallback_placeholder" placeholder="192.168.1.1, 1.1.1.1">
+      </div>
+      <div class="err" id="err-dnsfb" hidden></div>
       <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
     </div>
   </main>
@@ -335,7 +363,13 @@
       // Windows 的免密来自常驻提权助手、Linux 来自 sudo 策略，两边都没有一条 sudoers 规则可删。
       el("row-priv-remove").hidden = !(d.platform === "macos" && (d.priv === "direct" || d.priv === "outdated"));
       el("chk-silent").checked = !!d.silent_execution;
+      el("chk-dnsfb").checked = !!d.dns_fallback_enabled;
+      // 用户正在手填服务器时不许被焦点刷新覆盖 —— 与 proxyDirty 同一条理由。
+      if (!dnsfbDirty) el("in-dnsfb").value = d.dns_fallback_servers || "";
       el("v-version").textContent = d.version || "—";
+      mirrorOnDisk = d.update_mirror || "";
+      // 用户正在手填前缀时不许被焦点刷新覆盖 —— 与 proxyDirty 同一条理由。
+      if (!mirrorDirty) syncMirror(mirrorOnDisk);
       // 三态与手填地址住在软件配置文件里，跟着这一趟一起回来。「跟随系统此刻会走哪条路」
       // 不在此列 —— 那得现问操作系统，见 loadProxy。
       if (!proxyDirty) {
@@ -418,6 +452,46 @@
       }
     };
 
+    // —— DNS 兜底 ——
+    //
+    // 默认关闭，而且本应用**不预置任何公共解析器**，服务器由用户自己填：开着却在企业内网
+    // 里塞一台公共 DNS 会打断内网域名解析，用户只会看到「网络坏了」；而把查询静默导向用户
+    // 没指定的第三方解析器，本就不该由本应用替他决定。
+    //
+    // 它只在一种场合生效：静态地址上请求了「DNS 自动获取」，而系统最终一个 nameserver
+    // 都没有。3A 回读发现这件事时会改下这几台，并把「用的是兜底」如实写进日志。
+    let dnsfbDirty = false;
+    const dnsfbServers = () =>
+      el("in-dnsfb").value.split(",").map((s) => s.trim()).filter(Boolean);
+    async function saveDnsFallback(enable) {
+      dnsfbDirty = false;
+      try {
+        const raw = await invoke("set_dns_fallback", { enable, servers: dnsfbServers() });
+        const saved = typeof raw === "string" ? JSON.parse(raw) : raw;
+        // 一律按**落盘后的真值**回显：认不出的地址被后端剔除，「开着却没有一台合法服务器」
+        // 会被收成关着 —— 否则界面会显示成「填了个错的却已保存」。
+        el("chk-dnsfb").checked = !!saved.enabled;
+        el("in-dnsfb").value = (saved.servers || []).join(", ");
+        if (enable && !saved.enabled) {
+          show("err-dnsfb", t("sett.dns_fallback_rejected", "None of those is an IP address, so the fallback stays off."));
+        } else {
+          show("err-dnsfb", "");
+          toast(t("sett.saved", "Saved"));
+        }
+      } catch (e) {
+        show("err-dnsfb", String(e));
+        await load();   // 没写进去，界面就退回磁盘上那一档
+      }
+    }
+    el("chk-dnsfb").onchange = (ev) => saveDnsFallback(ev.target.checked);
+    // 填了服务器就替用户把开关勾上：只填地址却不开开关，保存出去的还是关着，
+    // 看起来就是「存了却没生效」。
+    el("in-dnsfb").onchange = () => {
+      if (dnsfbServers().length) el("chk-dnsfb").checked = true;
+      saveDnsFallback(el("chk-dnsfb").checked);
+    };
+    el("in-dnsfb").oninput = () => { dnsfbDirty = true; show("err-dnsfb", ""); };
+
     // 升级代理。三态和手填地址是软件配置里的一个值（render 从 get_app_settings 回显）；
     // 「跟随系统此刻会走哪条路」只能现问操作系统 —— 那由 get_proxy_state 负责，而且只在
     // 打开窗口和保存之后各问一次，不跟着焦点刷新：Linux 上那是好几条 gsettings 子进程，
@@ -459,6 +533,50 @@
     }
     el("in-proxy-url").oninput = () => { proxyDirty = true; show("err-proxy", ""); };
 
+    // 常见代理客户端的默认本机端口。只列地址、不写客户端名字：端口与客户端的对应是社区
+    // 惯例而不是契约，把名字写死就是写死一句随时会过期的说明 —— 用户真正要对上的是地址。
+    const PROXY_PRESETS = [
+      "http://127.0.0.1:7890",
+      "http://127.0.0.1:10809",
+      "http://127.0.0.1:8889",
+      "socks5://127.0.0.1:10808",
+    ];
+    const fillPresets = () => {
+      el("sel-proxy-preset").innerHTML = PROXY_PRESETS
+        .map((u) => `<option value="${u}">${u}</option>`)
+        .join("");
+    };
+    fillPresets();
+    el("sel-proxy-preset").onchange = () => {
+      const u = el("sel-proxy-preset").value;
+      if (!u) return;
+      // 选一个预设同时替用户把「手动指定」那档勾上：只填地址却不动出口模式，保存出去的
+      // 还是上一次那个 mode，看起来就是「存了却没生效」。
+      for (const r of document.querySelectorAll("input[name=proxy]")) r.checked = r.value === "manual";
+      el("in-proxy-url").value = u;
+      proxyDirty = false;
+      syncProxyUrl();
+      show("err-proxy", "");
+    };
+    el("btn-proxy-test").onclick = async () => {
+      const btn = el("btn-proxy-test");
+      btn.disabled = true;
+      show("err-proxy", "");
+      show("hint-proxy-result", t("sett.proxy_speed_running", "Measuring..."));
+      try {
+        const raw = await invoke("proxy_speed_test", { urls: PROXY_PRESETS });
+        const rows = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const lines = (rows || []).map((r) =>
+          `${r.url}  ${r.ms === null || r.ms === undefined ? "-" : r.ms + " ms"}`);
+        show("hint-proxy-result", lines.join("   |   "));
+      } catch (e) {
+        show("hint-proxy-result", "");
+        show("err-proxy", String(e));
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
     el("btn-proxy").onclick = async () => {
       try {
         // 后端返回的那句话就是日志里那条：界面不各写一份「已保存」。
@@ -471,6 +589,76 @@
         await Promise.all([load(), loadProxy()]);
       } catch (e) { show("err-proxy", String(e)); }
     };
+
+    // 下载镜像。和上面那张代理卡是两件事：代理换的是**出口**，镜像换的是**地址**，
+    // 两者可以同时生效，也可以各设一个。
+    //
+    // 预设只是把社区常用的那几个前缀摆出来 —— 这类服务会换地址、会关停，所以「自定义前缀」
+    // 那一档始终留着，填什么都不必等我们改版本。填进去的形状对不对由后端判：不合法的前缀
+    // 在保存时就退回直连，而 `set_update_mirror` 返回的是**落盘后的真值**，界面按它回显，
+    // 否则会显示成「填了个错的却已保存」。
+    const MIRROR_PRESETS = [
+      "https://gh-proxy.com/",
+      "https://ghfast.top/",
+      "https://ghproxy.net/",
+      "https://mirror.ghproxy.com/",
+    ];
+    let mirrorDirty = false;
+    let mirrorOnDisk = "";
+    const fillMirrors = () => {
+      const sel = el("sel-mirror");
+      const custom = el("opt-mirror-custom");
+      // 选项文字就是前缀本身：这是个地址，不是一句可以润色的描述，
+      // 用户认的是那一串，而且它要能被复制到别处去试。
+      for (const p of MIRROR_PRESETS) {
+        const o = document.createElement("option");
+        o.value = p;
+        o.textContent = p;
+        sel.insertBefore(o, custom);
+      }
+    };
+    fillMirrors();
+    const syncMirror = (v) => {
+      const known = v === "" || MIRROR_PRESETS.includes(v);
+      el("row-mirror-custom").hidden = known;
+      if (known) {
+        el("sel-mirror").value = v;
+      } else {
+        el("sel-mirror").value = "__custom";
+        el("in-mirror").value = v;
+      }
+    };
+    async function saveMirror(v) {
+      mirrorDirty = false;
+      try {
+        const saved = await invoke("set_update_mirror", { prefix: v });
+        syncMirror(saved || "");
+        // 填了却返回空串 = 后端没认下这个前缀、下载仍是直连。这句话必须说出来，
+        // 否则「已保存」会和「镜像已生效」混成一件事。
+        if (v && !saved) {
+          show("err-mirror", t("sett.mirror_rejected", "That address cannot be prefixed onto a download URL, so downloads stay direct."));
+        } else {
+          show("err-mirror", "");
+          toast(t("sett.saved", "Saved"));
+        }
+      } catch (e) {
+        show("err-mirror", String(e));
+        syncMirror(mirrorOnDisk);   // 没写进去，下拉就不许停在没写进去的那一档
+      }
+    }
+    el("sel-mirror").onchange = () => {
+      const v = el("sel-mirror").value;
+      show("err-mirror", "");
+      if (v === "__custom") {
+        // 先把输入框露出来让用户填；地址填完由输入框自己触发保存。
+        el("row-mirror-custom").hidden = false;
+        el("in-mirror").focus();
+        return;
+      }
+      saveMirror(v);
+    };
+    el("in-mirror").oninput = () => { mirrorDirty = true; show("err-mirror", ""); };
+    el("in-mirror").onchange = () => saveMirror(el("in-mirror").value.trim());
 
     // 升级：用的就是面板那三条命令（check_update / run_update / open_url），文案也直接取
     // popup.* 那几条 —— 同一句话在字典里写两遍，五种语言就会各漂一次，而「能不能就地装上」
@@ -686,6 +874,7 @@
         applyI18n();
         scriptsDirty = false;
         proxyDirty = false;   // 磁盘上刚换了一份软件配置，未保存的选择已经不属于这里了
+        mirrorDirty = false;  // 同上：镜像也住在同一份软件配置里
         await Promise.all([load(), loadScripts(), loadBackups(), loadProxy()]);
       } catch (e) { show("err-backup", String(e)); }
     };

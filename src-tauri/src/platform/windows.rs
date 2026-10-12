@@ -275,14 +275,17 @@ fn is_admin() -> bool {
 
 /// 当前特权通道：已是管理员 → Direct（无弹窗）；否则 → Prompt（UAC）。
 pub fn priv_channel() -> PrivChannel {
-    static C: OnceLock<PrivChannel> = OnceLock::new();
-    *C.get_or_init(|| {
-        if is_admin() {
-            PrivChannel::Direct
-        } else {
-            PrivChannel::Prompt
-        }
-    })
+    // 每次现算，**不**缓存：这一档回答的是「现在还要不要弹框」，而常驻助手有没有接上
+    // 只有运行时才知道。以前这里是个 OnceLock 里的一次性答案，而且只问了 `is_admin()`
+    // —— 于是在设置里打开「静默执行」、helper 已经拉起来之后，界面依旧停在开机那一刻的
+    // 「prompt」上，用户看到的就是「开了开关却说通道没建立」。
+    // 两条不再弹框的路：进程本身已是管理员（装给人人账户、或以提权进程启动），
+    // 以及常驻助手已经连上（开启静默执行时装的那条，见 `install_priv_channel`）。
+    if is_admin() || super::win_helper::channel_live() {
+        PrivChannel::Direct
+    } else {
+        PrivChannel::Prompt
+    }
 }
 
 // —————————————————————————— 读取：接口与状态 ——————————————————————————
@@ -517,7 +520,13 @@ if (-not $ad) { $ad = Get-NetAdapter | Where-Object { $_.Name -match 'Wi-?Fi|WLA
 if (-not $ad) { '{}' ; exit }
 $idx = $ad.ifIndex;
 $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
-$ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1;
+# One interface may carry several IPv4 aliases, and the tunnel / manual secondaries among
+# them are usually /32. Take the address with the shortest prefix: that is the one this
+# host actually sits on in this subnet. Picking "the first row back" is exactly what turned
+# the mask into 255.255.255.255 whenever a /32 alias happened to be listed first.
+$ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 |
+        Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } |
+        Sort-Object PrefixLength | Select-Object -First 1;
 $dns  = Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4;
 $v6   = Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv6 | Select-Object -First 1;
 $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
@@ -1434,6 +1443,27 @@ impl NetworkPlatform for WindowsPlatform {
         exec_ops(&apply_ops(&iface, p)?)
     }
 
+    /// 只下发 DNS 服务器（3A 的「DNS 兜底」专用）：不动地址/网关，只重写这张网卡的
+    /// DNS 服务器列表（PowerShell `Set-DnsClientServerAddress`，与 `WinOp::SetDns` 同一条路）。
+    fn apply_dns_only(
+        &self,
+        target: Option<NetworkTarget>,
+        servers: &[String],
+    ) -> Result<(), String> {
+        if servers.is_empty() {
+            return Err(i18n::t("pal.dns_only_empty"));
+        }
+        let iface = match target.unwrap_or_default() {
+            NetworkTarget::Primary => primary_iface().ok_or_else(|| i18n::t("pal.no_primary_iface"))?,
+            NetworkTarget::Wifi => wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_adapter_hint"))?,
+            NetworkTarget::Ethernet => ethernet_iface().ok_or_else(|| i18n::t("pal.no_ethernet_adapter"))?,
+        };
+        exec_ops(&[WinOp::SetDns {
+            iface,
+            servers: servers.to_vec(),
+        }])
+    }
+
     fn set_dhcp(&self) -> Result<(), String> {
         let iface = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_iface"))?;
         exec_ops(&[
@@ -1488,12 +1518,36 @@ foreach ($n in @(Get-NetAdapter)) {
   $isVpn = @($vpn | Where-Object { $t.Contains($_) }).Count -gt 0;
   if ($n.Status -ne 'Up' -and -not $isVpn) { continue };
   $idx = $n.ifIndex;
-  $ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1;
+  $ip   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 |
+          Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } |
+          Sort-Object PrefixLength | Select-Object -First 1;
   $v6   = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Link' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1;
   $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1;
   $rt6  = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv6 -DestinationPrefix '::/0' | Sort-Object RouteMetric | Select-Object -First 1;
-  $rts  = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 | ForEach-Object { $_.DestinationPrefix }) |
-          Where-Object { $_ -and $_ -notlike "$($ip.IPAddress)/*" -and $_ -notlike '224.*' -and $_ -notlike '255.*' };
+  # This cell used to be filtered by matching the DestinationPrefix string: that kept out
+  # 224.* and 255.*, but not the /32 entries Windows writes into the table on its own --
+  # the interface's own address, the subnet broadcast (that is where a /24 gets a
+  # 10.30.35.255/32) and the limited broadcast. They look exactly like routes somebody
+  # configured, so they showed up in the panel as noise.
+  #
+  # The one thing the system already records for us: every auto-generated entry is on-link,
+  # i.e. NextHop 0.0.0.0. A /32 somebody really typed in has a gateway attached, so this
+  # rule keeps the deliberate ones and drops what nobody configured.
+  $rts  = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4) |
+          Where-Object {
+            $d = $_.DestinationPrefix;
+            if (-not $d) { return $false };
+            $seg = $d -split '/';
+            if ($seg.Count -ne 2) { return $false };
+            $a = $seg[0];
+            $l = $seg[1] -as [int];
+            if ($null -eq $l) { return $false };
+            if ($l -ge 32 -and $_.NextHop -eq '0.0.0.0') { return $false };
+            if ($a -eq '255.255.255.255') { return $false };
+            $o = ($a -split '\.')[0] -as [int];
+            if ($null -ne $o -and $o -ge 224 -and $o -le 239) { return $false };
+            return $true
+          } | ForEach-Object { $_.DestinationPrefix };
   $dns  = Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4;
   $prof = Get-NetConnectionProfile -InterfaceIndex $idx;
   $list.Add([pscustomobject]@{

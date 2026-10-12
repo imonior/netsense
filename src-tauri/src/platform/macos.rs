@@ -2149,6 +2149,29 @@ impl NetworkPlatform for MacPlatform {
         exec_ops(&apply_ops(&svc, p)?)
     }
 
+    /// 只下发 DNS 服务器（3A 的「DNS 兜底」专用）。
+    ///
+    /// 与 `apply_network` 里那条三态分开：这里不问 IPv4 是什么模式，也不碰地址/网关，
+    /// 只重写这一张网络服务的 `DNS.ServerAddresses`。
+    fn apply_dns_only(
+        &self,
+        target: Option<NetworkTarget>,
+        servers: &[String],
+    ) -> Result<(), String> {
+        if servers.is_empty() {
+            return Err(i18n::t("pal.dns_only_empty"));
+        }
+        let svc = match target.unwrap_or_default() {
+            NetworkTarget::Primary => primary_service()?,
+            NetworkTarget::Wifi => wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?,
+            NetworkTarget::Ethernet => ethernet_service().ok_or_else(|| i18n::t("pal.no_ethernet_service"))?,
+        };
+        exec_ops(&[PrivOp::SetDns {
+            svc,
+            servers: servers.to_vec(),
+        }])
+    }
+
     /// 切回 DHCP，**并**把 DNS 交回自动获取。
     ///
     /// 那第二条不是重复劳动，也不能省：在 macOS 的配置库里 `DNS` 与 `IPv4` 是**平级**的两份

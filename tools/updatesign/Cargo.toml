@@ -1,0 +1,20 @@
+[package]
+name = "updatesign"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Ed25519 (RustCrypto)。App 侧 `src-tauri` 用同一个 crate 的 `verify_ed25519`
+# 验签，两边同源才谈得上「格式一致」。
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+# `cmd_gen` 的随机源：`rand::rngs::OsRng` 直连操作系统 CSPRNG
+# （Windows BCryptGenRandom / Linux getrandom(2) / macOS SecRandomCopyBytes），
+# 不用 `thread_rng` 之类可播种的源。
+rand = "0.8"
+hex = "0.4"
+# 信任清单的确定性序列化：`TrustBody` 的字段顺序即被签名的规范。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `issued_at` 用 RFC 3339（如 2026-10-11T05:49:58Z），人可读且单调可比。
+chrono = { version = "0.4", features = ["clock"] }

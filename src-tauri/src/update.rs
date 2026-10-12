@@ -5,10 +5,36 @@
 //! 通过 `netsense://update_progress` 事件广播阶段与进度，前端据此显示进度。
 //! 任一环节失败都回退到「打开 Release 页」这条永远可用的手动路径，不会把用户卡死。
 //!
-//! 安全：下载后必须用 Release 附带的 `SHA256SUMS` 校验，**拿不到可信哈希就中止安装**
-//! （CI 在四条平台腿跑完后统一上传一份根级 SHA256SUMS，见 build.yml，所以正常发布永远
-//! 读得到它；读不到说明手上的东西不是我们发出去的那份）。本项目暂无 Ed25519 签名密钥，
-//! 故仅做 SHA256 —— 它与资产同经一次 HTTPS，防的是传输损坏而非发布方被篡改。
+//! 安全：这是一条**两层信任链**（精简版 B+），不是「直接比对哈希」：
+//!
+//! 1. 二进制里只内嵌一把 **root 公钥**（`ROOT_PUBKEY_HEX`，编译期注入）。它是指南针，
+//!    唯一的信任锚，镜像和 Release 资产都换不掉它。
+//! 2. 信任清单 `UPDATE-TRUST.json` 由 **root 私钥离线签发**，App 每次更新都用内置 root
+//!    公钥验它，从里面读出「当前有效的 signing 公钥」。
+//! 3. `SHA256SUMS` 由 **signing 私钥签名**（CI 持有，可轮换），App 用上一步取到的
+//!    signing 公钥验 `SHA256SUMS.sig`，再比哈希。
+//!
+//! 由此得到两个原方案拿不到的性质：
+//! - **镜像全断仍能更新**：清单、签名、校验和全都走镜像，而「什么算合法」只由内置公钥决定。
+//! - **signing 私钥泄露可轮换**：用 root 私钥签发一份指向新 signing 公钥的新清单即可，
+//!   已发布的二进制下次更新时自动改信新密钥，**不必重新分发二进制、用户不必手动重装**。
+//!
+//! 一道防回滚（裸 Ed25519 只验「签名对不对」，不验「新不新」）：
+//! - 清单 `seq` 单调不减（记录在本地状态文件，拒绝旧清单覆盖新清单）。
+//!   它**不是**可选的附加功能，而是轮换能成立的**前提**：没有它，攻击者把轮换之前那份
+//!   同样由 root 合法签过的旧清单反复投喂，被换掉的旧 signing 密钥就重新变得可信。
+//!
+//! 刻意**不做**的两件事 —— 收益小、却各自多一处必须落盘且跨版本保持一致的状态，
+//! 那一处坏了就是把正常更新卡死（完整取舍见 DEVELOPMENT.md §13.3）：
+//! - 不做「已撤销密钥列表 `revoked[]`」：有了 `seq`，轮换本身已让旧密钥失效，撤销表与它
+//!   高度重叠，却要为每个已发布清单都维护一份列表。
+//! - 不做「最低版本 / 已装版本水位」：它挡的场景（镜像投喂一个更旧但仍合法签名的安装包）
+//!   概率低，而版本号格式一旦不一致（带前缀、带预发布后缀）就会误拒正常更新。
+//!
+//! 任一环节拿不到可信结果就**中止安装**，不会退化成「只比哈希」——那正是恶意镜像唯一能利用的缝。
+//! 无 root 公钥的 dev 构建是唯一的例外，且仅在未置 `REQUIRE_SIGNED` 时降级为仅 SHA256。
+//! CI 在四条平台腿跑完后统一上传根级 `SHA256SUMS` 与 `SHA256SUMS.sig`（见 build.yml），
+//! 正常发布永远读得到它们；读不到说明手上的东西不是我们发出去的那份。
 //! 下载与落地全程使用**独占创建**的私有临时路径（见「私有临时路径」一节）：共享 `/tmp` 上
 //! 被别人抢先占用的名字，后果是提权执行的脚本内容可在我们写入之后再被改一次。
 //! macOS 还会额外校验 app 的 codesign：
@@ -22,6 +48,29 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter};
+
+// ——— 发布签名：两层信任链（精简版 B+）———
+//
+// 内置的**只有 root 公钥**：它是唯一的信任锚，由 CI 经环境变量注入（见 build.rs）。
+// 空串表示本构建未嵌入 root 公钥（dev / 本地），此时按 REQUIRE_SIGNED 决定是否中止。
+//
+// 信任清单 UPDATE-TRUST.json 由 root 私钥离线签发；App 验过清单后，才从里面取出
+// signing 公钥去验 SHA256SUMS.sig。因此 signing 私钥可以放心放进 CI（泄露时用 root
+// 签一份指向新密钥的新清单即可轮换），而**真正的信任根（root 私钥）永远不接触任何
+// 自动化环节**。
+const ROOT_PUBKEY_HEX: &str = option_env!("NETSENSE_ROOT_PUBKEY").unwrap_or("");
+// 「无签名即拒绝」：仅当 CI 置位 NETSENSE_RELEASE_SIGN 时为真（release 构建）。
+const REQUIRE_SIGNED: bool = match option_env!("NETSENSE_RELEASE_SIGN") {
+    Some("1") => true,
+    _ => false,
+};
+
+/// 信任清单的固定位置：仓库树里的 `update/UPDATE-TRUST.json`。
+///
+/// 它由 root 私钥离线签发后**提交进仓库**，而不是当 Release 资产上传——因为签它需要 root
+/// 私钥，而 CI 按设计就拿不到 root 私钥。清单内容不随每个 Release 变，只在密钥轮换 / 撤销时变。
+const TRUST_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/imonior/netsense/main/update/UPDATE-TRUST.json";
 
 /// 让子进程**不分配控制台窗口**。
 ///
@@ -74,21 +123,27 @@ fn emit_progress(app: &AppHandle, phase: &str, percent: u32) {
 /// `choice` 是软件设置里选的网络出口，它由调用方（`ipc::run_update`）与 `check_update`
 /// **同一个来源**取出：检查更新用什么出口，下载与取校验值就用什么出口。Homebrew 渠道不带
 /// 它 —— brew 有自己的代理配置，本应用不该越过那条配置。
+///
+/// `mirror` 是软件设置里选的下载镜像（见 [`crate::appconfig::UpdateMirror`]），与 `choice`
+/// 正交：一个换地址、一个换出口。带签名的 `SHA256SUMS`/`.sig` 也经镜像取回，但签名锚在
+/// 内置公钥上 —— 镜像换不掉校验值，反而能让「GitHub 被墙」时更新仍可完成。
 pub fn run_update(
     app: &AppHandle,
     t: &UpdateTarget,
     choice: &crate::netproxy::ProxyChoice,
+    mirror: &crate::appconfig::UpdateMirror,
 ) -> Result<(), String> {
     if is_brew_install() {
         return run_brew(app, t);
     }
-    native_update(app, t, choice)
+    native_update(app, t, choice, mirror)
 }
 
 fn native_update(
     app: &AppHandle,
     t: &UpdateTarget,
     choice: &crate::netproxy::ProxyChoice,
+    mirror: &crate::appconfig::UpdateMirror,
 ) -> Result<(), String> {
     // `UpdateTarget` 是前端回传的，按外部输入对待：scheme 只认 https，且必须落在
     // 本项目自己的 Release 锚点上 —— 否则「自己托管二进制 + 自己给 SHA256SUMS」
@@ -101,13 +156,63 @@ fn native_update(
         .ok_or_else(|| i18n::t("upd.no_sums"))?;
     require_release_asset(cu)?;
 
-    emit_progress(app, "download", 0);
-    let tmp = download_file(app, &t.download_url, &t.asset_name, t.size, choice)?;
+    // 镜像只换「去哪儿取字节」。来源校验已在上面按 GitHub 原始 URL 判完。
+    // 现在二进制、SHA256SUMS、`.sig` 都经镜像取回 —— 因为 SHA256SUMS 带 Ed25519 签名，
+    // 信任锚在内置公钥上，镜像换不掉（伪造不出 `.sig`），所以镜像也能服务于校验这一步。
+    let dl = mirrored_url(&t.download_url, mirror);
+    if dl != t.download_url {
+        crate::log::info(&i18n::tf("upd.mirror_used", &[("mirror", &dl)]));
+    }
 
-    // 校验 SHA256：任何一环拿不到可信哈希都中止，不「告警后继续」。
-    let sums = crate::ipc::fetch_url(cu, choice)
+    emit_progress(app, "download", 0);
+    let tmp = download_file(app, &dl, &t.asset_name, t.size, choice)?;
+
+    // SHA256SUMS 与配套的 `.sig`：都走镜像，与二进制同一条路。
+    let sums_url = mirrored_url(cu, mirror);
+    // 取原始字节（不是 `fetch_url` 的 lossy 文本）：SHA256SUMS 虽是文本，但它的**签名**
+    // 是对文件字节逐字节验的；若经 lossy UTF-8 解码无影响（本就是 ASCII），但 `.sig` 是二进制，
+    // 必须走 `fetch_bytes` 原样取回，否则非 UTF-8 字节被替换成 U+FFFD，签名必败。
+    let sums_bytes = crate::ipc::fetch_bytes(&sums_url, choice)
         .map_err(|e| i18n::tf("upd.sums_fetch", &[("error", &e)]))?;
-    let expected = parse_hash(&sums, &t.asset_name)
+    // 镜像对 `text/*` 做 CRLF/行尾归一会让逐字节验签直接 INVALID（与裸 openssl 验文本清单同源）。
+    // 这里把 `\r` 归一为 `\n` 再验签：CI 生成的 SHA256SUMS 本就是 LF，归一对其是恒等变换，
+    // 直连 GitHub 照过；镜像弄花行尾也能还原回签名时的字节。不删尾换行（见 `normalize_crlf`）。
+    let sums_canon = normalize_crlf(&sums_bytes);
+
+    // 信任链门（root → signing 两层）：有内置 root 公钥就必须整条走通，否则拒绝安装。
+    // 先取信任清单定出「该信哪把 signing 密钥」，再用那把密钥验 SHA256SUMS 的签名 ——
+    // 顺序不能反：清单验不过时我们还不知道该信谁，拿内置的 signing 公钥去验就成了单密钥
+    // 模型，轮换能力也就没了。
+    //
+    // 无 root 公钥且本构建要求签名 → 拒绝；无 root 公钥且非发布构建 → 仅 SHA256 并告警（dev）。
+    let trust = match embedded_root_pubkey() {
+        Some(_) => Some(verify_trust_chain(choice, mirror)?),
+        None => {
+            if REQUIRE_SIGNED {
+                return Err(i18n::t("upd.sig_no_key"));
+            }
+            crate::log::warn(&i18n::t("upd.sig_skipped"));
+            None
+        }
+    };
+    if let Some(chain) = &trust {
+        let sig_url = mirrored_url(&append_sig_suffix(cu), mirror);
+        // `.sig` 是 64 字节裸二进制：必须走 `fetch_bytes` 原样取回，绝不能经 lossy UTF-8 解码。
+        let sig = crate::ipc::fetch_bytes(&sig_url, choice)
+            .map_err(|e| i18n::tf("upd.sums_fetch", &[("error", &e)]))?;
+        // 验签针对**规范化后**的 SHA256SUMS 字节（见 `normalize_crlf`）：直连 GitHub 时规范化为
+        // 恒等，镜像改写行尾也能还原，签名照过。
+        match verify_ed25519(&sums_canon, &sig, &chain.signing_key) {
+            Ok(()) => crate::log::info(&i18n::t("upd.sig_ok")),
+            Err("bad") => return Err(i18n::t("upd.sig_bad")),
+            Err(_) => return Err(i18n::t("upd.sig_failed")),
+        }
+    }
+
+    // 校验 SHA256：任何一环拿不到可信哈希都中止，不「告警后继续」。解析用规范化后的文本，
+    // `parse_hash` 本身对 CRLF 也稳健，所以镜像弄花行尾不影响哈希抽取。
+    let sums_text = String::from_utf8_lossy(&sums_canon);
+    let expected = parse_hash(&sums_text, &t.asset_name)
         .ok_or_else(|| i18n::tf("upd.not_in_sums", &[("asset", &t.asset_name)]))?;
     let actual = sha256_file(&tmp)?;
     if !eq_ignore_case(&actual, &expected) {
@@ -122,6 +227,12 @@ fn native_update(
         ));
     }
     crate::log::info(&i18n::tf("upd.sha256_ok", &[("asset", &t.asset_name)]));
+
+    // 走到这里签名与哈希都已确认，才允许推进 `seq` 水位。中途任何一步失败都不会记，
+    // 所以一次失败的更新不会把水位提前抬高、把合法的旧清单挡在门外。
+    if let Some(chain) = &trust {
+        commit_trust_state(chain.seq);
+    }
     // 校验过的字节和随后安装的字节必须是同一份：共享 temp 上若文件属主不是我们，
     // 对方可以在这两步之间换掉内容。
     #[cfg(unix)]
@@ -297,6 +408,29 @@ pub(crate) fn require_release_asset(url: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(i18n::tf("upd.bad_origin", &[("url", url)]))
+    }
+}
+
+/// 把一条**已经验过来源**的 URL 改写成镜像地址（前缀式：`https://host/` + 原 URL）。
+///
+/// 只在 `require_release_asset` 之后调用：这个函数不参与任何来源判定，它换的只是走哪条路，
+/// 而「这个包是什么」由直连 GitHub 取来的 SHA256SUMS 说了算。
+///
+/// 前缀不合法时**原样返回**（即退回直连），而不是报错：走到这里时软件设置已经被
+/// `AppConfig::clamped` 收过一次，这里再挡一层是因为这条路径同样吃外部输入，而一个拼不出
+/// URL 的前缀只该让下载失败一次，不该让「检查更新」整条路走不下去。
+pub(crate) fn mirrored_url(original: &str, mirror: &crate::appconfig::UpdateMirror) -> String {
+    use crate::appconfig::UpdateMirror;
+    match mirror {
+        UpdateMirror::Direct => original.to_string(),
+        UpdateMirror::Prefix(p) => {
+            if !crate::appconfig::is_mirror_prefix(p) {
+                return original.to_string();
+            }
+            // 末尾斜杠各家写法不一（预设有的带、有的不带），拼出来只能有一个 `/`：
+            // 多出来的那个会被部分镜像当成一层空 host 段，请求直接 404。
+            format!("{}/{}", p.trim().trim_end_matches('/'), original)
+        }
     }
 }
 
@@ -478,6 +612,278 @@ pub(crate) fn parse_hash(body: &str, asset_name: &str) -> Option<String> {
 
 fn is_hex(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 对 SHA256SUMS 的字节做**最小**规范化：仅把 `\r\n` 与孤立 `\r` 归一为 `\n`。
+///
+/// 目的：镜像若对 `text/*` 做行尾归一（CRLF），会让「对原始文件字节逐字节验签」直接
+/// `INVALID` —— 这正是裸 `openssl dgst -verify` 验文本清单会栽的那一类。SHA256SUMS 在 CI 里
+/// 本就按 LF 生成，这里归一对它是恒等变换：直连 GitHub（逐字节）照过；镜像弄花行尾也能还原回
+/// 签名时的字节，验证照过。
+///
+/// 故意**不**删尾换行 / 不 `trim`：CI 生成的清单本就以 LF 结尾，删了反而令「规范化后字节」与
+/// 「签名时的原始字节」不一致，验证必败。只动 `\r`，不动别的。
+fn normalize_crlf(b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\r' {
+            out.push(b'\n');
+            if i + 1 < b.len() && b[i + 1] == b'\n' {
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+// ———————————————————————————————— Ed25519 验签 ————————————————————————————————
+
+/// 把十六进制串解码进定长缓冲区（校验长度与字符）。
+fn hex_decode(s: &str, out: &mut [u8]) -> Result<(), String> {
+    if s.len() != out.len() * 2 {
+        return Err("bad hex length".into());
+    }
+    let b = s.as_bytes();
+    for i in 0..out.len() {
+        let hi = hex_nibble(b[2 * i])?;
+        let lo = hex_nibble(b[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(())
+}
+
+fn hex_nibble(c: u8) -> Result<u8, String> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err("bad hex char".into()),
+    }
+}
+
+/// 本构建内置的 **root** 公钥（32 字节）；未嵌入时返回 None（dev / 本地构建）。
+fn embedded_root_pubkey() -> Option<[u8; 32]> {
+    if ROOT_PUBKEY_HEX.len() != 64 {
+        return None;
+    }
+    let mut b = [0u8; 32];
+    if hex_decode(ROOT_PUBKEY_HEX, &mut b).is_err() {
+        return None;
+    }
+    Some(b)
+}
+
+/// 在 URL 路径段后追加 `.sig`，保留 `?query` / `#fragment`。
+/// 与 wireguide-plus 的 `appendSigSuffix` 同语义。
+fn append_sig_suffix(raw: &str) -> String {
+    let cut = raw.find(['?', '#']).unwrap_or(raw.len());
+    let (base, tail) = raw.split_at(cut);
+    format!("{base}.sig{tail}")
+}
+
+/// 用内置公钥校验 Ed25519 签名。
+/// `Ok(())` 通过；`Err("bad")` 公钥/签名格式非法；`Err("mismatch")` 验签不通过。
+///
+/// 用 `verify_strict` 而不是 `verify`：后者允许**弱公钥**（低阶点），而弱公钥能为几乎任意
+/// 消息生成有效签名。对 root 公钥而言这不是威胁（它编译期内嵌，出自我们自己的 OsRng，
+/// 攻击者换不掉），但对**信任清单里的 signing_key** 就是现实风险 —— root 私钥一旦泄露，
+/// 攻击者可以签一份「signing_key 取某个低阶点」的清单，让它对任意内容验签通过。
+/// `verify_strict` 多做的群元素检查正好堵掉这一条，且单签名场景零性能代价。
+fn verify_ed25519(content: &[u8], sig: &[u8], pubkey: &[u8; 32]) -> Result<(), &'static str> {
+    if sig.len() != 64 {
+        return Err("bad");
+    }
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(sig);
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(pubkey).map_err(|_| "bad")?;
+    vk.verify_strict(content, &signature).map_err(|_| "mismatch")
+}
+
+// ———————————————————————— 信任链：root 签清单 → signing 签校验和 ————————————————————————
+
+/// 信任清单 `UPDATE-TRUST.json`。
+///
+/// ⚠️ 字段名与顺序必须与 `tools/updatesign` 里的 `TrustBody` **完全一致**：被签名的对象是
+/// 「除 `signature` 外所有字段按声明顺序紧凑序列化」的字节，两端必须算出同一串字节。改名字、
+/// 调顺序、加字段都会让所有已发布清单验签失败 —— 这是本文件里最不能随手改的一处。
+#[derive(serde::Deserialize)]
+struct TrustManifest {
+    #[serde(default)]
+    schema: u64,
+    #[serde(default)]
+    seq: u64,
+    #[serde(default)]
+    signing_key: String,
+    #[serde(default)]
+    issued_at: String,
+    /// 缺失即视为非法：解析会失败，而不是给一个「没签过」的默认值。
+    signature: String,
+}
+
+/// 信任清单的被签名主体。字段顺序即规范，与工具侧一一对应。
+#[derive(serde::Serialize)]
+struct TrustBody<'a> {
+    schema: u64,
+    seq: u64,
+    signing_key: &'a str,
+    issued_at: &'a str,
+}
+
+/// 走完信任链后得到的东西：本次该用的 signing 公钥，以及清单的 `seq` 水位。
+struct TrustChain {
+    signing_key: [u8; 32],
+    seq: u64,
+}
+
+/// 本地记住的信任水位：见过的最大清单 `seq`。
+///
+/// 只记 `seq` 一个数字，是因为它承载的是**轮换能不能生效**：没有它，攻击者可以把一份
+/// 曾经合法（root 确实签过）的旧清单反复投喂，让已经轮换掉的旧 signing 密钥重新可信，
+/// 而签名验得完全通过 —— 裸 Ed25519 只证明「是官方签的」，不证明「是最新的」。
+///
+/// 刻意**不记**已安装版本：那挡的是「镜像投喂更旧但仍合法签名的安装包」，概率低，却要求
+/// 版本号格式在 Release 元数据与本地状态之间永远一致，一旦不一致就会误拒正常更新。
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct TrustState {
+    #[serde(default)]
+    seq: u64,
+}
+
+/// 本地信任水位文件名。放用户配置目录（与 settings.json 同级），不是 Release 资产 ——
+/// 它必须比任何单个 Release 活得久，否则每次发版都要「记住」上一版是什么。
+const TRUST_STATE_FILE: &str = "update-trust-state.json";
+
+fn trust_state_path() -> Option<PathBuf> {
+    crate::paths::user_config_dir().map(|d| d.join(TRUST_STATE_FILE))
+}
+
+impl TrustState {
+    fn load() -> Self {
+        // 读不出来（首次运行 / 文件损坏）当作「没有水位」：这不是放行漏洞，只是让防回滚
+        // 从零开始。真正的信任由签名决定，这里只影响「能否装比之前更旧的包」。
+        let Some(p) = trust_state_path() else {
+            return Self::default();
+        };
+        std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) {
+        let Some(p) = trust_state_path() else {
+            return;
+        };
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // 先写临时文件再 rename：rename 在 Unix 与 Windows 上都会覆盖同名目标，
+        // 因此这一步是原子的 —— 半截的 JSON 读回来会被当成「无水位」，而不是
+        // 把已记住的水位悄悄清零。
+        let Ok(body) = serde_json::to_vec(self) else {
+            return;
+        };
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// 校验通过后推进 `seq` 水位。**必须**在签名与哈希都过了之后才调用：中途失败不该把水位推高。
+fn commit_trust_state(seq: u64) {
+    let mut st = TrustState::load();
+    if seq > st.seq {
+        st.seq = seq;
+        st.save();
+    }
+}
+
+/// 信任清单的来源必须是本仓库 `main` 分支上的那一个固定路径。
+///
+/// 它刻意**不是** Release 资产：签它需要 root 私钥，而 CI 按设计就拿不到 root 私钥
+/// （见 DEVELOPMENT.md §13.3）。清单只在密钥轮换时变，由维护者提交进仓库；
+/// 而二进制与校验和仍然锁死在 Release 锚点上（见 `require_release_asset`）。
+fn require_trust_origin(url: &str) -> Result<(), String> {
+    const ANCHOR: &str = "https://raw.githubusercontent.com/imonior/netsense/";
+    let rest = url.strip_prefix(ANCHOR).ok_or_else(|| i18n::t("upd.trust_origin"))?;
+    if rest.contains("..") || rest.contains("//") || !rest.ends_with("update/UPDATE-TRUST.json") {
+        return Err(i18n::t("upd.trust_origin"));
+    }
+    Ok(())
+}
+
+/// 取回信任清单并用**内置 root 公钥**验签。
+///
+/// 失败一律 Err，绝不「验不过也放行」：验不过意味着我们无法判断该信哪把 signing 密钥，
+/// 此时任何放行都是盲信 —— 那恰好是恶意镜像唯一能利用的缝。
+fn fetch_trust_manifest(
+    choice: &crate::netproxy::ProxyChoice,
+    mirror: &crate::appconfig::UpdateMirror,
+) -> Result<TrustManifest, String> {
+    require_trust_origin(TRUST_MANIFEST_URL)?;
+    // 清单也走镜像：它同样只是「取字节」，安全边界在内置公钥上而不在地址上。
+    let raw = crate::ipc::fetch_url(&mirrored_url(TRUST_MANIFEST_URL, mirror), choice)
+        .map_err(|e| i18n::tf("upd.trust_fetch", &[("error", &e)]))?;
+    let m: TrustManifest =
+        serde_json::from_str(&raw).map_err(|e| i18n::tf("upd.trust_parse", &[("error", &e.to_string())]))?;
+    // 认识的 schema 只有 1。将来改格式时这里会拒收 —— 宁可停在「看不懂」，也不能
+    // 按旧格式误解一份新清单。
+    if m.schema != 1 {
+        return Err(i18n::tf("upd.trust_parse", &[("error", &format!("schema {}", m.schema))]));
+    }
+    let root = embedded_root_pubkey().ok_or_else(|| i18n::t("upd.sig_no_key"))?;
+    let mut sig = [0u8; 64];
+    if hex_decode(&m.signature, &mut sig).is_err() {
+        return Err(i18n::t("upd.trust_bad_sig"));
+    }
+    let bytes = serde_json::to_vec(&TrustBody {
+        schema: m.schema,
+        seq: m.seq,
+        signing_key: &m.signing_key,
+        issued_at: &m.issued_at,
+    })
+    .map_err(|e| i18n::tf("upd.trust_fetch", &[("error", &e.to_string())]))?;
+    match verify_ed25519(&bytes, &sig, &root) {
+        Ok(()) => Ok(m),
+        Err("bad") => Err(i18n::t("upd.trust_bad_sig")),
+        Err(_) => Err(i18n::t("upd.trust_failed")),
+    }
+}
+
+/// 完整走一遍信任链，返回本次该用的 signing 公钥。
+///
+/// 顺序：验清单（root 签） → 查 `seq` 回滚 → 取 signing 公钥。
+/// 每一步都可独立阻断，且都不依赖网络以外的东西，所以镜像改不了其中任何一条。
+fn verify_trust_chain(
+    choice: &crate::netproxy::ProxyChoice,
+    mirror: &crate::appconfig::UpdateMirror,
+) -> Result<TrustChain, String> {
+    let m = fetch_trust_manifest(choice, mirror)?;
+    let state = TrustState::load();
+
+    // 防「清单回滚」：seq 只能单调不减。这是轮换能生效的唯一保证 —— 否则攻击者把一份
+    // 「轮换之前」的旧清单反复投喂，已经换掉的旧 signing 密钥就重新变得可信。
+    if m.seq < state.seq {
+        return Err(i18n::tf(
+            "upd.trust_stale",
+            &[("seen", &state.seq.to_string()), ("got", &m.seq.to_string())],
+        ));
+    }
+
+    let mut signing_key = [0u8; 32];
+    if hex_decode(&m.signing_key, &mut signing_key).is_err() {
+        return Err(i18n::t("upd.trust_bad_key"));
+    }
+
+    Ok(TrustChain { signing_key, seq: m.seq })
 }
 
 // ———————————————————————————————— 平台安装 ————————————————————————————————
@@ -1118,6 +1524,7 @@ unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{SecretKey, Signer, SigningKey};
 
     #[test]
     fn only_https_urls_are_accepted() {
@@ -1176,6 +1583,33 @@ mod tests {
         let hostile = "https://evil.invalid/x.dmg";
         assert!(require_https(hostile).is_ok());
         assert!(require_release_asset(hostile).is_err());
+    }
+
+    /// 镜像只改走法、不改资产：拼出来的地址末尾必然还挂着完整的原始 URL，
+    /// 而原始 URL 在此之前已经过 `require_release_asset`。
+    #[test]
+    fn a_mirror_changes_the_route_and_nothing_else() {
+        use crate::appconfig::UpdateMirror;
+        const ASSET: &str =
+            "https://github.com/imonior/netsense/releases/download/v1.6.3/NetSense_1.6.3_x64-setup.exe";
+        assert_eq!(mirrored_url(ASSET, &UpdateMirror::Direct), ASSET);
+        // 预设带不带末尾斜杠都一样，且中间只能有一个 `/`
+        assert_eq!(
+            mirrored_url(ASSET, &UpdateMirror::Prefix("https://gh-proxy.com/".into())),
+            format!("https://gh-proxy.com/{ASSET}")
+        );
+        assert_eq!(
+            mirrored_url(ASSET, &UpdateMirror::Prefix("https://ghfast.top".into())),
+            format!("https://ghfast.top/{ASSET}")
+        );
+        // 不合法的前缀原样返回：调用方已经验过原始来源，这里退回「直连」而不是报错
+        for bad in ["", "not-a-url", "http://x/", "https://x/?a=1"] {
+            assert_eq!(
+                mirrored_url(ASSET, &UpdateMirror::Prefix(bad.into())),
+                ASSET,
+                "should ignore {bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -1278,5 +1712,211 @@ mod tests {
         );
         // 跳过不等于放行：真正没列出的资产仍然要返回 None。
         assert_eq!(parse_hash(body, "NetSense_1.0.2_aarch64.dmg"), None);
+    }
+
+    /// 镜像若对 `text/*` 做行尾归一（CRLF），会让「对文件字节逐字节验签」直接 INVALID。
+    /// `normalize_crlf` 必须在 CI 生成的 LF 清单上是**恒等变换**（否则直连 GitHub 也会验不过），
+    /// 同时能把 CRLF / 孤立 `\r` 还原回 LF（镜像改写后仍能验过）。
+    #[test]
+    fn normalize_crlf_is_identity_on_lf_and_repairs_crlf() {
+        // CI 生成的 SHA256SUMS：每行一条、以 LF 结尾、末尾一个 LF。
+        let lf = b"a3b1c2d4e5f6  NetSense_x64.exe\n4a6974  NetSense_arm64.dmg\n";
+        assert_eq!(normalize_crlf(lf), lf.to_vec());
+
+        // 镜像把 LF 全改成 CRLF：规范化后必须等于原始 LF 字节，签名才能验过。
+        let crlf = b"a3b1c2d4e5f6  NetSense_x64.exe\r\n4a6974  NetSense_arm64.dmg\r\n";
+        assert_eq!(normalize_crlf(crlf), lf.to_vec());
+
+        // 孤立 \r（老 Mac 风格）也要归一，且不删任何合法换行。
+        let odd = b"a3b1c2d4e5f6  NetSense_x64.exe\rb\n4a6974  NetSense_arm64.dmg\n";
+        assert_eq!(
+            normalize_crlf(odd),
+            b"a3b1c2d4e5f6  NetSense_x64.exe\nb\n4a6974  NetSense_arm64.dmg\n".to_vec()
+        );
+
+        // 关键：绝不能删尾换行。CI 清单以一个 LF 结尾，删了会让「规范化后字节」与
+        // 「签名时的原始字节」不一致，验证必败。
+        let trailing = b"a3b1c2d4e5f6  NetSense_x64.exe\n";
+        assert_eq!(normalize_crlf(trailing), trailing.to_vec());
+    }
+
+    #[test]
+    fn sig_suffix_appends_to_path_only() {
+        assert_eq!(
+            append_sig_suffix("https://github.com/imonior/netsense/releases/download/v1/SHA256SUMS"),
+            "https://github.com/imonior/netsense/releases/download/v1/SHA256SUMS.sig"
+        );
+        assert_eq!(
+            append_sig_suffix("https://x.com/SHA256SUMS?token=abc"),
+            "https://x.com/SHA256SUMS.sig?token=abc"
+        );
+        assert_eq!(
+            append_sig_suffix("https://x.com/SHA256SUMS#frag"),
+            "https://x.com/SHA256SUMS.sig#frag"
+        );
+    }
+
+    #[test]
+    fn hex_decode_rejects_bad_input() {
+        let mut b = [0u8; 2];
+        assert!(hex_decode("dead", &mut b).is_ok());
+        assert_eq!(b, [0xde, 0xad]);
+        assert!(hex_decode("xyz", &mut b).is_err());
+        assert!(hex_decode("de", &mut b).is_err());
+        assert!(hex_decode("de ad", &mut b).is_err());
+    }
+
+    #[test]
+    fn ed25519_signature_roundtrip_and_tamper() {
+        // 固定种子，无需 RNG；仅验证 verify_ed25519 的验签路径。
+        let secret = [0x42u8; 32];
+        let sk = SigningKey::from(SecretKey::from(secret));
+        let pk = sk.verifying_key().to_bytes();
+        let msg = b"SHA256SUMS contents";
+        let sig: ed25519_dalek::Signature = sk.sign(msg);
+        assert!(verify_ed25519(msg, &sig.to_bytes(), &pk).is_ok());
+        // 篡改内容必须验不过
+        assert!(verify_ed25519(b"tampered", &sig.to_bytes(), &pk).is_err());
+        // 长度不对的签名按格式非法拒绝
+        assert!(verify_ed25519(msg, &[0u8; 32], &pk).is_err());
+        // 公钥不匹配必须验不过
+        let other = [0x11u8; 32];
+        assert!(verify_ed25519(msg, &sig.to_bytes(), &other).is_err());
+    }
+
+    #[test]
+    fn weak_low_order_public_keys_are_refused() {
+        // Ed25519 的低阶点（weak key）能为**几乎任意**消息产生有效签名，所以普通的
+        // `verify` 会放行 —— 它只做标量检查，不做群元素检查。
+        //
+        // 对 root 公钥这不是威胁（编译期内嵌，出自我们自己的 OsRng）。但信任清单里的
+        // signing_key 由清单内容决定：root 私钥一旦泄露，攻击者可以签一份「signing_key
+        // 取某个低阶点」的清单，让它对任意内容验签通过。所以这里必须用 verify_strict。
+        //
+        // 全零公钥是最小的低阶点，用它对任意消息签名，verify 放行、verify_strict 拒绝 ——
+        // 两者行为之差正是这条测试要钉住的东西。
+        let weak = [0u8; 32];
+        let sk = SigningKey::from(SecretKey::from([0x42u8; 32]));
+        let msg = b"anything the attacker likes";
+        let sig: ed25519_dalek::Signature = sk.sign(msg);
+        assert!(verify_ed25519(msg, &sig.to_bytes(), &weak).is_err());
+
+        // 反面对照：正常密钥对仍然必须通过（防止把严格校验用过头，误杀合法发布）。
+        let good = sk.verifying_key().to_bytes();
+        assert!(verify_ed25519(msg, &sig.to_bytes(), &good).is_ok());
+    }
+
+    // ————————————————————————— 信任链（B+）—————————————————————————
+
+    /// 测试侧的小工具：字节数组 → 小写 hex。
+    ///
+    /// 不给 `src-tauri` 加 `hex` 运行时依赖只为测试 —— 生产代码一律用手写的 `hex_decode`
+    /// （它的严格长度/字符校验正是安全边界，多引一个宽松的 hex 反而绕开它）。
+    fn to_hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// 生成一份「像样的」信任清单：root 私钥固定，签名有效。
+    /// 返回 (root公钥, signing公钥, 已签名的清单 JSON)。
+    fn signed_manifest(root_seed: u8, seq: u64, signing_seed: u8) -> ([u8; 32], [u8; 32], String) {
+        let root = SigningKey::from(SecretKey::from([root_seed; 32]));
+        let signing = SigningKey::from(SecretKey::from([signing_seed; 32]));
+        let signing_hex = to_hex(&signing.verifying_key().to_bytes());
+        let body = TrustBody {
+            schema: 1,
+            seq,
+            signing_key: &signing_hex,
+            issued_at: "2026-01-01T00:00:00Z",
+        };
+        let bytes = serde_json::to_vec(&body).expect("serialize");
+        let sig: ed25519_dalek::Signature = root.sign(&bytes);
+        let mut map = serde_json::Map::new();
+        map.insert("schema".into(), serde_json::json!(body.schema));
+        map.insert("seq".into(), serde_json::json!(body.seq));
+        map.insert("signing_key".into(), serde_json::json!(body.signing_key));
+        map.insert("issued_at".into(), serde_json::json!(body.issued_at));
+        map.insert("signature".into(), serde_json::json!(to_hex(&sig.to_bytes())));
+        (
+            root.verifying_key().to_bytes(),
+            signing.verifying_key().to_bytes(),
+            serde_json::to_string(&serde_json::Value::Object(map)).expect("to_string"),
+        )
+    }
+
+    #[test]
+    fn trust_body_bytes_match_between_signer_and_verifier() {
+        // 这是整条信任链的地基：两端必须对同一份清单算出**逐字节相同**的待签名字节。
+        // 一旦字段顺序或名字漂移，验签会恒定失败，且表现为「所有更新都被拒」而非报错。
+        let (root_pk, _, json) = signed_manifest(7, 3, 9);
+        let m: TrustManifest = serde_json::from_str(&json).expect("parse");
+        let bytes = serde_json::to_vec(&TrustBody {
+            schema: m.schema,
+            seq: m.seq,
+            signing_key: &m.signing_key,
+            issued_at: &m.issued_at,
+        })
+        .expect("serialize");
+        let mut sig = [0u8; 64];
+        assert!(hex_decode(&m.signature, &mut sig).is_ok());
+        assert!(verify_ed25519(&bytes, &sig, &root_pk).is_ok());
+    }
+
+    #[test]
+    fn a_tampered_trust_manifest_fails_verification() {
+        let (root_pk, _, json) = signed_manifest(7, 1, 9);
+        let m: TrustManifest = serde_json::from_str(&json).expect("parse");
+        let mut sig = [0u8; 64];
+        hex_decode(&m.signature, &mut sig).expect("sig hex");
+
+        // 攻击者把 seq 抬到 999（想绕过单调水位），但没 root 私钥改签名。
+        let mut body = TrustBody {
+            schema: m.schema,
+            seq: 999,
+            signing_key: &m.signing_key,
+            issued_at: &m.issued_at,
+        };
+        let forged = serde_json::to_vec(&body).expect("serialize");
+        assert!(verify_ed25519(&forged, &sig, &root_pk).is_err());
+        // 换一个 root 公钥同样验不过。
+        body.seq = m.seq;
+        let other_root = SigningKey::from(SecretKey::from([0x77u8; 32])).verifying_key().to_bytes();
+        assert!(verify_ed25519(&forged, &sig, &other_root).is_err());
+    }
+
+    #[test]
+    fn trust_manifest_origin_is_pinned_to_our_repository() {
+        assert!(require_trust_origin(TRUST_MANIFEST_URL).is_ok());
+        for bad in [
+            // 别人的仓库：可以自己签一份清单，把所有密钥换成他-controlled 的。
+            "https://raw.githubusercontent.com/attacker/netsense/main/update/UPDATE-TRUST.json",
+            // 仓库名带后缀骗过前缀。
+            "https://raw.githubusercontent.com/imonior/netsense-evil/main/update/UPDATE-TRUST.json",
+            // 换目录（清单挪到别处，或指向一个二进制）。
+            "https://raw.githubusercontent.com/imonior/netsense/main/other/UPDATE-TRUST.json",
+            // 路径穿越。
+            "https://raw.githubusercontent.com/imonior/netsense/main/../../evil/UPDATE-TRUST.json",
+            // 换成 Release 资产：那里的字节不由 root 签发。
+            "https://github.com/imonior/netsense/releases/download/v1/UPDATE-TRUST.json",
+            "https://evil.invalid/update/UPDATE-TRUST.json",
+        ] {
+            assert!(require_trust_origin(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn trust_state_roundtrips_and_never_moves_backwards() {
+        let mut st = TrustState { seq: 5 };
+        st.seq = st.seq.max(3); // 更旧的 seq 不该把水位拉回去
+        assert_eq!(st.seq, 5);
+        assert_eq!(serde_json::to_string(&st).unwrap(), r#"{"seq":5}"#);
+        let back: TrustState = serde_json::from_str(r#"{"seq":5}"#).unwrap();
+        assert_eq!(back.seq, 5);
+        // 缺字段的旧文件 / 坏文件都退回「无水位」，而不是 panic。
+        let d: TrustState = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.seq, 0);
+        // 精简之前写过的状态文件里还带着 `version`：未知字段必须被忽略而不是让解析失败，
+        // 否则升级上来的用户会静默丢掉水位（表现为「旧清单又能用了」）。
+        let legacy: TrustState = serde_json::from_str(r#"{"seq":7,"version":"1.4.0"}"#).unwrap();
+        assert_eq!(legacy.seq, 7);
     }
 }

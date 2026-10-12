@@ -135,6 +135,14 @@ fn main() {
     }
 
     tauri::Builder::default()
+        // 第二次被启动时不新起一份，而是把已经在跑的那份叫到前台。
+        //
+        // 这一层在 Windows / Linux 上是必需的（见 Cargo.toml 里这条依赖的说明）：多出来的
+        // 进程不只是"多一个图标"，它会真的再拉一条引擎线程，于是同一张网卡被两个互不相识
+        // 的 engine 轮流下发 —— 用户看到的就是配置在两个状态之间来回跳。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            popup::show_main(app);
+        }))
         .setup(move |app| {
             // macOS 14+ 把现连 SSID 当位置信息：申请过一次「使用期间」定位授权，
             // CoreWLAN 才读得到网络名、NetSense 才会出现在「定位服务」列表里。
@@ -305,6 +313,9 @@ fn main() {
             ipc::open_app_settings_folder,
             ipc::get_proxy_state,
             ipc::set_update_proxy,
+            ipc::proxy_speed_test,
+            ipc::set_update_mirror,
+            ipc::set_dns_fallback,
             ipc::export_backup,
             ipc::get_backups,
             ipc::import_backup,

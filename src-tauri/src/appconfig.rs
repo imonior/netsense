@@ -20,6 +20,11 @@
 //! 安装包」这两次对外请求走哪条路。放在 `config.json` 里就等于让一台机器的网络出口跟着
 //! 自动化配置一起同步给另一台机器。
 //!
+//! `update_mirror` 的判据与 `proxy` 是同一句，只是它换的是**地址**而不是出口：改了它同样
+//! 不改变自动化行为，也不改变「谁说了这个安装包是什么」—— SHA256SUMS 永远直连 GitHub 取，
+//! 见 [`UpdateMirror`]。它更不该进 `config.json`：镜像是按地域挑的，跟着自动化配置同步到
+//! 另一台机器只会把一条快路变成一条慢路。
+//!
 //! ## 三平台的开机启动落地方式
 //!
 //! 全部走「写一个文件 / 调一条系统命令」，且**平台分支按运行时常量选**而不是
@@ -95,6 +100,68 @@ impl WindowSizes {
     }
 }
 
+/// 升级安装包的下载镜像。
+///
+/// ⚠️ 它**只改下载走哪条路**，不改「谁说了这个安装包是什么」：那一份 SHA256SUMS 永远
+/// 直连 GitHub 取（见 `update::native_update` 与 `ipc::install_verdict`）。
+///
+/// 这不是洁癖，而是那条校验本身的形状 —— `update::release_asset_pinned` 挡的正是「自己
+/// 托管一个 https 站点，同时给出二进制与配套的 SHA256SUMS」：**字节与校验值一旦由同一个
+/// 第三方给出，哈希可以逐字节对上而校验一步也验不出来**。所以镜像只覆盖「版本清单」与
+/// 「安装包字节」这两样大件，取校验值那一次请求仍走 GitHub 自己。分开之后镜像最坏只能让
+/// 下载变慢或下坏（哈希不符即中止安装），不能让一个假的安装包通过校验。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMirror {
+    /// 直连 GitHub（默认）。
+    #[default]
+    Direct,
+    /// 前缀式镜像：`https://host/` 之后接上原本那个 URL。国内那一批 GitHub 加速镜像都是
+    /// 这个形状（把整条原 URL 挂在自己后面），所以不必为每个站单独定一种拼法。
+    Prefix(String),
+}
+
+impl UpdateMirror {
+    /// 序列化用的跳过条件：从来没设过镜像的配置文件里不该出现一个 `update_mirror`。
+    /// 与 `window_sizes` 同一条道理 —— 它既不是配置也不是诊断信息，写进去只是噪声，
+    /// 还让人分不清「没设过」和「设过又清掉了」。
+    fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct)
+    }
+
+    /// 认不出的镜像前缀**退回直连**，而不是保原样：形状不对的前缀会拼出一个根本不是
+    /// URL 的东西，下载必然失败；而直连正是「没配镜像时本来会怎么走」。
+    fn clamped(self) -> Self {
+        match self {
+            Self::Prefix(p) if !is_mirror_prefix(&p) => Self::Direct,
+            other => other,
+        }
+    }
+}
+
+/// 一个能用的镜像前缀长什么样：`https://` 开头、host 非空、不含空白与路径回退。
+///
+/// 挡 `?` `#` 与反斜杠，是因为那几样改的是**原本那个 URL 的语义**而不是它的走法；
+/// 挡 `user@host`，是因为这个前缀会被写进日志与命令行，不该顺手带上凭据。
+/// 其余（端口、路径、末尾斜杠）一概不猜：真正的检验是拿它发一次请求，而那一步
+/// 失败会退回直连 —— 这里只负责挡住「一眼就看得出拼不出 URL」的那些。
+pub fn is_mirror_prefix(p: &str) -> bool {
+    let p = p.trim();
+    // `get(..8)` 而不是 `&p[..8]`：非 ASCII 的输入不能在此 panic。
+    if p.get(..8).map(|s| s.eq_ignore_ascii_case("https://")) != Some(true) {
+        return false;
+    }
+    // 下标 8 必然是字符边界：前 8 个字节刚被确认是 ASCII 的 `https://`。
+    let host = p[8..].split('/').next().unwrap_or("");
+    !host.is_empty()
+        && !host.contains('@')
+        && !p.contains(char::is_whitespace)
+        && !p.contains("..")
+        && !p.contains('?')
+        && !p.contains('#')
+        && !p.contains('\\')
+}
+
 /// 窗口尺寸的允许区间。下限取「还看得见内容」的值，上限挡住手写配置里的荒谬数字 ——
 /// 真正起约束作用的始终是显示器的工作区，那一步在打开时实时收敛。
 const MIN_WINDOW_SIZE: u32 = 320;
@@ -141,6 +208,64 @@ pub struct AppConfig {
     /// 之后全部静默。它只控制「要不要走免密通道」，不改变任何 Profile 的匹配或下发内容。
     #[serde(default)]
     pub silent_execution: bool,
+    /// 升级安装包的下载镜像。缺省 = 直连 GitHub。
+    ///
+    /// 它改变的是「去哪儿取安装包」，与 `proxy`（走哪条出口）正交：两者可以同时生效，
+    /// 也可以各设一个。校验值不在它覆盖的范围内，见 [`UpdateMirror`]。
+    #[serde(default, skip_serializing_if = "UpdateMirror::is_direct")]
+    pub update_mirror: UpdateMirror,
+    /// DNS 兜底（见 [`DnsFallback`]）：3A 下发后一个 nameserver 都没有时改下这几台。
+    /// 默认关闭，服务器由用户自己填 —— 本应用不预置任何公共解析器。
+    #[serde(default, skip_serializing_if = "DnsFallback::is_off")]
+    pub dns_fallback: DnsFallback,
+}
+
+/// DNS 兜底：3A 下发之后系统里**一个 nameserver 都没有**时，改下这几台。
+///
+/// 它解决的是最难受的那类现场 —— 「IP 通、网关通、网页全打不开，而且没人告诉用户
+/// 为什么」。典型成因是「静态 IP + DNS 交回自动获取」：静态地址这一支上没有任何一方
+/// 会递来 DNS，清空的结果就是一条都没有。
+///
+/// 默认**关闭**，且**不预置任何公共解析器**：
+/// - 开着却往企业内网塞 1.1.1.1 会打断内网域名解析，用户只会看到「网络坏了」；
+/// - 把查询静默导向用户没指定的第三方解析器，本身就是不该由本应用替他做的决定。
+/// 所以服务器由用户自己填，本应用只负责在真正没有 DNS 的时候用上它。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsFallback {
+    /// 开着才会在「读到空 DNS」时用上 `servers`。
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+}
+
+impl DnsFallback {
+    /// 没设过就不写进文件（与 `window_sizes` 同一条道理）：默认关闭是**常态**，
+    /// 让每个用户的 settings.json 里都挂一个空对象没有意义。
+    pub fn is_off(&self) -> bool {
+        !self.enabled && self.servers.is_empty()
+    }
+
+    /// 与日志天数同样的思路：手填的坏值在加载时收掉，而不是留到下发时才炸。
+    ///
+    /// 「开了却没有一台合法服务器」一律收成**关着** —— 否则 3A 会以为有兜底可用，
+    /// 真到用时什么都补不上，而用户那边看到的是一句「已经配好了」。
+    ///
+    /// 只认 **IPv4** 字面量，与 DNS 配置模型（`config::validate_network` 里的
+    /// `is_ipv4`）对齐：不认主机名（要解析，而解析器正是此刻不存在的那个东西），
+    /// 也不认 IPv6 —— NetworkManager 的 IPv6 解析器是与 `ipv4.dns` 分开的 `ipv6.dns`，
+    /// 把它塞进同一个字段在 Linux 上是一个静默的错误行为。
+    pub fn clamped(self) -> Self {
+        let servers: Vec<String> = self
+            .servers
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            .collect();
+        let enabled = self.enabled && !servers.is_empty();
+        Self { enabled, servers }
+    }
 }
 
 fn default_retention() -> u32 {
@@ -160,6 +285,8 @@ impl Default for AppConfig {
             proxy: crate::netproxy::ProxySetting::default(),
             window_sizes: WindowSizes::default(),
             silent_execution: false,
+            update_mirror: UpdateMirror::default(),
+            dns_fallback: DnsFallback::default(),
         }
     }
 }
@@ -208,6 +335,8 @@ impl AppConfig {
             other => other.clone(),
         };
         self.window_sizes = self.window_sizes.clamped();
+        self.update_mirror = self.update_mirror.clamped();
+        self.dns_fallback = self.dns_fallback.clone().clamped();
         self
     }
 
@@ -620,6 +749,8 @@ mod tests {
             },
             window_sizes: WindowSizes::default(),
             silent_execution: false,
+            update_mirror: UpdateMirror::default(),
+            dns_fallback: DnsFallback::default(),
         };
         cfg.save(&p).unwrap();
         assert_eq!(AppConfig::load(&p).unwrap(), cfg);
@@ -651,6 +782,8 @@ mod tests {
             },
             window_sizes: WindowSizes::default(),
             silent_execution: false,
+            update_mirror: UpdateMirror::default(),
+            dns_fallback: DnsFallback::default(),
         }
         .clamped();
         assert_eq!(bad.proxy, ProxySetting::Direct);
@@ -663,6 +796,8 @@ mod tests {
             },
             window_sizes: WindowSizes::default(),
             silent_execution: false,
+            update_mirror: UpdateMirror::default(),
+            dns_fallback: DnsFallback::default(),
         }
         .clamped();
         assert_eq!(
@@ -705,6 +840,137 @@ mod tests {
         assert_eq!(back.window_sizes.main, Some((1180, 700)));
     }
 
+    /// 镜像前缀的准入：只挡「一眼就看得出拼不出 URL」的那些。
+    ///
+    /// 每个被拒的样例对应的都是一种**改掉原 URL 语义**而不是换条路的写法 —— 放行它们会把
+    /// 「走镜像」变成「下载一个未必是我们资产的东西」，而那正是 `update` 那条锚点在挡的事。
+    #[test]
+    fn only_plain_https_prefixes_can_be_used_as_a_mirror() {
+        for ok in [
+            "https://gh-proxy.com/",
+            "https://ghfast.top",
+            "https://mirror.example:8443/gh",
+            "HTTPS://GH-PROXY.COM/", // scheme 与 host 都是大小写不敏感的
+        ] {
+            assert!(is_mirror_prefix(ok), "should accept {ok:?}");
+        }
+        for bad in [
+            // 明文：字节在路上可以被改写，而校验值来自别处并不是「可以传明文」的理由 ——
+            // 哈希不符只会让安装失败，不会让被换掉的字节变回原样。
+            "http://gh-proxy.com/",
+            "ftp://gh-proxy.com/",
+            "gh-proxy.com/",    // 没有 scheme，拼出来根本不是 URL
+            "https://",         // 空 host
+            "https:///x",       // 空 host
+            "https://user:pw@gh-proxy.com/", // 凭据不该顺手进日志与命令行
+            "https://gh-proxy.com/?from=x",  // 查询串会改原 URL 的语义
+            "https://gh-proxy.com/#x",
+            "https://gh-proxy.com/../evil", // 路径回退
+            "https://gh proxy.com/",        // 空白
+            "https://gh-proxy.com\\x",
+            "",
+        ] {
+            assert!(!is_mirror_prefix(bad), "should reject {bad:?}");
+        }
+        // 非 ASCII 前缀必须是 false，而不是切片 panic。
+        assert!(!is_mirror_prefix("～https://a"));
+    }
+
+    /// 认不出的镜像**退回直连**，而不是保原样：形状不对的前缀会拼出一个不是 URL 的东西，
+    /// 下载必然失败；而直连正是「没配镜像时本来会怎么走」。手改坏的、从别的机器备过来的
+    /// 都走这条路，与日志天数、代理地址同一条思路。
+    #[test]
+    fn an_unusable_mirror_falls_back_to_direct_instead_of_staying_broken() {
+        assert_eq!(UpdateMirror::default(), UpdateMirror::Direct);
+        assert_eq!(
+            UpdateMirror::Prefix("https://gh-proxy.com/".into()).clamped(),
+            UpdateMirror::Prefix("https://gh-proxy.com/".into())
+        );
+        for bad in ["", "not-a-url", "http://gh-proxy.com/", "https://a/?x=1"] {
+            assert_eq!(
+                UpdateMirror::Prefix(bad.into()).clamped(),
+                UpdateMirror::Direct,
+                "should fall back for {bad:?}"
+            );
+        }
+        assert_eq!(
+            AppConfig {
+                update_mirror: UpdateMirror::Prefix("ftp://x/".into()),
+                ..AppConfig::default()
+            }
+            .clamped()
+            .update_mirror,
+            UpdateMirror::Direct
+        );
+    }
+
+    /// 没设过镜像的配置文件里不该出现 `update_mirror`（与 `window_sizes` 同一条道理）；
+    /// 设过之后要原样读得回来，而一份从来没有过这个字段的旧文件必须是「直连」。
+    #[test]
+    fn update_mirror_stays_out_of_the_file_until_it_is_set() {
+        let s = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!s.contains("update_mirror"), "unexpected key in: {s}");
+
+        let mut with = AppConfig::default();
+        with.update_mirror = UpdateMirror::Prefix("https://gh-proxy.com/".into());
+        let s = serde_json::to_string(&with).unwrap();
+        assert!(s.contains("update_mirror"), "mirror was dropped: {s}");
+        let back: AppConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.update_mirror, with.update_mirror);
+
+        // 升级上来的旧文件没有这个键：它该是「直连」，而不是某个镜像。
+        let old: AppConfig = serde_json::from_str(r#"{"language":"ko"}"#).unwrap();
+        assert_eq!(old.update_mirror, UpdateMirror::Direct);
+    }
+
+    /// DNS 兜底默认关闭；「开了却没有一台合法服务器」在加载时收成**关着** ——
+    /// 否则 3A 会以为有兜底可用，真到用时什么都补不上，而界面上写的是「已启用」。
+    #[test]
+    fn dns_fallback_is_off_until_the_user_supplies_a_server() {
+        let s = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!s.contains("dns_fallback"), "unexpected key in: {s}");
+
+        let old: AppConfig = serde_json::from_str(r#"{"language":"ko"}"#).unwrap();
+        assert!(!old.dns_fallback.enabled);
+        assert!(old.dns_fallback.servers.is_empty());
+
+        // 开了但服务器全是认不出的东西 → 收成关着，而不是「开着 + 空列表」。
+        let junk = AppConfig {
+            dns_fallback: DnsFallback {
+                enabled: true,
+                servers: vec!["dns.example".into(), "".into(), "999.1.1.1".into()],
+            },
+            ..AppConfig::default()
+        }
+        .clamped();
+        assert!(!junk.dns_fallback.enabled, "没有合法服务器就必须收成关着");
+        assert!(junk.dns_fallback.servers.is_empty());
+
+        // 有合法服务器 → 保留；非法项与 IPv6 解析器被剔除（与 DNS 配置模型同宽）。
+        let good = AppConfig {
+            dns_fallback: DnsFallback {
+                enabled: true,
+                servers: vec![
+                    " 10.0.0.53 ".into(),
+                    "nope".into(),
+                    "2001:db8::53".into(),
+                ],
+            },
+            ..AppConfig::default()
+        }
+        .clamped();
+        assert!(good.dns_fallback.enabled);
+        assert_eq!(
+            good.dns_fallback.servers,
+            vec!["10.0.0.53".to_string()]
+        );
+
+        // 设过之后要原样读得回来
+        let s = serde_json::to_string(&good).unwrap();
+        let back: AppConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.dns_fallback, good.dns_fallback);
+    }
+
     #[test]
     fn retention_is_clamped_instead_of_refused_or_trusted() {
         assert_eq!(clamp_retention(0), MIN_LOG_RETENTION_DAYS);
@@ -719,6 +985,8 @@ mod tests {
                 proxy: ProxySetting::default(),
                 window_sizes: WindowSizes::default(),
                 silent_execution: false,
+                update_mirror: UpdateMirror::default(),
+                dns_fallback: DnsFallback::default(),
             }
             .clamped()
             .log_retention_days,

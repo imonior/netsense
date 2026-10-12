@@ -83,6 +83,15 @@ impl Config {
         // 未来版本迁移按顺序叠加：
         // if from < 2 { raw = migrate_1_to_2(raw)?; }
         // if from < 3 { raw = migrate_2_to_3(raw)?; }
+        //
+        // 关于 `dns: ""`：schema 1 从一开始就把空串定义成「交回系统自动获取」，而不是
+        // 「清空」。所以旧配置里的 `dns: ""` **不需要迁移** —— 它在今天就是这个意思。
+        // 过去 `validate()` 会拒绝 `mode: manual` + `dns: ""` 那一种组合，那是**校验**层面的
+        // 收紧，不是另一套语义；现在放开了，老文件读进来的语义与当初写下去的一致。
+        //
+        // 而且加载路径本来就跑 validate（`state::AppState::load` / `engine` 的热重载都是
+        // `Config::load(..).and_then(|c| c.validate()..)`），所以磁盘上任何一份配置都是
+        // 校验过才进引擎的 —— 不存在「绕过校验的老配置」这种状态。
         Ok(raw)
     }
 
@@ -507,15 +516,21 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
-        // 「自动获取 DNS」只有在这条分支本身就问 DHCP 要地址时才是一个真状态：静态地址下
-        // 没有任何一方会递来 nameserver，清空的结果是**一个都拿不到**，而不是「自动」。
-        // 三平台同构 —— macOS 的 `-setdnsservers … Empty` 就是系统设置里的「自动」，但它依赖
-        // DHCP 客户端在跑；Windows 的 `source=dhcp` 同样要有租约可跟；NetworkManager 清掉
-        // `ipv4.dns` 之后也只有 `method=auto` 才从租约里收 DNS。
-        if servers.is_empty() && n.mode == Mode::Manual {
-            return Err(i18n::tf("cfg.net_manual_auto_dns", &what1));
-        }
+        // 空串 = 「交回系统自动获取」，在**两种** IPv4 模式下都是合法的请求：
+        // 静态地址只是让**本机**不再问 DHCP 要地址，并不代表这个网段里没有别的来源
+        // （Windows 的静态地址照样能收到 DHCP 递来的 DNS；macOS 保留着上一个环境之外的
+        // 系统解析器）。所以这里不拦，改成由 3A 回读判定 —— 真读不到 nameserver 时
+        // `network::apply_3a` 会判失败并回滚，或者按设置里的「DNS 兜底」补一组。
+        //
+        // 以前这里直接拒绝 `mode: manual` + 空 `dns`，代价是把「静态 IP + DNS 自动获取」
+        // 这组最常见的组合从界面上抹掉了，而验证它到底成不成本来就该由回读来回答。
         for t in servers {
+            // **只收 IPv4**，这不是保守而是没有第二条路：NetworkManager 的 IPv6 解析器
+            // 是与 `ipv4.dns` 分开的 `ipv6.dns`，而本配置模型只有一个 `dns` 字段。
+            // 放行 IPv6 字面量会让 Linux 把它写进 `ipv4.dns-data` —— 那是一个静默的
+            // 错误行为（要么被 NM 忽略，要么按 IPv4 解析器解释）。
+            // 真要支持 IPv6 解析器，得先给配置模型加一个独立字段并迁移旧配置，
+            // 那是另一件事，不该靠在这里放宽校验蒙混过去。
             if !is_ipv4(t) {
                 return Err(i18n::tf("cfg.net_bad_dns", &[("what", what), ("dns", t)]));
             }
@@ -556,14 +571,24 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
         if r.dest.trim().is_empty() {
             return Err(i18n::tf("cfg.net_route_no_dest", &what1));
         }
+        // dest / gateway 的**形状**在落盘前就判掉。平台层各有各的表现：macOS 走特权脚本
+        // 白名单会整批拒掉、Windows 的 `New-NetRoute` 报一句英文、Linux 的 `ip route`
+        // 有时不报错只是没加上 —— 而在这里判，报错能指回配置文件里确切的那一行。
+        if !is_ipv4_cidr(&r.dest) {
+            return Err(i18n::tf("cfg.net_route_bad_dest", &[("what", what), ("dest", &r.dest)]));
+        }
         if !r.delete && r.gateway.as_deref().unwrap_or("").trim().is_empty() {
-            return Err(i18n::tf("cfg.net_route_no_gw", &[
-                ("what", what),
-                ("dest", &r.dest),
-            ]));
+            return Err(i18n::tf("cfg.net_route_no_gw", &[("what", what), ("dest", &r.dest)]));
         }
         if !r.delete {
             let gw = r.gateway.as_deref().unwrap_or("").to_string();
+            if !is_ipv4(gw.trim()) {
+                return Err(i18n::tf("cfg.net_route_bad_gw", &[
+                    ("what", what),
+                    ("dest", &r.dest),
+                    ("gateway", &gw),
+                ]));
+            }
             if let Some(prev) = seen_routes.get(r.dest.as_str()) {
                 if prev != &gw {
                     return Err(i18n::tf("cfg.net_route_conflict", &[
@@ -587,6 +612,29 @@ fn validate_network(what: &str, n: &NetworkConfig) -> Result<(), String> {
 fn is_ipv4(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
+}
+
+/// 路由目标：`a.b.c.d` 或 `a.b.c.d/len`（len 为十进制、≤2 位、≤32）。
+///
+/// 刻意与平台层的白名单**同宽**（见 `platform::macos::route_dest_ok`，它复刻的是
+/// `scripts/netsense-priv.sh` 里的 `is_route_dest`）：收得更宽就会有一批配置在这里过关、
+/// 到平台层被整批拒掉；收得更窄则是拦掉平台真能下发的写法。
+///
+/// 也刻意**不收 IPv6** —— 三平台的路由下发命令都按地址族分开（macOS 的 `route` 要
+/// `-inet6`、Linux 的 `ip` 要 `-6`、Windows 的 `New-NetRoute` 另带前缀语义），而本配置
+/// 模型没有族标记。与其放行一个「平台各行其是」的形状，不如在落盘前明确拒绝并说明。
+fn is_ipv4_cidr(s: &str) -> bool {
+    let s = s.trim();
+    match s.split_once('/') {
+        Some((addr, len)) => {
+            is_ipv4(addr)
+                && !len.is_empty()
+                && len.len() <= 2
+                && len.bytes().all(|b| b.is_ascii_digit())
+                && len.parse::<u8>().unwrap_or(255) <= 32
+        }
+        None => is_ipv4(s),
+    }
 }
 
 /// 用标准库的 [`std::net::Ipv6Addr`] 做语义校验：`2001:db8::1` 合法、`not-an-ip` 非法。
@@ -713,45 +761,43 @@ mod tests {
         assert!(err.contains("netmask"), "报错内容: {}", err);
     }
 
-    /// 「自动获取 DNS」要有 DHCP 客户端在跑才有东西可跟，所以它只在 `mode: dhcp` 那条分支上是
-    /// 一个可达成的状态。静态地址 + 空 `dns` 下发出去是「一个 nameserver 都没有」，而现场长得
-    /// 像网络坏了 —— 这种配置不该等到跑起来才发现。
+    /// 「交回系统自动获取」在**两种** IPv4 模式下都是合法请求。
+    ///
+    /// 静态地址只是让**本机**不再问 DHCP 要地址，并不代表这个网段里没有别的 DNS 来源
+    /// （Windows 的静态地址照样能收到 DHCP 递来的 DNS；macOS 另有系统解析器）。所以这里
+    /// 不该在落盘前拦掉它 —— 到底拿不拿得到由 3A 回读判定：真读不到 nameserver 就判失败
+    /// 并回滚，或者按设置里的「DNS 兜底」补一组。
+    ///
+    /// 以前这里直接拒绝 `manual` + 空 `dns`，代价是把「静态 IP + DNS 自动获取」这组最常见
+    /// 的组合从界面上抹掉了。放开的是**空值**这一半，不是「填什么都行」那一半（见末尾）。
     #[test]
-    fn automatic_dns_is_only_an_option_on_the_dhcp_branch() {
+    fn automatic_dns_is_a_valid_request_on_both_ipv4_branches() {
         dicts_ready();
         let manual_auto = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
           "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
           "then":{"network":{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
             "gateway":"10.0.0.254","dns":""}}}]}"#;
-        let err = Config::from_json(manual_auto)
+        Config::from_json(manual_auto)
             .unwrap()
             .validate()
-            .expect_err("静态地址 + 自动 DNS 必须被拒绝");
-        // 断言用两个字面量而不是整句英文：报错要在五语下都指得出「是 dns 这一半和 manual 这一半
-        // 撞了」，而这条配置其余字段都齐全，别的规则都不会先响。
-        assert!(
-            err.contains("dns") && err.contains("mode=manual"),
-            "报错要同时点名 dns 与 mode=manual: {}",
-            err
-        );
+            .expect("静态地址 + 自动 DNS 是一个合法请求");
 
-        // 只剩分隔符的值在拆分后同样是空的，走的是同一条清空路径，就得撞同一道闸。
+        // 只剩分隔符的值拆分后同样是空串，走的是同一条「交回自动」路径。
         let noisy = manual_auto.replace("\"dns\":\"\"", "\"dns\":\" , \"");
-        assert!(
-            Config::from_json(&noisy).unwrap().validate().is_err(),
-            "只剩分隔符的 dns 也是一次清空，同样要拦"
-        );
+        Config::from_json(&noisy)
+            .unwrap()
+            .validate()
+            .expect("只剩分隔符的 dns 同样是「交回自动」");
 
-        // 反面必须放行，否则这条闸门就是在拦掉正确写法：
-        // 兜底用的就是 `mode: dhcp` + `dns: ""`（`-setdhcp` 不会自己带走上一个环境的 DNS）。
+        // 兜底那一支照旧合法（`-setdhcp` 不会自己带走上一个环境钉下去的 DNS）。
         let dhcp_auto = r#"{"schema":1,"profiles":[],
           "fallback":{"network":{"mode":"dhcp","dns":""}}}"#;
         Config::from_json(dhcp_auto)
             .unwrap()
             .validate()
-            .expect("dhcp + 空 dns 才是「交回自动获取」的写法");
+            .expect("dhcp + 空 dns 同样是「交回自动获取」");
 
-        // 静态 + 明确指定 / 静态 + 键缺失（别碰 DNS）都照旧合法。两份都在上面那份已被接受的
+        // 静态 + 指定 / 静态 + 键缺失（别碰 DNS）都照旧合法。这几份都在上面那份已被接受的
         // 配置上改一处得来，避免手抄括号数把「合法用例」测成解析失败。
         for (raw, why) in [
             (
@@ -768,6 +814,115 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|e| panic!("{why} 必须通过校验: {e}"));
         }
+
+        // 反面：放开的是「空」，不是「乱填」。填了却不是 IP 字面量仍然要被拒 ——
+        // 主机名要解析，而解析器正是此刻还不一定存在的那个东西。
+        let junk = manual_auto.replace("\"dns\":\"\"", "\"dns\":\"dns.example\"");
+        assert!(
+            Config::from_json(&junk).unwrap().validate().is_err(),
+            "填了却不是 IP 字面量必须被拒"
+        );
+        // IPv6 解析器同样被拒，而且是**刻意**的：NetworkManager 的 IPv6 DNS 是与
+        // `ipv4.dns` 分开的 `ipv6.dns`，而本模型只有一个 `dns` 字段。放行它等于让 Linux
+        // 把 v6 地址写进 `ipv4.dns-data` —— 一个静默的错误行为。
+        let v6 = manual_auto.replace("\"dns\":\"\"", "\"dns\":\"2001:db8::53\"");
+        assert!(
+            Config::from_json(&v6).unwrap().validate().is_err(),
+            "IPv6 解析器必须被拒：配置模型里没有独立的 IPv6 DNS 字段"
+        );
+    }
+
+    /// 路由的 dest / gateway 形状在落盘前就判掉。
+    ///
+    /// 平台层各有各的表现：macOS 走特权脚本白名单会把**整批**拒掉、Windows 的
+    /// `New-NetRoute` 抛一句英文、Linux 的 `ip route` 有时不报错只是没加上 —— 而在这里判，
+    /// 报错能指回配置文件里确切的那一行。
+    ///
+    /// IPv6 静态路由明确不支持，而且报错的措辞要说清这一点（见 `cfg.net_route_bad_dest`）：
+    /// 三平台的路由下发命令都按地址族分开（macOS 的 `route` 要 `-inet6`、Linux 的 `ip` 要
+    /// `-6`、Windows 另带前缀语义），而本配置模型没有族标记。与其放行一个「各平台各行其是」
+    /// 的形状，不如让用户现在就看到「不支持」这三个字。
+    #[test]
+    fn route_shapes_are_judged_before_they_reach_the_platform() {
+        dicts_ready();
+        let ok = r#"{"schema":1,"profiles":[],
+          "fallback":{"network":{"mode":"dhcp","routes":[
+            {"dest":"10.0.0.0/8","gateway":"192.168.1.1","metric":20},
+            {"dest":"192.168.1.50","gateway":"192.168.1.2"},
+            {"dest":"172.16.0.0/12","delete":true}]}}}"#;
+        Config::from_json(ok)
+            .unwrap()
+            .validate()
+            .expect("IPv4 CIDR、单主机路由与「只删不配网关」都该通过");
+
+        for (bad, why) in [
+            ("10.0.0.0/33", "前缀超过 32"),
+            ("10.0.0.0/ 8", "前缀带空格"),
+            ("10.0.0/8", "地址不足四段"),
+            ("10.0.0.0/8/8", "两截斜杠"),
+            ("10.0.0.0/", "前缀为空"),
+            ("not-a-dest", "根本不是地址"),
+        ] {
+            let raw = ok.replace(
+                "\"dest\":\"10.0.0.0/8\"",
+                &format!("\"dest\":\"{bad}\""),
+            );
+            assert!(
+                Config::from_json(&raw).unwrap().validate().is_err(),
+                "非法的 dest 必须被拦下: {why}（{bad}）"
+            );
+        }
+
+        for (bad, why) in [
+            ("10.0.0.1", "网关不足四段"),
+            ("dns.example", "网关是主机名"),
+            ("2001:db8::1", "网关是 IPv6"),
+        ] {
+            let raw = ok.replace(
+                "\"gateway\":\"192.168.1.1\"",
+                &format!("\"gateway\":\"{bad}\""),
+            );
+            assert!(
+                Config::from_json(&raw).unwrap().validate().is_err(),
+                "非法的网关必须被拦下: {why}（{bad}）"
+            );
+        }
+
+        let v6 = ok.replace("\"dest\":\"10.0.0.0/8\"", "\"dest\":\"2001:db8::/32\"");
+        let err = Config::from_json(&v6)
+            .unwrap()
+            .validate()
+            .expect_err("IPv6 静态路由不支持");
+        assert!(err.contains("IPv6"), "报错要说清是不支持 IPv6: {}", err);
+    }
+
+    /// 旧配置里的 `dns: ""` 不需要迁移：schema 1 从一开始就把空串定义成「交回自动获取」，
+    /// 而不是「清空」。这条固化的是「升级上来的老文件语义不变」。
+    #[test]
+    fn an_older_config_keeps_its_automatic_dns_meaning() {
+        dicts_ready();
+        let old = r#"{"schema":1,"profiles":[{"id":"a","name":"A",
+          "rules":[{"id":"r1","conditions":[{"id":"c1","type":"wifi_ssid","value":"X"}]}],
+          "then":{"network":{"mode":"manual","ip":"10.0.0.1","netmask":"255.255.255.0",
+            "gateway":"10.0.0.254","dns":""}}}]}"#;
+        let cfg = Config::from_json(old).expect("老配置必须还能读进来");
+        cfg.validate().expect("老配置在新语义下必须仍然合法");
+        // 语义还是「交回自动」：空串原样保留，没有被迁移成别的取值。
+        assert_eq!(
+            cfg.profiles[0].then.network.as_ref().unwrap().dns.as_deref(),
+            Some("")
+        );
+        // 加载路径本身就跑 validate（`AppState::load` 与 engine 热重载都是
+        // `Config::load(..).and_then(|c| c.validate()..)`），所以「磁盘上的老配置绕过校验」
+        // 这种状态并不存在。这里用一次真实的落盘 + 读回把这条固化下来。
+        let dir = std::env::temp_dir().join(format!("netsense-oldcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let p = dir.join("config.json");
+        std::fs::write(&p, old).expect("write");
+        Config::load(&p)
+            .and_then(|c| c.validate().map(|_| c))
+            .expect("老配置从磁盘读回后仍要通过校验");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

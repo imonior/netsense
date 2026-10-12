@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 560 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 599 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -214,7 +214,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，48 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，51 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -246,8 +246,11 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `uninstall_priv_channel` | — | 撤销 macOS 的免密通道：在一次授权之内删掉白名单包装脚本与 `/etc/sudoers.d/netsense`，并把 `notify.priv_removed` 记进日志。安装通道有两条路：设置里的「静默执行」开关（`set_silent_execution`，主动装一次）与下一次应用配置时顺手装好（`platform::macos` 的 bootstrap 分支，装是下发的副产品）。非 macOS 平台回一条 `pal.priv_unsupported`；界面上那颗按钮在 `platform == "macos"` 且 `priv` 为 `"direct"` 或 `"outdated"` 时出现（旧版通道也留着那条 sudoers 规则，删得掉；等一次应用它会先被换成本版） |
 | `open_config_folder` | — | 在系统文件管理器里打开 `config.json` 所在目录（路径由后端现算，界面不自己拼） |
 | `open_app_settings_folder` | — | 打开 `settings.json` 所在目录。**不**复用上一条：自动化配置可以来自可执行文件同级，那时两条路径不是一个目录 |
+| `proxy_speed_test` | `urls` | 逐个代理地址真的发一次升级检查请求（就是 `check_update` 那个 URL），返回 JSON 字符串数组 `[{url,ms}]`；`ms` 是 curl 的 `time_total` 换算成毫秒，连不通或地址认不出来时为 `null`。之所以非要发真请求：本机端口握手成功并不等于它真能把你代理出去 |
 | `get_proxy_state` | — | 升级请求出口的现状，JSON 字符串 `{mode,url,system_proxy}`：`mode` 是磁盘上那三态之一，`system_proxy` 只在 mode 为 system 时**现问**操作系统（macOS 一条 `scutil --proxy`，Linux 几条 `gsettings`），问不到就是 `null`。这条命令只在设置窗口打开与保存之后各调一次 —— 不进 `get_app_settings`，那个每次窗口获得焦点都会被调，popup.html 也调它 |
 | `set_update_proxy` | `mode`, `url` | 设升级请求走哪条出口：`direct` / `system` / `manual` + 一个 `scheme://host[:port]` 形状的地址。认不出的 mode 或地址一律拒绝（`sett.proxy_rejected`）而不是退回默认值 —— 这一句改的是这台机器的对外流量走哪条路。落盘 + 更新内存里的 `settings`，返回并记一条 `notify.proxy_set`；**不**惊动引擎，这份设置不参与条件求值与下发 |
+| `set_update_mirror` | `prefix` | 设安装包从哪儿下：空串 = 直连 GitHub，其余 = 前缀式镜像（`https://host/` + 原 URL，见 `appconfig::UpdateMirror`）。与 `set_update_proxy` 正交 —— 一个换出口、一个换**地址**，可同时生效。覆盖「版本清单」与「安装包字节」两样大件，**不**覆盖取 SHA256SUMS 那一次请求：字节与校验值若都由同一个第三方给出，哈希可以逐字节对上而校验一步也验不出来。形状不合法的前缀在保存时退回直连（`AppConfig::clamped`），返回值是**落盘后的真值**（直连为 `""`），界面按它回显 |
+| `set_dns_fallback` | `enable`, `servers` | 设「DNS 兜底」：某支网络配置要求「DNS 自动获取」，而回读发现系统里一个 nameserver 都没有时，改下 `servers` 这几台（见 `network::apply_3a`）。默认关闭，**不预置任何公共解析器** —— 服务器由用户自己填：往企业内网塞一台公共 DNS 会打断内网域名解析，而把查询静默导向用户没指定的第三方解析器，本就不该由本应用替他决定。认不出的地址在 `AppConfig::clamped` 里被剔除，而「开着却没有一台合法服务器」会收成关着；返回值是**落盘后的真值**（`{enabled,servers}`），界面按它回显，否则会显示成「填了个错的却已保存」 |
 | `export_backup` | — | 导出一份备份：把自动化配置、软件配置、受信脚本目录里的脚本打成一个 JSON 文件写进 `<配置目录>/backups/`，返回文件名。脚本报错只回文本 —— 那里是 `run_script` 的 allow-list，一次静默失败会让用户以为备份是全的 |
 | `get_backups` | — | 现存备份清单（JSON 字符串，新→旧）：`[{name,bytes,modified}]`。只列形状认得出的名字，手放进去的文件不会出现在恢复选项里 |
 | `import_backup` | `name` | 恢复这份备份。先解析 + `validate()` 再动盘，落盘前把当前文件另存一份进同一个目录；成功文本走 `notify.backup_restored`。恢复后的 `settings.json` 会重设语言与日志保留，并回推 `netsense://status` |

@@ -45,6 +45,8 @@ use std::thread_local;
 pub enum Call {
     GetStatus,
     ApplyNetwork { cfg: NetworkConfig },
+    /// 3A 的 DNS 兜底：只下发 DNS 服务器，不动地址/网关。
+    ApplyDnsOnly { servers: Vec<String> },
     SetDhcp,
     SetDhcpFor { dev: String },
     RestoreFromSnapshot { snap: InterfaceStatus },
@@ -78,6 +80,7 @@ struct MockInner {
     tunnel_is_up: bool,
     tunnel_connect_result: Result<(), String>,
     apply_network_result: Result<(), String>,
+    apply_dns_only_result: Result<(), String>,
     set_dhcp_result: Result<(), String>,
 }
 
@@ -91,6 +94,7 @@ impl Default for MockInner {
             tunnel_is_up: false,
             tunnel_connect_result: Ok(()),
             apply_network_result: Ok(()),
+            apply_dns_only_result: Ok(()),
             set_dhcp_result: Ok(()),
         }
     }
@@ -150,6 +154,11 @@ impl MockPlatform {
         INNER.with(|i| i.borrow_mut().set_dhcp_result = r);
     }
 
+    /// 注入 `apply_dns_only` 的返回值（用于模拟「兜底也没补上」）。
+    pub fn set_apply_dns_only_result(&self, r: Result<(), String>) {
+        INNER.with(|i| i.borrow_mut().apply_dns_only_result = r);
+    }
+
     /// 获取所有已记录的调用。
     pub fn calls(&self) -> Vec<Call> {
         INNER.with(|i| i.borrow().calls.clone())
@@ -187,6 +196,22 @@ impl NetworkPlatform for MockPlatform {
                 inner.state.gateway = cfg.gateway.clone();
                 inner.state.dns = cfg.dns.clone();
             });
+        }
+        r
+    }
+
+    fn apply_dns_only(
+        &self,
+        _target: Option<crate::config::model::NetworkTarget>,
+        servers: &[String],
+    ) -> Result<(), String> {
+        self.record(Call::ApplyDnsOnly {
+            servers: servers.to_vec(),
+        });
+        let r = INNER.with(|i| i.borrow().apply_dns_only_result.clone());
+        if r.is_ok() {
+            // 与真实平台同形：补上之后 `get_status` 就该读得到这几台，3A 才能回读通过。
+            INNER.with(|i| i.borrow_mut().state.dns = Some(servers.join(",")));
         }
         r
     }

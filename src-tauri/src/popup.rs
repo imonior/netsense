@@ -125,7 +125,21 @@ fn show_window(app: &AppHandle, label: &str) {
             // show + set_focus，保证窗口真正被拉到最前。
             let _ = w.unminimize();
             let _ = w.show();
-            let _ = w.set_focus();
+            // Windows 的 SetForegroundWindow 只对**前台进程**生效，而这个应用常年只是个
+            // 托盘常驻进程 —— 直接 `set_focus` 会被系统静默丢掉。结果不是"窗口打不开"，
+            // 而是"开了，但在别的窗后面"，用户看到的就是双击图标毫无动静。
+            // 先把窗口临时抬到最上层把前台资格抢过来，聚焦，再立刻摁回去：一次闪都不闪，
+            // 换来的是不依赖本进程此刻是否处在前台。
+            #[cfg(target_os = "windows")]
+            {
+                let _ = w.set_always_on_top(true);
+                let _ = w.set_focus();
+                let _ = w.set_always_on_top(false);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = w.set_focus();
+            }
         }
         None => crate::log::warn(&crate::i18n::tf(
             "app.window_missing",

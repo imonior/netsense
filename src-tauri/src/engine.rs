@@ -827,7 +827,7 @@ impl Engine {
         // 3A 失败 → 3B 全停（硬屏障）。
         let outcome = match three_a {
             Some(Stage3A::Failed { .. }) => return,
-            Some(Stage3A::Applied) => ThreeAOutcome::Applied,
+            Some(Stage3A::Applied { .. }) => ThreeAOutcome::Applied,
             // 无网络配置（Skipped）：仍要跑一次性动作与常驻 worker，只是留痕里
             // 没有「已下发网络」这一项。
             None => ThreeAOutcome::Skipped,
@@ -1299,7 +1299,15 @@ fn run_3a_lockfree(
     degrade: bool,
 ) -> Option<Stage3A> {
     let net = net?;
-    Some(match network::apply_3a(&state.plat, net) {
+    // DNS 兜底来自软件设置：`enabled` 为假就给空列表（`clamped` 已保证「开着却没有一台
+    // 合法服务器」不会存在），空列表在 3A 里就是「没有兜底」。
+    // 这里只短暂持锁取一次值：3A 本身（一串子进程 + 回读采样）是在锁外跑的。
+    let fallback = state
+        .settings
+        .lock()
+        .map(|g| g.dns_fallback.servers.clone())
+        .unwrap_or_default();
+    Some(match network::apply_3a(&state.plat, net, &fallback) {
         Stage3A::Failed { reason } => {
             // 保底：探测里开了 fallback 就回落 DHCP（3A 失败处置的一部分）
             if degrade {
@@ -1660,11 +1668,19 @@ fn commit_plan(
                     }
                 }
                 None => {
-                    if let Some(Stage3A::Applied) = &three_a {
+                    if let Some(Stage3A::Applied { note }) = &three_a {
                         log::debug(&i18n::tf(
                             "engine.pass_3a",
                             &[("name", &profile.name), ("branch", Which::Then.name())],
                         ));
+                        // 降级成功（DNS 兜底）必须出声：用户现在用的不是他填的解析器，
+                        // 而界面上写的是「已应用」，不说就没人知道这件事发生过。
+                        if let Some(n) = note {
+                            log::warn(&i18n::tf(
+                                "engine.applied_degraded",
+                                &[("name", &profile.name), ("note", n)],
+                            ));
+                        }
                     }
                     if !staying {
                         eng.active_id = Some(profile.id.clone());
@@ -1836,11 +1852,18 @@ fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) 
             crate::state::emit_action(state, "apply", false, msg);
         }
         _ => {
-            if let Some(Stage3A::Applied) = &three_a {
+            if let Some(Stage3A::Applied { note }) = &three_a {
                 log::debug(&i18n::tf(
                     "engine.pass_3a",
                     &[("name", &profile.name), ("branch", which.name())],
                 ));
+                // 同上：降级成功要说出来，手动应用尤其 —— 用户是点了按钮在等结果的。
+                if let Some(n) = note {
+                    log::warn(&i18n::tf(
+                        "engine.applied_degraded",
+                        &[("name", &profile.name), ("note", n)],
+                    ));
+                }
             }
             let msg = i18n::tf("engine.manual_ok", &[
                 ("name", &profile.name),
@@ -2594,7 +2617,7 @@ mod integration_tests {
             }],
             ..Default::default()
         };
-        let res = apply_3a(&mock, &net);
+        let res = apply_3a(&mock, &net, &[]);
         assert!(matches!(res, Stage3A::Failed { .. }), "下发失败必须阻断 3B");
         assert!(
             mock.calls()

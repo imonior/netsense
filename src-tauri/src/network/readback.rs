@@ -15,6 +15,12 @@ use std::fmt;
 pub struct VerifyFailure {
     /// 形如 `ip: 期望 192.168.1.100，实际 169.254.23.9`（措辞随界面语言，字段名与地址原样保留）
     pub mismatches: Vec<String>,
+    /// 唯一的不符就是「静态地址上请求自动 DNS，而系统里一个 nameserver 都没有」。
+    ///
+    /// 单独标出来是因为 3A 要据此判断**这一局还能不能救**：只有这一类失败是补一组
+    /// DNS 服务器就能翻盘的，其余（地址没下上去、路由没生效）补了也没用。
+    /// 靠比对本地化的句子来判是不可靠的 —— 句子随界面语言变。
+    pub dns_left_empty: bool,
 }
 
 impl fmt::Display for VerifyFailure {
@@ -39,6 +45,7 @@ pub fn readback_match<P: NetworkPlatform>(
 /// 纯函数版本：把采样与判定分开，便于用假数据覆盖各种不符组合。
 pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFailure> {
     let mut mismatches: Vec<String> = Vec::new();
+    let mut dns_left_empty = false;
 
     match want.mode {
         Mode::Dhcp => {
@@ -60,10 +67,16 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
         }
     }
 
-    // DNS 有两个「不比」的条件，各自对应一类误报：
-    //   · 期望为空 —— 清空自定义 DNS 后系统仍会从 DHCP 读到路由器地址，拿它比必然失败；
-    //   · `got.dns` 为 None —— 这一侧根本读不到（平台不支持 / 权限不足），读不到不等于不符。
-    //     注意与 `Some("")` 区分：读到「明确没有 DNS 记录」而期望有值，是货真价实的下发失败。
+    // DNS 有三条分支，判据各不相同：
+    //   1. 期望具体服务器 —— 逐个查是否真的出现（缺一个即不符）。
+    //   2. 期望空 + `mode: dhcp` —— **不比**。DHCP 客户端会把路由器递来的地址填进来，
+    //      拿它跟「我要自动」比必然失败，而那恰恰是自动该有的结果。
+    //   3. 期望空 + `mode: manual` —— 静态地址这一支上没有任何一方会递来 nameserver，
+    //      「交回自动」真实落到系统里的结果是一个都没有。读到空就是货真价实的失败：
+    //      用户拿到的是「IP 通、网关通、网页打不开」，而这正是最该在 3A 拦下的现场。
+    //      豁免只给 dhcp 那一半，不能因为「清空的命令返回了 0」就宣称自动 DNS 成功。
+    //   另外 `got.dns` 为 None 一律不比 —— 读不到（平台不支持 / 权限不足）不等于不符；
+    //   注意与 `Some("")` 区分：读到「明确没有」才是可判定的事实。
     if let Some(dns) = want.dns.as_deref() {
         let want_list = split_list(dns);
         if !want_list.is_empty() {
@@ -80,13 +93,25 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
                     ));
                 }
             }
+        } else if want.mode == Mode::Manual {
+            if let Some(got_dns) = got.dns.as_deref() {
+                if split_list(got_dns).is_empty() {
+                    mismatches.push(i18n::t("net.dns_left_empty"));
+                    dns_left_empty = true;
+                }
+            }
         }
     }
 
     if mismatches.is_empty() {
         Ok(())
     } else {
-        Err(VerifyFailure { mismatches })
+        Err(VerifyFailure {
+            // 只在「除了这一条没有任何其它不符」时置位：地址/网关还没下上去的情况
+            // 补一组 DNS 也救不回来，置位只会让 3A 误以为兜底能翻盘。
+            dns_left_empty: dns_left_empty && mismatches.len() == 1,
+            mismatches,
+        })
     }
 }
 
@@ -227,19 +252,55 @@ mod tests {
         check(&got, &want).expect("拿到地址即认为 DHCP 成功");
     }
 
+    /// 豁免只属于 dhcp 那一半：那里确实有 DHCP 客户端往里填地址，读到什么都不算不符。
     #[test]
     fn clearing_dns_is_not_verified_against_dhcp_supplied_servers() {
         let want = NetworkConfig {
+            mode: Mode::Dhcp,
+            dns: Some("".into()),
+            ..Default::default()
+        };
+        let got = InterfaceStatus {
+            ipv4: Some("10.0.0.24".into()),
+            dns: Some("192.168.1.1".into()),
+            ..Default::default()
+        };
+        check(&got, &want).expect("期望为空时不该拿路由器下发的 DNS 来判失败");
+    }
+
+    /// 静态地址这一支没有来源，「交回自动」落到系统里就是**一个 nameserver 都没有**。
+    /// 读到空必须判失败 —— 否则 3A 会放过一个「IP 通、网关通、域名全解析不了」的现场。
+    #[test]
+    fn automatic_dns_on_a_static_address_must_actually_produce_a_server() {
+        let want = NetworkConfig {
             mode: Mode::Manual,
             ip: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
             dns: Some("".into()),
             ..Default::default()
         };
         let got = InterfaceStatus {
             ipv4: Some("192.168.1.100".into()),
-            dns: Some("192.168.1.1".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("".into()),
             ..Default::default()
         };
-        check(&got, &want).expect("期望为空时不该拿路由器下发的 DNS 来判失败");
+        let f = check(&got, &want).expect_err("静态地址 + 自动 DNS 却读到空，必须判失败");
+        assert!(
+            f.to_string().to_lowercase().contains("dns"),
+            "报错要指名 DNS: {}",
+            f
+        );
+        // 反面：系统确实给出了（比如 Windows 静态地址仍收到 DHCP 的 DNS），那就算成功。
+        let ok = InterfaceStatus {
+            dns: Some("192.168.1.1".into()),
+            ..got.clone()
+        };
+        check(&ok, &want).expect("自动真的取到了服务器就该通过");
+        // 读不到（None）仍然不判失败 —— 读不到不等于不符，这条判据没有变。
+        let unreadable = InterfaceStatus { dns: None, ..got };
+        check(&unreadable, &want).expect("读不到 DNS 时不参与判定");
     }
 }

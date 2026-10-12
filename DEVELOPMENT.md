@@ -79,7 +79,7 @@ netsense/
 │       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
 │       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
 │       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
-│       ├── ipc.rs             # 48 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── ipc.rs             # 51 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -908,7 +908,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **560 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **599 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1386,6 +1386,190 @@ Publish on the page) and `workflow_dispatch` (re-sync a given tag by hand); both
 script, and a shared `concurrency` group plus that no-op guard absorb the overlap. The job going
 red on purpose is the point: a stale cask means `brew upgrade --cask` users never get the release,
 and that failure was silent before.
+
+### 13.3 Update trust chain (Ed25519, two layers) — custody & rotation
+
+Every release ships a signed `SHA256SUMS`. What verifies it is a **two-layer trust chain**, so
+that the signing key can live in CI *and* stay rotatable:
+
+```
+  root keypair   ── signs ──▶  update/UPDATE-TRUST.json  ── names ──▶  signing keypair
+  (OFFLINE only)              (committed to the repo)                  (CI secret)
+       │                                                                │
+       │ verified by                        read from the manifest       │ signs
+       │ the key baked into the binary                                 ▼
+       └──────────────────────────────────────────────────────▶  SHA256SUMS.sig
+```
+
+1. The binary embeds **only the root public key** (`build.rs` → `update.rs::ROOT_PUBKEY_HEX`).
+   That is the sole trust anchor.
+2. `update/UPDATE-TRUST.json` is signed with the **root private key** and committed to the repo.
+   The app fetches it, verifies it against the baked-in root key, and reads out (a) the currently
+   valid **signing** public key and (b) a monotonic `seq`. That is the whole manifest — `schema`,
+   `seq`, `signing_key`, `issued_at`, `signature`.
+3. `SHA256SUMS.sig` is produced in CI with the **signing** private key and verified with the
+   signing public key read from the manifest.
+
+Why two layers rather than one key compiled in:
+
+- **The signing key is rotatable.** If it leaks, re-issue the manifest naming the *new* signing
+  public key with a **higher** `seq`. Every shipped binary picks the new manifest up on its next
+  update check — **no binary re-distribution, no manual reinstall**. A single-key model cannot do
+  this: each binary trusts only its own baked-in key, so rotation strands everyone on old binaries.
+- **The mirror can be trusted with the bytes.** Manifest, signature and checksums all come through
+  the mirror, but "what counts as valid" is decided by the embedded key. A malicious mirror can
+  only serve bytes that fail verification; it cannot forge `.sig`. This is why updates still work
+  when GitHub is fully unreachable — the older design had to fetch the checksum straight from
+  GitHub, which broke exactly when it was most needed.
+- **Token theft does not help.** A leaked repo token lets an attacker *push assets*, not sign
+  them.
+
+**One rollback guard — and why it is not optional.** A bare Ed25519 signature proves "officially
+signed", not "newest". So the manifest's `seq` must not go backwards versus the highest `seq` this
+machine has accepted. Without it, rotation is theatre: an attacker who captured the *pre-rotation*
+manifest — which root did legitimately sign — can replay it forever, and the retired signing key
+stays trusted.
+
+It is remembered in `update-trust-state.json` next to `settings.json` in the user config dir,
+written via a temp file + atomic rename so a torn write can never silently lower the watermark.
+
+**Deliberately absent.** Two things a "full" design would add, and why they are not here:
+
+- *A revoked-key list.* With a monotonic `seq`, rotation already retires the old key. A list would
+  have to be maintained across every manifest ever issued while overlapping almost exactly with
+  what `seq` + rotation already achieve.
+- *A minimum-version / installed-version watermark.* It defends against a mirror replaying an
+  **older but still validly signed** installer — a low-probability scenario — and pays for that
+  with a second persisted watermark whose correctness depends on the version-string format never
+  drifting between Release metadata and local state. When that assumption breaks, the failure mode
+  is not "the attack succeeds" but "legitimate updates are refused", which is the worse trade for a
+  single-maintainer project.
+
+**Custody.** Two keys, deliberately held in different places:
+
+| Key | Where it lives | Blast radius if it leaks |
+| --- | --- | --- |
+| **root** private | **Offline only.** Never in CI, never in git. Password manager + offline/encrypted backup (see below). | Total: can forge manifests. Recovery = new root keypair + manual reinstall for everyone. |
+| **signing** private | Repo secret `UPDATE_SIGNING_KEY` (Settings → Secrets and variables → Actions → Secrets), plus one offline backup copy. | Contained: rotatable via a new manifest, no reinstall. |
+
+The root **public** key is public by definition and lives in a repo **variable**
+`NETSENSE_ROOT_PUBKEY` (Settings → Secrets and variables → Actions → **Variables**), not a secret.
+On a tag push the `build` job fails fast if it is missing or malformed, and injects
+`NETSENSE_ROOT_PUBKEY` + `NETSENSE_RELEASE_SIGN=1`.
+
+The `checksums` job additionally **re-verifies `update/UPDATE-TRUST.json` against that exact root
+public key before publishing**. This is the one check the app cannot do for itself: the manifest is
+committed (root signs it offline; CI by design cannot), so a Release published without a valid
+manifest looks fine on the download page and fails for every user at install time. Verifying in CI
+turns that into a red pipeline.
+
+**First setup — generating both keypairs** (do this offline; do not paste private keys anywhere).
+
+**No Rust toolchain required.** The Rust tool (`tools/updatesign`) is one option, but the root
+key usually has to be born on the offline, minimal machine where you would rather *not* install a
+compiler. Two dependency-free alternatives ship with the repo:
+
+```bash
+# Option A — Node (≥12, no npm install needed; uses the built-in OpenSSL Ed25519)
+node tools/updatesign/updatesign.mjs gen          # → priv=… / pub=…   (run twice)
+
+# Option B — OpenSSL (any modern build; on Windows: Git for Windows ships it)
+openssl genpkey -algorithm ed25519 -out root.pem
+openssl pkey -in root.pem -outform DER 2>/dev/null | tail -c 32 | od -An -tx1 | tr -d ' \n'   # priv hex
+openssl pkey -in root.pem -pubout -outform DER 2>/dev/null | tail -c 32 | od -An -tx1 | tr -d ' \n'  # pub hex
+
+# Option C — the Rust tool (needs cargo)
+cargo run --manifest-path tools/updatesign/Cargo.toml -- gen
+```
+
+The Node script implements the **full** toolchain (`gen` / `pub` / `sign` / `verify` /
+`issue-trust` / `verify-trust`), so you can also produce and check the trust manifest without
+Cargo. It is byte-compatible with the Rust tool — same subcommands, same output, same contract.
+
+The private key must be stored **outside the repository** — `*.pem` / `*.key` / `*priv*.hex` are
+in `.gitignore` as a last-resort guard, but the real rule is that it never lands in the working
+tree at all.
+
+# pair #1 → ROOT    : priv → offline vault only; pub → NETSENSE_ROOT_PUBKEY repo variable
+# pair #2 → SIGNING : priv → UPDATE_SIGNING_KEY secret (+ offline backup); pub → below
+```
+
+**Does the key have to be generated with Cargo?** No. The format is plain RFC 8032 Ed25519, so
+`openssl genpkey -algorithm ed25519`, Python's `cryptography`, `age`, or any other correct
+implementation works. The contract you must match is only three byte widths:
+
+| Artifact | Encoding | Consumed by |
+| --- | --- | --- |
+| private key | 32-byte seed, **lowercase hex** (64 chars) | `updatesign -r/-k`, `UPDATE_SIGNING_KEY` |
+| public key | 32-byte compressed point, **lowercase hex** (64 chars) | `NETSENSE_ROOT_PUBKEY`, trust manifest |
+| signature | **64 raw bytes**, no encoding | `SHA256SUMS.sig` |
+
+This was checked against an independent stdlib RFC 8032 implementation rather than taken on
+faith: OpenSSL-generated and Node-generated keys derive identical public keys, and a manifest
+signed by Node verifies under a Python implementation — so the format really is portable.
+
+The one thing the Rust tool buys you is that it is the same code path CI uses, so a mis-encoded
+key fails immediately in `verify-trust` instead of at some user's install. Whatever tool you use,
+**run `verify-trust` before committing** — it is the authoritative check.
+
+Then issue the first manifest (still offline) and commit it:
+```bash
+cargo run --manifest-path tools/updatesign/Cargo.toml -- issue-trust \
+  -r <root-priv> -k <signing-pub> -s 1 -o update/UPDATE-TRUST.json
+cargo run --manifest-path tools/updatesign/Cargo.toml -- verify-trust \
+  -i update/UPDATE-TRUST.json -p <root-pub>      # exit 0 before you commit it
+git add update/UPDATE-TRUST.json && git commit -m "..."
+```
+
+**Per release.** Push the tag — CI signs `SHA256SUMS` with `UPDATE_SIGNING_KEY` and uploads both
+files. Bump the manifest `seq` **only when the keys change**, not every release: the manifest is a
+*key* document, so leaving it alone keeps the diff (and your reviewer's attention) meaningful.
+Homebrew channel is unaffected — `brew` verifies the cask's own integrity, not our signature.
+
+**Local verification** (confirm a download is authentic):
+```bash
+cargo run --manifest-path tools/updatesign/Cargo.toml -- verify \
+  -i SHA256SUMS -s SHA256SUMS.sig -p <signing-pub>
+```
+
+**Rotation (no reinstall required).** Generate a new *signing* pair, then re-issue the manifest
+naming the new public key with a **bumped** `seq`:
+```bash
+cargo run --manifest-path tools/updatesign/Cargo.toml -- issue-trust \
+  -r <root-priv> -k <new-signing-pub> -s 2 -o update/UPDATE-TRUST.json
+```
+Update the `UPDATE_SIGNING_KEY` secret, commit the manifest, and release. Existing binaries
+already carry the root key, so they adopt the new signing key on their next check.
+
+⚠️ Do **not** reuse a `seq`. Reusing (or lowering) it is exactly what the monotonic check exists to
+reject — every user would be stuck unable to update.
+
+⚠️ Rotating the **root** key is a different and much more expensive operation: existing binaries
+embed the old root public key and cannot verify a new-root-signed manifest, so it degenerates to
+the single-key case and requires a manual reinstall for all users. Treat root rotation as a
+last-resort response to root-key compromise, and prefer rotating the *signing* key whenever that
+is sufficient.
+
+**Compromise response.**
+- *Signing key* leaked → issue a new manifest (bump `seq`, name the new signing key), rotate
+  `UPDATE_SIGNING_KEY`, release. No user action needed.
+- *Root key* leaked → assume worst case: everyone can be fed forged updates. Rotate the root
+  keypair, publish a new release, and tell all users to reinstall manually.
+
+**Backing up the root private key.** Losing it is unrecoverable — you could never sign another
+manifest or rotate anything, which would leave you worse off than the single-key model. Because it
+is a 32-byte hex string, plain backups are cheap; what matters is that they are *offline* and
+encrypted:
+
+1. **Primary:** a password manager (1Password / Bitwarden / KeePassXC) as a secure note — gives you
+   encrypted-at-rest storage, version history, and off-device sync.
+2. **Offline copy:** encrypted with `age` or `gpg` onto a USB drive or a non-networked machine.
+   Store it physically away from the machine you normally release from.
+3. **Paper/metal fallback:** the hex written out (or engraved) and kept in a safe — protects
+   against losing every digital copy at once.
+
+Never store it in the repository, a cloud-notes app, email/chat, or an unencrypted cloud drive.
+The *public* keys and the manifest itself need no confidentiality — they are meant to be readable.
 
 ---
 

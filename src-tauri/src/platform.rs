@@ -682,6 +682,24 @@ pub trait NetworkPlatform: Send + Sync {
     /// 静态路由不在这里 —— 它由 `network::apply_3a` 在配置下发之后单独下发，
     /// 好让「配置失败」和「路由失败」在 3A 里分别归因。
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String>;
+
+    /// 只下发 DNS 服务器（3A 的「DNS 兜底」专用）。
+    ///
+    /// 与上面那条 `dns` 三态分开：这是**回读发现系统里一个 nameserver 都没有之后**的补救，
+    /// 它不看 IPv4 的模式，也不碰地址/掩码/网关 —— 调它的时候那些已经下发并回读过了。
+    ///
+    /// 默认实现返回 Err：平台没实现时，3A 把兜底当作**不可用**（判失败并回滚），而不是
+    /// 假装补上了 —— 「说补上了其实没补」比「老实说补不上」危险。
+    /// 三份平台实现与 `mock` 都必须覆盖它。
+    fn apply_dns_only(
+        &self,
+        target: Option<NetworkTarget>,
+        servers: &[String],
+    ) -> Result<(), String> {
+        let _ = (target, servers);
+        Err(i18n::t("pal.dns_only_unsupported"))
+    }
+
     /// 回落保底：切回 DHCP + 清空自定义 DNS。
     ///
     /// 这里的清空是**故意的**：保底路径要的是一个「什么都不再固定」的状态，

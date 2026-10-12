@@ -823,21 +823,25 @@ eq("选「指定」= 按输入框的值下发", p?.then?.network?.dns, "192.168.
 eq("另一分支的三态不被牵连：else 的 dns 仍是「交回系统」",
   byActPre("dns-tri", "else.")?.children.find((c) => c.selected)?.value, "auto");
 
-group("静态地址这一支没有「DHCP 提供」这个选项");
+group("「DHCP 提供」这一项在两种 IPv4 模式下都存在");
 resetSaves();
-// 静态地址没有 DHCP 客户端可以问，`dns:""` 下发下去的结果是「一个 nameserver 都没有」，
-// 不是「自动」：所以这个选项在 mode=manual 的分支上完全不出现。后端那一半由 Rust 测试
-// config::tests::automatic_dns_is_only_an_option_on_the_dhcp_branch 守着，两边口径一致。
+// 「静态 IP + DNS 自动获取」是真实世界里最常见的一组：静态地址只是让本机不再问 DHCP 要
+// **地址**，不代表这个网段里没有别的 DNS 来源（Windows 的静态地址照样能收到 DHCP 递来的
+// DNS）。所以这一项在 manual 分支上同样要出现 —— 能不能真拿到由 3A 回读判定，拿不到就
+// 判失败并回滚，或按设置里的「DNS 兜底」补一组。
+// 后端那一半由 Rust 测试 config::tests::automatic_dns_is_a_valid_request_on_both_ipv4_branches
+// 与 network::readback 的 automatic_dns_on_a_static_address_must_actually_produce_a_server
+// 守着，两边口径一致。
 const hasDhcpOption = (pre) => {
   const sel = byActPre("dns-tri", pre);
   if (!sel) return false;
   return Array.from(sel.children).some((c) => c.value === "auto");
 };
-check("THEN 是静态地址：「DHCP 提供」这项不出现", !hasDhcpOption("then."));
-check("ELSE 向 DHCP 要地址：同一项照旧存在（存不存在只看这条分支自己的 mode）", hasDhcpOption("else."));
-// 换回 DHCP 以后必须重新出现，否则这道门就成了「静态分支再也改不回去」的死路。
+check("THEN 是静态地址：「DHCP 提供」照样出现（存在的项不受这条分支的 mode 影响）", hasDhcpOption("then."));
+check("ELSE 向 DHCP 要地址：同一项存在", hasDhcpOption("else."));
+// 换回 DHCP 以后必须仍在，否则这道门就成了「静态分支再也改不回去」的死路。
 choose(byBind("then.network.mode"), "dhcp");
-check("把 IPv4 换回 DHCP，同一项立刻出现", hasDhcpOption("then."));
+check("把 IPv4 换回 DHCP，同一项仍在", hasDhcpOption("then."));
 choose(byBind("then.network.mode"), "manual");
 
 group("THEN / ELSE 同时呈现，改一支不会牵动另一支");

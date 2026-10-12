@@ -53,3 +53,26 @@ github-copilot/
 
 # 开发过程中的一次性脚手架（跨腿编译检查、文案合并表）：只对当前这台机器有意义
 .tmp/
+
+# 发布签名密钥（DEVELOPMENT.md §13.3）。私钥只应存在于密码管理器 / 离线介质 / CI secret，
+# 仓库里**永远不该出现**任何下列文件；这里 ignore 是最后一道保险 —— 即使有人把 openssl /
+# Node 工具生成的密钥落在仓库根，也不会被 `git add .` 带进历史。
+#
+# 覆盖的常见私钥形态：
+#   *.pem / *.key / *.der        OpenSSL `genpkey` 的 PEM 或 DER 输出（DER 模式常被漏掉）
+#   *.sk / *.seed / *.ed25519    Ed25519 常见命名约定（部分工具用 .sk 存 seed）
+#   *.priv                       裸私钥（如 root.priv / signing.priv）
+#   *priv*.hex / *_priv          本项目工具打印的裸 hex seed，约定请命名为 *_priv.hex
+*.pem
+*.key
+*.der
+*.sk
+*.seed
+*.ed25519
+*.priv
+*priv*.hex
+*_priv
+# 通用密钥 / 环境变量文件（若有人把密钥塞进 .env，也一并屏蔽；保留示例文件）
+.env
+.env.*
+!.env.example

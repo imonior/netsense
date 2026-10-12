@@ -924,6 +924,28 @@ impl NetworkPlatform for LinuxPlatform {
         run_priv("nmcli", &["con", "up", &conn])
     }
 
+    /// 只下发 DNS 服务器（3A 的「DNS 兜底」专用）：不动地址/网关/路由，只改这条连接的
+    /// `ipv4.dns`，再重新激活让改动生效（nmcli 的操作对象是连接，不 up 就不落地）。
+    fn apply_dns_only(
+        &self,
+        target: Option<NetworkTarget>,
+        servers: &[String],
+    ) -> Result<(), String> {
+        if servers.is_empty() {
+            return Err(i18n::t("pal.dns_only_empty"));
+        }
+        let dev = match target.unwrap_or_default() {
+            NetworkTarget::Primary => primary_iface().ok_or_else(|| i18n::t("pal.no_primary_iface"))?,
+            NetworkTarget::Wifi => wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_device_hint"))?,
+            NetworkTarget::Ethernet => ethernet_iface().ok_or_else(|| i18n::t("pal.no_ethernet_iface"))?,
+        };
+        let conn = active_connection(&dev)
+            .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", &dev)]))?;
+        let list = servers.join(" ");
+        run_priv("nmcli", &["con", "mod", &conn, "ipv4.dns", &list])?;
+        run_priv("nmcli", &["con", "up", &conn])
+    }
+
     fn set_dhcp(&self) -> Result<(), String> {
         let dev = wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_iface"))?;
         self.set_dhcp_for(&dev)

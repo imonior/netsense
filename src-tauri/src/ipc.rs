@@ -522,7 +522,15 @@ pub fn set_theme(
 /// 假的关闭态而不给解释。
 #[tauri::command(async)]
 pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
-    let (language, language_auto, theme, log_retention_days, silent_execution) = {
+    let (
+        language,
+        language_auto,
+        theme,
+        log_retention_days,
+        silent_execution,
+        update_mirror,
+        dns_fallback,
+    ) = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
             i18n::current().code().to_string(),
@@ -530,6 +538,8 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
             crate::appconfig::normalize_theme(&s.theme).to_string(),
             s.log_retention_days,
             s.silent_execution,
+            s.update_mirror.clone(),
+            s.dns_fallback.clone(),
         )
     };
     let (autostart_on, autostart_error) = match crate::appconfig::autostart_enabled() {
@@ -579,6 +589,16 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "platform": platform_name(),
         "version": env!("CARGO_PKG_VERSION"),
         "silent_execution": silent_execution,
+        // 镜像给前端的是「前缀字符串」或空串：下拉要按这个值回显，而 `UpdateMirror`
+        // 自己的序列化形状（一个带标签的对象）对界面没有意义。
+        "update_mirror": match &update_mirror {
+            crate::appconfig::UpdateMirror::Direct => String::new(),
+            crate::appconfig::UpdateMirror::Prefix(p) => p.clone(),
+        },
+        // DNS 兜底给界面的是「开关 + 逗号分隔的一串」：`DnsFallback` 自己的序列化形状
+        // 带 `skip_serializing_if`，空列表会被整个省略，界面就得处理第三种状态。
+        "dns_fallback_enabled": dns_fallback.enabled,
+        "dns_fallback_servers": dns_fallback.servers.join(","),
     });
     serde_json::to_string(&payload).unwrap_or_default()
 }
@@ -643,6 +663,96 @@ pub fn set_silent_execution(
     Ok(crate::platform::priv_channel().code().to_string())
 }
 
+/// 设「安装包从哪儿下」：空串 = 直连 GitHub，其余 = 前缀式镜像地址。
+///
+/// 与 `set_update_proxy` 正交：一个换**出口**、一个换**地址**，两者可以同时生效。
+/// 校验值不在它覆盖的范围内 —— SHA256SUMS 永远直连 GitHub 取，见
+/// [`crate::appconfig::UpdateMirror`]。
+///
+/// 形状不合法的前缀在保存时就退回直连（见 `AppConfig::clamped`），返回值是**落盘后的真值**
+/// （直连为 `""`），界面按它回显 —— 否则会显示成「填了个错的却已保存」。退回直连不算错误：
+/// 一个拼不出 URL 的前缀只该让这一次下载失败，不该让整个设置窗口报错。
+#[tauri::command(async)]
+pub fn set_update_mirror(
+    state: State<'_, std::sync::Arc<AppState>>,
+    prefix: String,
+) -> Result<String, String> {
+    use crate::appconfig::UpdateMirror;
+    let want = match prefix.trim() {
+        "" => UpdateMirror::Direct,
+        p => UpdateMirror::Prefix(p.to_string()),
+    };
+    let saved = {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = s.clone();
+        cfg.update_mirror = want;
+        let cfg = cfg.clamped(); // 认不出的前缀在这一步退回直连
+        cfg.save(&state.settings_path)?;
+        let m = cfg.update_mirror.clone();
+        *s = cfg;
+        m
+    };
+    match &saved {
+        UpdateMirror::Direct => log::info(&i18n::t("notify.mirror_direct")),
+        UpdateMirror::Prefix(p) => log::info(&i18n::tf("notify.mirror_set", &[("mirror", p)])),
+    }
+    Ok(match &saved {
+        UpdateMirror::Direct => String::new(),
+        UpdateMirror::Prefix(p) => p.clone(),
+    })
+}
+
+/// DNS 兜底给界面看的形状。
+///
+/// 不直接返回 [`crate::appconfig::DnsFallback`]：它带 `skip_serializing_if`，
+/// 空列表会被整个省略，界面就得处理「字段不存在」这第三种状态。
+#[derive(serde::Serialize)]
+pub struct DnsFallbackView {
+    pub enabled: bool,
+    pub servers: Vec<String>,
+}
+
+/// 设 DNS 兜底：3A 下发之后系统里**一个 nameserver 都没有**时，改下这几台。
+///
+/// 默认关闭，且本应用**不预置任何公共解析器** —— 服务器由用户自己填。理由见
+/// [`crate::appconfig::DnsFallback`]：开着却往企业内网塞一台公共 DNS 会打断内网域名解析，
+/// 而把查询静默导向用户没指定的第三方解析器，本就不该由本应用替他决定。
+///
+/// 返回**落盘后的真值**：认不出的地址在 `clamped()` 里被剔除，而「开着却没有一台合法
+/// 服务器」会被收成关着 —— 界面按返回值回显，才不会显示成「填了个错的却已保存」。
+#[tauri::command(async)]
+pub fn set_dns_fallback(
+    state: State<'_, std::sync::Arc<AppState>>,
+    enable: bool,
+    servers: Vec<String>,
+) -> Result<DnsFallbackView, String> {
+    let saved = {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = s.clone();
+        cfg.dns_fallback = crate::appconfig::DnsFallback {
+            enabled: enable,
+            servers,
+        };
+        let cfg = cfg.clamped();
+        cfg.save(&state.settings_path)?;
+        let v = cfg.dns_fallback.clone();
+        *s = cfg;
+        v
+    };
+    if saved.enabled {
+        log::info(&i18n::tf(
+            "notify.dns_fallback_on",
+            &[("servers", &saved.servers.join(", "))],
+        ));
+    } else {
+        log::info(&i18n::t("notify.dns_fallback_off"));
+    }
+    Ok(DnsFallbackView {
+        enabled: saved.enabled,
+        servers: saved.servers,
+    })
+}
+
 /// 设置日志保留天数：写软件配置 + 立刻按新值清一次。
 #[tauri::command(async)]
 pub fn set_log_retention(
@@ -687,6 +797,49 @@ pub fn get_proxy_state(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "system_proxy": system,
     }))
     .unwrap_or_default()
+}
+
+/// 给若干个代理地址各测一次真实请求的时间。
+///
+/// 界面要回答的是「这几个预设现在哪个最快」，而这件事只能真的发一次请求才量得出来：
+/// `127.0.0.1:7890` 这种地址连不上时也可能被别的东西占着端口 —— 本地握手成功并不等于它
+/// 真的能把你代理出去。所以这里发的是一次完完整整的升级检查请求，取 curl 自己量的
+/// `time_total`（不是 TCP 握手时间），目标与 [`check_update`] 是同一个。
+#[tauri::command(async)]
+pub fn proxy_speed_test(urls: Vec<String>) -> Result<String, String> {
+    const PROBE: &str = "https://api.github.com/repos/imonior/netsense/releases/latest";
+    let mut out = Vec::with_capacity(urls.len());
+    for raw in urls {
+        // 认不出的地址直接给 null：它们在界面上是「这个候选无效」，而不是「这个候选很慢」。
+        let Some(url) = crate::netproxy::normalize_proxy_url(&raw) else {
+            out.push(json!({ "url": raw, "ms": serde_json::Value::Null }));
+            continue;
+        };
+        // 应答落到临时文件而不是 /dev/null：那个路径名 Windows 上叫 NUL，而这里不该为了
+        // 丢字节去分叉 —— body 写走之后 stdout 只剩 `-w` 那一个数，读回来不用解析两掺。
+        let dest = std::env::temp_dir().join(format!("netsense-psprobe-{}.out", std::process::id()));
+        let args = vec![
+            "-s".to_string(),
+            "-o".to_string(),
+            dest.to_string_lossy().to_string(),
+            "-w".to_string(),
+            "%{time_total}".to_string(),
+            "--max-time".to_string(),
+            "8".to_string(),
+            "--proxy".to_string(),
+            url.clone(),
+            PROBE.to_string(),
+        ];
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ms = crate::platform::run("curl", &argv)
+            .ok()
+            .and_then(|t| t.trim().parse::<f64>().ok())
+            .filter(|s| *s > 0.0)
+            .map(|s| (s * 1000.0).round() as i64);
+        let _ = std::fs::remove_file(&dest);
+        out.push(json!({ "url": url, "ms": ms }));
+    }
+    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// 设「升级请求走哪条出口」：`direct` / `system` / `manual` + 一个地址。
@@ -892,7 +1045,13 @@ pub fn open_url(url: String) -> Result<(), String> {
 pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_json::Value, String> {
     let url = "https://api.github.com/repos/imonior/netsense/releases/latest";
     let choice = proxy_choice_of(&state);
-    let body = fetch_url(url, &choice)?;
+    // 镜像对这次请求同样生效（版本清单与安装包字节是大件，也是最常取不动的两样）。
+    // `install_verdict` 取 SHA256SUMS 仅做「列没列我们这个资产」的预检，仍走直连；
+    // 真正带签名的校验在 `run_update` 下载阶段完成（验签锚在内置公钥，镜像换不掉）。
+    let body = fetch_url(
+        &crate::update::mirrored_url(url, &mirror_of(&state)),
+        &choice,
+    )?;
     let v: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| i18n::tf("upd.bad_json", &[("error", &e.to_string())]))?;
     let latest = v["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
@@ -1151,7 +1310,8 @@ pub fn run_update(
     let t: crate::update::UpdateTarget = serde_json::from_str(&target)
         .map_err(|e| i18n::tf("upd.bad_target", &[("error", &e.to_string())]))?;
     let choice = proxy_choice_of(&state);
-    crate::update::run_update(&app, &t, &choice)
+    let mirror = mirror_of(&state);
+    crate::update::run_update(&app, &t, &choice, &mirror)
 }
 
 /// [`fetch_url`] 的总尝试次数。三次覆盖的是秒级抖动；真断网就是三次都失败。
@@ -1166,12 +1326,24 @@ const FETCH_ATTEMPTS: u32 = 3;
 /// `pub(crate)`：`update.rs` 取 SHA256SUMS 走的是同一个函数，两次对外请求因此
 /// 用同一个出口，不会出现「检查更新走了代理、下载没走」。
 pub(crate) fn fetch_url(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<String, String> {
+    // 文本便利层：底层取的是**原始字节**，`fetch_url` 才做 lossy UTF-8 解码。
+    // 二进制内容（如 Ed25519 签名 `.sig`）必须走 [`fetch_bytes`]，否则 `from_utf8_lossy`
+    // 会把非 UTF-8 字节替换成 U+FFFD，签名必然验不过。
+    fetch_bytes(url, choice).map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// 取回 URL 的**原始字节**（不做任何文本解码）。
+///
+/// 更新链路的 `.sig` 是 64 字节裸 Ed25519 签名，几乎必然含非 UTF-8 字节——若经
+/// `fetch_url` 的 `from_utf8_lossy` 取回，字节数与内容全毁，`verify_ed25519` 会因
+/// 长度 ≠ 64 直接判 `bad`，导致**所有应用内更新验签失败、被拒**。所以二进制一律走这里。
+pub(crate) fn fetch_bytes(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<Vec<u8>, String> {
     let mut last_err = String::new();
     for attempt in 1..=FETCH_ATTEMPTS {
         if attempt > 1 {
             std::thread::sleep(std::time::Duration::from_millis(400 * u64::from(attempt - 1)));
         }
-        match fetch_url_once(url, choice) {
+        match fetch_bytes_once(url, choice) {
             Ok(body) => return Ok(body),
             Err(e) => {
                 // 中间的失败不吞掉：现场报告只有「SHA256SUMS 无法下载」一句，没有任何可查
@@ -1190,9 +1362,9 @@ pub(crate) fn fetch_url(url: &str, choice: &crate::netproxy::ProxyChoice) -> Res
     Err(last_err)
 }
 
-/// 一次拉取尝试（不含重试）。两条实现（Windows 的 PowerShell 与其余平台的 curl）都在这里，
-/// 因为它们对代理的态度不同 —— 见 [`crate::netproxy`] 与下面那条分支上的注释。
-fn fetch_url_once(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<String, String> {
+/// 一次拉取尝试（不含重试），返回**原始字节**。两条实现（Windows 的 PowerShell 与其余平台的
+/// curl）都在这里，因为它们对代理的态度不同 —— 见 [`crate::netproxy`] 与下面那条分支上的注释。
+fn fetch_bytes_once(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<Vec<u8>, String> {
     #[cfg(windows)]
     {
         // 「跟随系统」继续交给 PowerShell：它按 WinINET 的系统设置走，正是这个选择的意思。
@@ -1210,7 +1382,7 @@ fn fetch_url_once(url: &str, choice: &crate::netproxy::ProxyChoice) -> Result<St
 }
 
 #[cfg(windows)]
-fn fetch_url_powershell(url: &str) -> Result<String, String> {
+fn fetch_url_powershell(url: &str) -> Result<Vec<u8>, String> {
     use std::os::windows::process::CommandExt;
     // URL 用单引号包住，并把里面的 `'` 按 PowerShell 的规则翻倍：传进来的不总是我们自己拼的
     // 常量（`run_update` 的 `checksum_url` 是前端回传的），不转义就能闭合字符串再拼命令。
@@ -1240,7 +1412,8 @@ fn fetch_url_powershell(url: &str) -> Result<String, String> {
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        // 返回原始字节：`.sig` 等二进制必须原样取回；文本调用方（`fetch_url`）再做 lossy 解码。
+        Ok(out.stdout)
     } else {
         Err(String::from_utf8_lossy(&out.stderr).into_owned())
     }
@@ -1248,7 +1421,7 @@ fn fetch_url_powershell(url: &str) -> Result<String, String> {
 
 /// 用 curl 拉一个 URL。`proxy_args` 是代理那一小段参数（见
 /// [`crate::netproxy::proxy_args`]），由调用方决定内容，这里只负责拼进去。
-fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<String, String> {
+fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<Vec<u8>, String> {
     use std::process::Command;
     // `--proto =https`：`-L` 跟随时，重定向落点也必须是 https。只校验我们传进来的那个 URL
     // 是不够的 —— 一个 https→http 的跳转会把明文请求送出去。这条筛选不会被重定向放宽
@@ -1276,7 +1449,8 @@ fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<String, String> {
     }
     let out = cmd.output().map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        // 返回原始字节：`.sig` 等二进制必须原样取回；文本调用方（`fetch_url`）再做 lossy 解码。
+        Ok(out.stdout)
     } else {
         Err(String::from_utf8_lossy(&out.stderr).into_owned())
     }
@@ -1360,6 +1534,17 @@ pub(crate) fn proxy_choice_of(state: &AppState) -> crate::netproxy::ProxyChoice 
         .unwrap_or_else(|e| e.into_inner())
         .proxy
         .choice()
+}
+
+/// 软件设置里选的下载镜像。与 [`proxy_choice_of`] 同一处取出、同一份锁：
+/// `check_update` 与 `run_update` 必须读到同一个值，否则「检查一下载得动、真下载时却换了条路」。
+pub(crate) fn mirror_of(state: &AppState) -> crate::appconfig::UpdateMirror {
+    state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .update_mirror
+        .clone()
 }
 
 /// 是否通过 Homebrew 安装（用于给出 `brew upgrade` 而非下载链接）。

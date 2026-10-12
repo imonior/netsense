@@ -461,7 +461,15 @@ KANA = re.compile(r"[\u3040-\u30ff]")
 HANGUL = re.compile(r"[\uac00-\ud7af]")
 # 文档写路径时并不总带仓库根前缀：`platform/macos.rs` 是相对 `src-tauri/src/` 说的。
 # 因此「存在性」按这几个锚点逐个试，一个都找不到才算它过期。
-PATH_ANCHORS = ("", "src-tauri", "src-tauri/src", "frontend", "scripts", ".github/workflows")
+PATH_ANCHORS = ("", "src-tauri", "src-tauri/src", "frontend", "scripts", ".github/workflows", "update")
+
+# 由维护者**离线**生成、且刻意不预置的文件：信任清单要用 root 私钥签发，而 root 私钥按设计
+# 不进 CI 也不进 git（DEVELOPMENT.md §13.3），所以仓库里本来就没有它 —— 文档提到它是描述
+# 「发布时会存在的那个文件」，不是引用一个当前就该在的源文件。
+#
+# 仍然豁免的只有这一个确定路径：等维护者真的签发并提交了 UPDATE-TRUST.json 之后，它就会
+# 落进 PATH_ANCHORS 的真实存在性检查范围；万一那时它被误删，闸门照样会报。
+GENERATED_ARTIFACTS = ("update/UPDATE-TRUST.json",)
 
 
 def _strip_fences(text: str) -> str:
@@ -709,6 +717,7 @@ def _check_path_claims(docs: dict[str, str]) -> None:
     # 文档里反引号括起来的**带目录**路径必须真的存在。裸文件名（`popup.html`）不查 ——
     # 它可能指的是别人的仓库或系统里的文件，结构树检查已经覆盖本仓库的文件。
     stale_paths = set()
+    exempt = 0
     n_paths = 0
     for name, text in docs.items():
         for ln in text.splitlines():
@@ -718,12 +727,21 @@ def _check_path_claims(docs: dict[str, str]) -> None:
                     continue
                 for cand in cands:
                     n_paths += 1
+                    if cand in GENERATED_ARTIFACTS and not os.path.exists(
+                        os.path.join(ROOT, cand)
+                    ):
+                        exempt += 1
+                        continue
                     if not any(os.path.exists(os.path.join(ROOT, a, cand)) for a in PATH_ANCHORS):
                         stale_paths.add(f"{name}: `{tok}`")
     if stale_paths:
         bad(f"文档引用了仓库里不存在的路径: {sorted(stale_paths)}")
     else:
         ok(f"文档引用的 {n_paths} 个仓库路径都存在")
+        if exempt:
+            # 这不是"漏查"，是把「离线生成物」讲清楚：闸门知道它该在，只是不该由 CI 或
+            # 任何自动化去创建它 —— 创建它需要离线保管的 root 私钥。
+            ok(f"另有 {exempt} 处指向离线生成物（{', '.join(GENERATED_ARTIFACTS)}），按设计不预置")
 
 
 # ———————————————————————————— [11] 界面文案 ————————————————————————————

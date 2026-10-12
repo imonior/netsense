@@ -10,10 +10,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+# 单实例：macOS 由 LaunchServices 天然保证（同一 bundle 只会有一份进程），Windows 与
+# Linux 没有任何这层保护 —— 没有它，"再点一次开始菜单里的图标"就真的会再跑一份引擎，
+# 两套 state 按各自的节奏改同一张网卡，托盘事件还会落到另一个进程上去。
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["clock"] }
 sha2 = "0.10"
+ed25519-dalek = "2"
 
 [features]
 # default = macOS; 后续加 windows / linux feature gates

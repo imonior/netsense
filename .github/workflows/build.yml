@@ -242,6 +242,47 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.label }}
 
+      # Embed the **root public key** into the binary (B+ trust chain).
+      #
+      # The root key is the only trust anchor the app knows. It is PUBLIC, so it lives in a repo
+      # *variable* (Settings > Secrets and variables > Actions > Variables > NETSENSE_ROOT_PUBKEY),
+      # not a secret -- a secret would work but hides a value that is meant to be published anyway.
+      #
+      # What CI holds is the *signing* key (secret UPDATE_SIGNING_KEY). It can only sign SHA256SUMS;
+      # it cannot mint a trust manifest, because that needs the root private key, which deliberately
+      # never touches any automated system. So: root key leaked from a CI log => still no compromise;
+      # signing key leaked => revocable via a new root-signed manifest, no binary re-distribution.
+      #
+      # For a real release (tag push) both MUST be present. Without NETSENSE_ROOT_PUBKEY the binary
+      # would build with REQUIRE_SIGNED on but no anchor, and refuse every update.
+      # Manual workflow_dispatch runs have no Release and may lack them: they build in dev mode
+      # (no embedded key, REQUIRE_SIGNED off) for local testing, and the `checksums` job that signs
+      # SHA256SUMS is skipped for them anyway.
+      #
+      # `cargo run` (not a direct binary path) is deliberate: on Windows the executable is
+      # `updatesign.exe`, so invoking the path would fail there. `cargo run` is platform-neutral.
+      - name: Embed root public key
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          ROOT_PUBKEY: ${{ vars.NETSENSE_ROOT_PUBKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROOT_PUBKEY:-}" ]; then
+            echo "::error::NETSENSE_ROOT_PUBKEY repo variable is not set; a release cannot be trusted. Add it at Settings > Secrets and variables > Actions > Variables before tagging ${{ github.ref_name }}."
+            exit 1
+          fi
+          N=$(printf '%s' "$ROOT_PUBKEY" | tr -d ' \t\r\n' | wc -c)
+          if [ "$N" -ne 64 ]; then
+            echo "::error::NETSENSE_ROOT_PUBKEY must be 64 hex chars (32 bytes), got ${N}"
+            exit 1
+          fi
+          # build.rs reads this via option_env!(); the binary is recompiled with it present so
+          # REQUIRE_SIGNED is also turned on (NETSENSE_RELEASE_SIGN=1) below.
+          printf 'NETSENSE_ROOT_PUBKEY=%s\n' "$ROOT_PUBKEY" >> "$GITHUB_ENV"
+          printf 'NETSENSE_RELEASE_SIGN=1\n' >> "$GITHUB_ENV"
+          echo "embedded root pubkey (${ROOT_PUBKEY:0:16}...); release signing required"
+
       # This is a pure bin crate (no lib.rs); the unit tests live in #[cfg(test)] blocks inside the
       # modules themselves (config/ / conditions/ / detection/ / network/ / automation/ / engine.rs /
       # platform*.rs / i18n.rs). Don't add --lib or it fails with "no library targets found".
@@ -452,6 +493,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (to build the signer)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Fail before publishing if the trust manifest is missing, malformed, or not signed by the
+      # root key that was just embedded into the binaries.
+      #
+      # This is the one check that cannot be deferred to the app: the manifest is committed to the
+      # repo (root signs it offline; CI by design cannot), while every shipped binary refuses to
+      # install anything until it can verify that manifest. A Release published without a valid
+      # manifest therefore looks fine on the download page and fails for every user at install time.
+      # Verifying here -- against the exact pubkey the binaries were built with -- turns that into a
+      # red pipeline instead.
+      #
+      # It runs **twice**, via the Node port and the Rust original. They are independent
+      # implementations of the same canonical-bytes contract, so a field-order or escaping drift
+      # introduced on either side shows up as a mismatch here rather than as "every user's update
+      # silently fails to verify" after the Release is out.
+      - name: Verify trust manifest against the embedded root pubkey
+        shell: bash
+        env:
+          ROOT_PUBKEY: ${{ vars.NETSENSE_ROOT_PUBKEY }}
+        run: |
+          set -euo pipefail
+          if [ ! -s update/UPDATE-TRUST.json ]; then
+            echo "::error::update/UPDATE-TRUST.json is missing or empty. Sign it offline with the root key, e.g. node tools/updatesign/updatesign.mjs issue-trust -r <rootpriv> -k <signpub> -s 1 -o update/UPDATE-TRUST.json"
+            exit 1
+          fi
+          echo "--- node implementation ---"
+          node tools/updatesign/updatesign.mjs verify-trust \
+            -i update/UPDATE-TRUST.json -p "$ROOT_PUBKEY"
+          echo "--- rust implementation ---"
+          cargo run -q --manifest-path tools/updatesign/Cargo.toml --release -- verify-trust \
+            -i update/UPDATE-TRUST.json -p "$ROOT_PUBKEY"
+
       - name: Collect checksum fragments
         uses: actions/download-artifact@v4
         with:
@@ -459,15 +536,20 @@ jobs:
           path: fragments
           merge-multiple: false
 
-      - name: Generate and upload SHA256SUMS
+      - name: Generate, sign and upload SHA256SUMS (+ .sig)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RID: ${{ needs.release.outputs.release_id }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${RID:-}" ] || [ "$RID" = "null" ]; then
             echo "::error::no release id from release job"
+            exit 1
+          fi
+          if [ -z "${UPDATE_SIGNING_KEY:-}" ]; then
+            echo "::error::UPDATE_SIGNING_KEY secret is not configured; SHA256SUMS cannot be signed"
             exit 1
           fi
           # One fragment per leg (SHA256SUMS.<label>), each in its own artifact directory. Sorted so
@@ -498,19 +580,38 @@ jobs:
           fi
           cat SHA256SUMS
 
+          # Sign the manifest with the Ed25519 *signing* key (the online, rotatable one -- never the
+          # root key). The app verifies this signature with the signing public key it reads out of
+          # the root-signed trust manifest, so a malicious mirror or a tampered Release cannot forge
+          # it. REQUIRE_SIGNED is on for release builds, so a missing signature would make every
+          # in-app update fail to verify -- hence this must succeed.
+          cargo run -q --manifest-path tools/updatesign/Cargo.toml --release -- sign \
+            -i SHA256SUMS -o SHA256SUMS.sig -k "$UPDATE_SIGNING_KEY"
+          if [ ! -s SHA256SUMS.sig ] || [ "$(wc -c < SHA256SUMS.sig)" -ne 64 ]; then
+            echo "::error::SHA256SUMS.sig was not produced correctly"
+            exit 1
+          fi
+          echo "signed SHA256SUMS with Ed25519 ($(wc -c < SHA256SUMS.sig) bytes)"
+
           # An asset name is unique per Release, so a re-run of the same tag must drop the previous
-          # manifest before posting the new one.
-          for aid in $(gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
-                        --jq '.[] | select(.name=="SHA256SUMS") | .id'); do
-            echo "replacing existing SHA256SUMS asset id=${aid}"
-            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets/${aid}"
+          # manifest and signature before posting the new ones.
+          for name in SHA256SUMS SHA256SUMS.sig; do
+            for aid in $(gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
+                          --jq ".[] | select(.name==\"${name}\") | .id"); do
+              echo "replacing existing ${name} asset id=${aid}"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets/${aid}"
+            done
           done
           # Content-Type must be explicit or GitHub guesses it from the extension.
           gh api -X POST \
             "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=SHA256SUMS" \
             -H "Content-Type: application/octet-stream" \
             --input SHA256SUMS
-          echo "uploaded SHA256SUMS covering ${count} asset(s) from ${legs} legs"
+          gh api -X POST \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=SHA256SUMS.sig" \
+            -H "Content-Type: application/octet-stream" \
+            --input SHA256SUMS.sig
+          echo "uploaded SHA256SUMS + SHA256SUMS.sig covering ${count} asset(s) from ${legs} legs"
 
   # Auto-publish once checksums are verified. Keeps the safe gated flow: the release stays a draft
   # through build + checksum, and only goes public after every platform artifact is present and its

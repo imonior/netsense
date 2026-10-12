@@ -984,11 +984,12 @@
         row("editor.router", txt(p + ".v6gateway", net.v6gateway, "fe80::1"));
     }
     html += `<div class="group-title">${esc(t("editor.dns_config"))}</div>` +
+      /* 三态在 dhcp 与 manual 两种模式下**都给全**：「手工 IP + DNS 交给系统自动获取」是
+         真实世界里最常见的一组（静态地址配 DHCP 的 DNS）。后端三个平台也都不看 IPv4 的
+         模式，一律按同一套渲染。以前 manual 分支只画「保持 + 指定」，等于把这组组合
+         从界面上抹掉了。 */
       row("editor.config_type", `<select data-act="dns-tri" data-pre="${pre}">` +
-        (manual
-          ? [["keep", t("editor.keep_unchanged")], ["set", t("editor.dns_servers")]]
-          : [["keep", t("editor.keep_unchanged")], ["auto", t("editor.dhcp_provided")], ["set", t("editor.dns_servers")]]
-        )
+        [["keep", t("editor.keep_unchanged")], ["auto", t("editor.dhcp_provided")], ["set", t("editor.dns_servers")]]
           .map(([v, l]) => `<option value="${v}" ${dnsState === v ? "selected" : ""}>${esc(l)}</option>`).join("") +
         `</select>`) +
       /* 输入框在 auto/set 两态都画出来：数据上「指定但还没填」就是 `""`，
