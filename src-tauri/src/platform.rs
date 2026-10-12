@@ -697,7 +697,7 @@ pub trait NetworkPlatform: Send + Sync {
         servers: &[String],
     ) -> Result<(), String> {
         let _ = (target, servers);
-        Err(i18n::t("pal.dns_only_unsupported"))
+        Err(crate::i18n::t("pal.dns_only_unsupported"))
     }
 
     /// 回落保底：切回 DHCP + 清空自定义 DNS。

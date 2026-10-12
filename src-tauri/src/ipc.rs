@@ -839,7 +839,7 @@ pub fn proxy_speed_test(urls: Vec<String>) -> Result<String, String> {
         let _ = std::fs::remove_file(&dest);
         out.push(json!({ "url": url, "ms": ms }));
     }
-    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+    Ok(serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()))
 }
 
 /// 设「升级请求走哪条出口」：`direct` / `system` / `manual` + 一个地址。

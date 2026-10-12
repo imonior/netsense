@@ -909,7 +909,7 @@ mod tests {
         cfg.validate().expect("老配置在新语义下必须仍然合法");
         // 语义还是「交回自动」：空串原样保留，没有被迁移成别的取值。
         assert_eq!(
-            cfg.profiles[0].then.network.as_ref().unwrap().dns.as_deref(),
+            cfg.profiles[0].then.as_ref().unwrap().network.as_ref().unwrap().dns.as_deref(),
             Some("")
         );
         // 加载路径本身就跑 validate（`AppState::load` 与 engine 热重载都是

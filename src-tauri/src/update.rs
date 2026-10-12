@@ -32,7 +32,7 @@
 //!   概率低，而版本号格式一旦不一致（带前缀、带预发布后缀）就会误拒正常更新。
 //!
 //! 任一环节拿不到可信结果就**中止安装**，不会退化成「只比哈希」——那正是恶意镜像唯一能利用的缝。
-//! 无 root 公钥的 dev 构建是唯一的例外，且仅在未置 `REQUIRE_SIGNED` 时降级为仅 SHA256。
+//! 无 root 公钥的 dev 构建是唯一的例外，且仅在未置 `require_signed()`（NETSENSE_RELEASE_SIGN）时降级为仅 SHA256。
 //! CI 在四条平台腿跑完后统一上传根级 `SHA256SUMS` 与 `SHA256SUMS.sig`（见 build.yml），
 //! 正常发布永远读得到它们；读不到说明手上的东西不是我们发出去的那份。
 //! 下载与落地全程使用**独占创建**的私有临时路径（见「私有临时路径」一节）：共享 `/tmp` 上
@@ -52,18 +52,23 @@ use tauri::{AppHandle, Emitter};
 // ——— 发布签名：两层信任链（精简版 B+）———
 //
 // 内置的**只有 root 公钥**：它是唯一的信任锚，由 CI 经环境变量注入（见 build.rs）。
-// 空串表示本构建未嵌入 root 公钥（dev / 本地），此时按 REQUIRE_SIGNED 决定是否中止。
+// 空串表示本构建未嵌入 root 公钥（dev / 本地），此时按 require_signed() 决定是否中止。
 //
 // 信任清单 UPDATE-TRUST.json 由 root 私钥离线签发；App 验过清单后，才从里面取出
 // signing 公钥去验 SHA256SUMS.sig。因此 signing 私钥可以放心放进 CI（泄露时用 root
 // 签一份指向新密钥的新清单即可轮换），而**真正的信任根（root 私钥）永远不接触任何
 // 自动化环节**。
-const ROOT_PUBKEY_HEX: &str = option_env!("NETSENSE_ROOT_PUBKEY").unwrap_or("");
-// 「无签名即拒绝」：仅当 CI 置位 NETSENSE_RELEASE_SIGN 时为真（release 构建）。
-const REQUIRE_SIGNED: bool = match option_env!("NETSENSE_RELEASE_SIGN") {
-    Some("1") => true,
-    _ => false,
+// `option_env!().unwrap_or()` 与 `Some("1")` 字面量匹配在 const 上下文里都还是不稳定特性
+// （E0658），稳定版只能用「绑定式 match」取值；「是否要求签名」不是编译期常量能表达的了，
+// 退成运行时函数——CI 注入环境变量在编译期就定了，运行时读的仍是同一个编译期字面量。
+const ROOT_PUBKEY_HEX: &str = match option_env!("NETSENSE_ROOT_PUBKEY") {
+    Some(s) => s,
+    None => "",
 };
+// 「无签名即拒绝」：仅当 CI 置位 NETSENSE_RELEASE_SIGN 时为真（release 构建）。
+fn require_signed() -> bool {
+    option_env!("NETSENSE_RELEASE_SIGN") == Some("1")
+}
 
 /// 信任清单的固定位置：仓库树里的 `update/UPDATE-TRUST.json`。
 ///
@@ -188,7 +193,7 @@ fn native_update(
     let trust = match embedded_root_pubkey() {
         Some(_) => Some(verify_trust_chain(choice, mirror)?),
         None => {
-            if REQUIRE_SIGNED {
+            if require_signed() {
                 return Err(i18n::t("upd.sig_no_key"));
             }
             crate::log::warn(&i18n::t("upd.sig_skipped"));
