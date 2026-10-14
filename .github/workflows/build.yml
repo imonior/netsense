@@ -88,26 +88,28 @@ jobs:
 
       # Release notes default to English: extracted from the current version's section of the
       # English CHANGELOG.md, so Chinese commits can't leak into the published notes.
-      # The body gets a language switch line on top, mirroring the READMEs. It has to use absolute
-      # blob URLs pinned to this tag: a Release page has no document base, so a relative
-      # `README.zh.md` would resolve against .../releases and 404.
+      #
+      # `scripts/gen_release_notes.py` owns the whole body -- the language switch line, the notes,
+      # and the per-platform download block. Two things worth knowing before editing it inline:
+      #
+      # * The switch line has to use absolute blob URLs pinned to this tag, because a Release page
+      #   has no document base: a relative `CHANGELOG.zh.md` resolves against .../releases and
+      #   404s. It points at the **localized CHANGELOGs**, not the READMEs -- linking the READMEs
+      #   here sent anyone clicking 简体中文 to the project homepage instead of these notes.
+      # * The download links are only correct if the asset names match what tauri-action actually
+      #   uploads, and those differ per platform. They were verified against a live Release; see
+      #   the header comment in the script.
       - name: Generate release notes (English, from CHANGELOG.md)
         shell: bash
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
-          BASE="https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}"
           echo "extracting changelog section for v${VER}"
-          {
-            printf '%s\n\n' "**English** · [简体中文](${BASE}/README.zh.md) · [繁體中文](${BASE}/README.zh-TW.md) · [日本語](${BASE}/README.ja.md) · [한국어](${BASE}/README.ko.md)"
-            awk -v v="## [${VER}]" '
-              substr($0,1,4)=="## [" {
-                if (p) exit
-                if (substr($0,1,length(v))==v && substr($0,length(v)+1,1)==" ") { p=1; next }
-              }
-              p { print }
-            ' CHANGELOG.md
-          } > release-notes.md
+          python scripts/gen_release_notes.py \
+            --version "${VER}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --out release-notes.md
           echo "---- preview ----"; head -20 release-notes.md
 
       - name: Create Draft Release

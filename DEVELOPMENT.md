@@ -128,6 +128,8 @@ netsense/
 │   ├── editor-smoke.mjs       # ★ headless editor harness (stubbed DOM + fake IPC); asserts the binding rules and can dump the payloads the editor really sends
 │   ├── build-windows.ps1      # ★ one-click Windows build (with MSVC/WebView2/disk preflight)
 │   ├── gen_icons.py           # resample + round + pack the icon set from app-icon.png (pure stdlib)
+│   ├── gen_release_notes.py   # compose the GitHub Release body: localized-changelog switch line + notes + per-platform download links
+│   ├── update_download_stats.py # rewrite ONLY the marked download-count block of each published Release (daily, via download-stats.yml)
 │   ├── bump_version.sh        # VERSION → tauri.conf.json + Cargo.toml (VERSION is the single source)
 │   ├── bump-cask.sh           # ★ published Release → homebrew-tap's Casks/netsense.rb (the one copy of the cask template)
 │   ├── check-no-ai.sh         # ★ publish-hygiene guard: no assistant-tool names in commit messages / shipped files
@@ -1267,7 +1269,18 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   quotes. What no script can judge is whether a translated paragraph still says what the English one
   means — that part stays a review task.)
   CI extracts the release notes from the tagged version's section of the **English** `CHANGELOG.md`, so the entry
-  has to be numbered before the tag goes out. `scripts/validate.py` check [8] compares VERSION / tauri.conf.json /
+  has to be numbered before the tag goes out.
+- **The whole Release body is composed by `scripts/gen_release_notes.py`** — the localized-changelog switch line,
+  the notes above, and the per-platform download block. It is one script rather than an inline step because those
+  three have to agree: the switch line points at the localized **CHANGELOGs** (pointing at the READMEs sent
+  readers to the project homepage instead of these notes), and the download links must match the asset names
+  tauri-action actually uploads, which differ per platform (Windows `_x64`/`_x86`/`_arm64`, macOS dmg
+  `_aarch64`/`_x64`, deb `_amd64`/`_arm64`, portable `NetSense_<matrix-label>_portable.zip`). Re-check those
+  against a live Release before touching them — a wrong name is a silent 404 on the page users download from.
+- **Download counts are not shown by GitHub anywhere**, so `scripts/update_download_stats.py` renders them into
+  the body between `<!-- downloads-stats-start -->` / `<!-- downloads-stats-end -->`, run daily by
+  `.github/workflows/download-stats.yml`. It rewrites only that block (hand edits elsewhere survive) and PATCHes
+  nothing when the table is unchanged, so it never churns a Release needlessly. `scripts/validate.py` check [8] compares VERSION / tauri.conf.json /
   Cargo.toml against the CHANGELOG's first **numbered** section, and tolerates a `## [Unreleased]` top: it skips
   the comparison only when no numbered section exists at all, which never happens in a released state.
 - **Commit-message red line**: `release: vX.Y.Z <brief>`, **must not** contain any AI tool name or credit.

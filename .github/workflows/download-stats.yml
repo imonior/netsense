@@ -1,0 +1,43 @@
+name: Download stats
+
+# GitHub counts downloads but shows the number nowhere on a Release page, so the
+# figure has to be rendered into the body itself.
+#
+# scripts/update_download_stats.py rewrites **only** the block between the markers
+# that scripts/gen_release_notes.py emits -- anything a Release author edited by
+# hand elsewhere survives -- and PATCHes nothing when the rendered table is
+# unchanged, so running daily costs one cheap run and does not churn updated_at
+# on every Release.
+#
+# Nothing here can break a build or gate a user's update: the worst case is a
+# number that is a day stale. That is why it sits in its own workflow rather than
+# inside build.yml.
+
+on:
+  schedule:
+    # Daily at 03:17 UTC. Deliberately off-the-hour: :00 crons queue behind every
+    # other repository's midnight job, often by tens of minutes.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  # Needed to PATCH the release body. Nothing else is requested.
+  contents: write
+
+concurrency:
+  group: download-stats
+  cancel-in-progress: true
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # GH_TOKEN is what makes the release body writable; the script itself only
+      # reads asset counters and rewrites the marked block.
+      - name: Refresh download counts on every published Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/update_download_stats.py --repo ${{ github.repository }}
