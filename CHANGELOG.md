@@ -4,6 +4,44 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Settings shows your current public IP and its location, and speed-tests the update channels.**
+  The proxy card displays the exit IP and where it is (refreshed when the settings window opens,
+  when the proxy mode changes, and after saving); the direct connection and every preset mirror are
+  probed on open and the latency is shown next to the choice. Preset mirrors can be deleted — the
+  app remembers which presets were hidden (they ship with the version) and offers a one-click
+  restore. (`ipc.rs`, `appconfig.rs`, `settings.html`)
+
+### Fixed
+
+- **Read-back verification now covers static routes and the IPv6 mode.** 3A previously judged a
+  profile's routes only by the command's exit code, while `netsh` / `route` / `ip route` all return
+  0 when a route already exists — so a route that silently never landed passed as "applied". The
+  read-back now compares every route against the live routing table (destination normalized to
+  CIDR, so macOS's compressed `10/8` notation matches `10.0.0.0/8`; the gateway must match;
+  `metric` is not compared because macOS does not report it) and the configured IPv6 mode
+  (`off` / `automatic` / `manual`). A routing table that cannot be read is not treated as a
+  mismatch, and neither is an unreadable IPv6 mode (Windows reports nothing once the IPv6 binding
+  is disabled). (`network/readback.rs`, `network/mod.rs`)
+- **A cleared DNS list is now read back as an explicit "none".** All three platforms used to
+  report "no name servers" as *unreadable* (`None`), which made the `manual` + "automatic DNS"
+  branch of the read-back — the one failure the DNS fallback exists to rescue — unable to fire.
+  They now report `Some("")` when the query succeeds and the list is genuinely empty, so
+  `apply_3a` rolls back (or applies the opt-in fallback) instead of leaving a host whose IP and
+  gateway work but whose DNS does not. (`platform/macos.rs`, `platform/windows.rs`,
+  `platform/linux.rs`, `platform/linux_nm.rs`)
+- **Windows verifies that clearing DNS to DHCP actually cleared it.** `netsh … source=dhcp`
+  returns 1 when the interface is already on DHCP, so the exit code proved nothing; the command
+  now also reads back the interface's static `NameServer` registry value and fails if anything is
+  still pinned there. (`platform/windows.rs`)
+- **macOS rollback restores the IPv6 mode again.** `networksetup -getinfo` reports
+  `IPv6: Automatic` / `Off` capitalized, while the snapshot restore matched the lowercase
+  canonical values — so a failed 3A apply never put the IPv6 mode back. The read path now
+  normalizes to the same lowercase set the other two platforms use. (`platform/macos.rs`)
+
 ## [1.6.4] - 2026-10-10
 
 ### Fixed

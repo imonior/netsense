@@ -79,7 +79,7 @@ netsense/
 │       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
 │       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
 │       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
-│       ├── ipc.rs             # 51 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── ipc.rs             # 56 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -441,20 +441,26 @@ Key modelling points, each of which is easy to get wrong:
   client is supplying the servers.** All three platforms express "ask the system" the same way as "none
   pinned": macOS `-setdnsservers <svc> Empty`, Windows `source=dhcp`, Linux `ipv4.dns ""`. On a
   `mode: dhcp` branch that is exactly true — the DHCP client hands back whatever the lease carries. On a
-  `mode: manual` branch there is no client to ask, and the same three commands produce **zero**
-  nameservers: the reading "automatic" is a fiction, and the state the user picked is the one state the
-  configuration cannot deliver. So `validate()` refuses `manual` + empty `dns` (`cfg.net_manual_auto_dns`),
-  and the editor greys that option out on the static branch for the same reason — a config that loads and
-  then silently has no resolver is worse than one that is refused on save.
+  `mode: manual` branch there is no client to ask, and the same three commands can leave **zero**
+  nameservers. That combination is no longer refused on save: it is a legitimate request (Windows still
+  takes DNS from DHCP on a static address; macOS keeps resolvers outside the service), and whether it
+  actually delivered is answered by readback — `readback::check` treats an empty read on a `manual` +
+  empty-`dns` branch as a real failure (`dns_left_empty`), so `apply_3a` rolls back instead of letting
+  3B run on a host with no resolver. The one rescue is the opt-in **DNS fallback** in settings
+  (`appconfig::DnsFallback`): it fires on exactly that failure, and only counts when a second readback
+  confirms the servers landed.
   The flip side is why `set_dhcp()` keeps its explicit clear: macOS keeps `DNS` and `IPv4` as **sibling**
   dictionaries on a NetworkService, so `-setdhcp` rewrites the IPv4 dict and leaves a pinned server list
   standing — every DHCP service on a healthy host reads back `DNS = None`, which is what "automatic" looks
   like from the outside.
 - **Routes live in 3A**, not in the automation list: a route that failed to land must not let the rest of
-  the automation run. Inside 3A it is covered by Apply+Verify and blocks 3B when it fails.
+  the automation run. Inside 3A they are covered by Apply+Verify: the read-back compares every route
+  against the live routing table (dest normalized to CIDR + gateway; `metric` is deliberately **not**
+  compared because macOS `netstat` does not report it), so a route the command reported as added but
+  the OS silently kept out blocks 3B just like a missing address does.
 - `Config::validate()` rejects structurally-broken configs before they reach disk (empty/duplicate ids,
   a Profile with no Rule, an empty Rule, a condition with an empty value, `manual` without ip/netmask/gateway,
-  non-IPv4 DNS, `dns: ""` on a `manual` branch (the modelling point above), routes without a gateway unless `delete`). It also checks the 3B/health **payloads**, because a
+  non-IPv4 DNS, routes without a gateway unless `delete`). It also checks the 3B/health **payloads**, because a
   half-filled action fails as "nothing happened" rather than as an error: action `id`s must be unique across a
   branch's `one_shot` **and** `persistent` together (`EngineView.last_run` and `EngineView.workers` find their
   card by id, so a collision would report two actions as one), `launch_app.app` / `run_script.path` / `set_default_printer.printer` / `periodic_script.path` /
@@ -480,6 +486,13 @@ Key modelling points, each of which is easy to get wrong:
   take longer than the command that requested them, and an immediate read false-fails.
 - "Field absent" vs "field empty" are different expectations (`readback.rs`): expecting no DNS means we
   must **not** compare against the DHCP-supplied servers, and expecting DNS must fail on an empty read.
+- What the read-back covers today: address / netmask / gateway / DNS / **static routes** / **IPv6
+  mode**. Routes are compared as *networks*, not strings — macOS `netstat -rn` writes the compressed
+  `10/8` / `192.168.1` forms, so `normalize_dest` folds every platform's shape onto `a.b.c.d/n`
+  (and masks host bits) before comparing; `metric` is skipped because macOS does not report it.
+  An unreadable route table is not a mismatch: `readback_match` tells "the table could not be read"
+  apart from "the route is not in it" by comparing the fresh read against the pre-apply snapshot
+  (a live machine never has zero IPv4 routes), and only the latter fails.
 - `health` is the time-extension of the same check: a network can be correctly configured and still not
   reach anything. `network::HealthMonitor` runs **bound to the Active Profile's lifecycle** (start on
   activate, stop on deactivate/zero-match/manual DHCP): a detached global loop would keep probing
@@ -910,7 +923,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **599 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **615 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1046,6 +1059,11 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **探测只挂在显式动作上**：`get_proxy_state` 由设置窗口打开时与保存后各调一次，**不进** `get_app_settings`
   —— 那个每次窗口获得焦点都会被调，popup.html 也调它，而 Linux 上「问一次系统代理」是好几条 `gsettings`
   子进程。界面上「现在走……」那一行说的是磁盘上那份选择会怎么落地，不是实时监视器。
+- **出口 IP 与镜像测速同理，只挂在打开 / 切换 / 保存上**：`probe_public_ip` 与 `mirror_speed_test`
+  在设置窗口打开时各跑一次（IP 探测跟着代理选项切换 debounce 后再跑，镜像测速只在删除 / 恢复预设后
+  重跑），**不跟着窗口聚焦** —— 切一次窗口打六个外部请求没有意义，而这两行数字是给选择做参考的
+  实时数据，不是配置回显。镜像测速探的是 `releases/latest/download/SHA256SUMS`：api.github.com
+  不在那一批加速镜像的覆盖范围内，拿它测镜像测到的其实是镜像方自己的反代站点。
 - **不进 `NetworkPlatform` trait**：这一项不需要任何平台 API，只有两个纯解析函数加一次子进程调用。先例是
   §10.4 那条开机启动（运行时 `std::env::consts::OS` 分支）和 `platform::system_ui_language()` 这类 PAL 自由
   函数。为它给三条腿各加一个方法，换来的是「三平台都要覆盖」的成本而没有一分类型安全收益。
@@ -1189,7 +1207,10 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   `engine` resample handover (a forced resample governs **exactly one** pass: nothing is owed one when no
   one asked, and taking it clears it — a flag left standing would bypass the sampling cadence forever),
   `network` + `network::readback` (Failed carries the reason that blocks 3B; each readback expectation
-  including "cleared DNS must not be compared against DHCP servers"),
+  including "cleared DNS must not be compared against DHCP servers", "a route the command claimed to add
+  must be in the table", "a route asked to be deleted must be gone", "an IPv6 mode that reads back
+  different fails while an unreadable one does not", and the macOS compressed dest form `10/8` counting
+  as the configured `10.0.0.0/8`),
   `automation` (allow-list trust rules incl. which directory a relative script path is anchored to,
   that actions run in the order they are listed, and what each action reports on the UI — label text, and
   the printer action being budgeted like a local handoff rather than like a script),
@@ -1215,9 +1236,10 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   OS token, architecture never traded for a package that cannot install), `i18n` (parity / fallback chain / placeholder substitution).
 - **Frontend**: `scripts/editor-smoke.mjs` loads `editor.html`'s script into a `vm` context with a stubbed
   DOM and a fake `window.__TAURI__`, then drives render → input → click and asserts the binding rules that
-  are invisible to every other layer (absent ≠ empty for the tri-state `dns`, and the "hand it back to the
-  system" entry of that select is greyed out exactly when the branch pins a static address — the same
-  combination `validate()` refuses, so the two halves of the gate are held to each other here),
+  are invisible to every other layer (absent ≠ empty for the tri-state `dns`; the "hand it back to the
+  system" entry stays selectable on a static branch, because `manual` + empty `dns` is a legitimate
+  request whose success is judged by readback — the Rust tests `automatic_dns_is_a_valid_request_on_both_ipv4_branches`
+  and `automatic_dns_on_a_static_address_must_actually_produce_a_server` hold the other half of that contract),
   disabled actions must drop out
   of the pre-apply plan while the rest keep the order they are listed in, a card's ↑/↓ buttons rewrite only
   that array order and cannot reach across branches or between the

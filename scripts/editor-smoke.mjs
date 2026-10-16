@@ -799,9 +799,8 @@ check("每条规则与条件都带 id（校验要求唯一）", (p?.rules || [])
 
 group("DNS 三态：缺省 ≠ 空串");
 resetSaves();
-/* 「交回系统」在静态分支上是一条后端会拒绝的组合（下一组），而保存以后编辑器会 `loadAll()`
-   重读后端那一份（office 的 THEN 是静态的）—— 所以每一次保存前都要把这一支改回 DHCP，
-   否则送出去的就是那条注定被 `validate()` 挡下的组合，payload 契约也就没在测的那条路上了。 */
+/* 保存以后编辑器会 `loadAll()` 重读后端那一份（office 的 THEN 是静态的）—— 所以每一次保存前
+   都要把这一支显式设成 DHCP，让 payload 契约稳定地跑在「DHCP + 三态」这条路上。 */
 choose(byBind("then.network.mode"), "dhcp");
 choose(byActPre("dns-tri", "then."), "keep");
 await h.$("btn-save").onclick();
@@ -854,8 +853,9 @@ type(byBind("else.network.ip"), "10.10.0.20");
 // 证明不了任何契约。
 type(byBind("else.network.netmask"), "255.255.255.0");
 type(byBind("else.network.gateway"), "10.10.0.1");
-// 同理，ELSE 原本带着 `dns: ""`（向 DHCP 交回），改成静态地址以后这一项就不成立了，
-// 留着它整份配置会被 `validate()` 拒绝 —— 这一句是界面上要用户做的那个选择。
+  // ELSE 原本带着 `dns: ""`（向 DHCP 交回）：改成静态地址以后这一项本身仍然合法（后端不再
+  // 拒绝 manual + 空 dns），但「静态地址 + 交回自动」能不能真拿到 DNS 由 3A 回读判定。这里
+  // 换成明确指定的服务器，让这条 payload 走「静态 + 指定」这条路，与下一组的断言对齐。
 choose(byActPre("dns-tri", "else."), "set");
 type(byBind("else.network.dns"), "10.10.0.1");
 await h.$("btn-save").onclick();

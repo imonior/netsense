@@ -555,13 +555,19 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
     let backup_dir = crate::backup::dir(&backup_sources(&state)).display().to_string();
     // 代理只报存下来的那一态，不在这里探测系统：这个命令每次窗口获得焦点都会跑一遍，
     // 而「读一次系统代理」在 Linux 上是好几条 `gsettings` 进程。实况走 `get_proxy_state`。
-    let (proxy_mode, proxy_url) = {
+    let (proxy_mode, proxy_url, mirror_presets, mirror_hidden_count) = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-        match &s.proxy {
+        let (mode, url) = match &s.proxy {
             crate::netproxy::ProxySetting::Direct => ("direct", None),
             crate::netproxy::ProxySetting::System => ("system", None),
             crate::netproxy::ProxySetting::Manual { url } => ("manual", Some(url.clone())),
-        }
+        };
+        (
+            mode,
+            url,
+            s.mirror_presets(),
+            s.mirror_hidden.len(),
+        )
     };
     let payload = json!({
         "language": language,
@@ -591,10 +597,12 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "silent_execution": silent_execution,
         // 镜像给前端的是「前缀字符串」或空串：下拉要按这个值回显，而 `UpdateMirror`
         // 自己的序列化形状（一个带标签的对象）对界面没有意义。
-        "update_mirror": match &update_mirror {
-            crate::appconfig::UpdateMirror::Direct => String::new(),
-            crate::appconfig::UpdateMirror::Prefix(p) => p.clone(),
-        },
+        "update_mirror": mirror_string(&update_mirror),
+        // 预置镜像给界面的是**可见的那一份**（代码常量减去用户删掉的）：删过一个之后
+        // 这份列表就与代码常量不同，而窗口聚焦会再跑一次这个命令 —— 界面每次按它重建
+        // 下拉，而不是进页面时填一次。`mirror_hidden_count` 只为「恢复」链接的显隐。
+        "mirror_presets": mirror_presets,
+        "mirror_hidden_count": mirror_hidden_count,
         // DNS 兜底给界面的是「开关 + 逗号分隔的一串」：`DnsFallback` 自己的序列化形状
         // 带 `skip_serializing_if`，空列表会被整个省略，界面就得处理第三种状态。
         "dns_fallback_enabled": dns_fallback.enabled,
@@ -666,7 +674,7 @@ pub fn set_silent_execution(
 /// 设「安装包从哪儿下」：空串 = 直连 GitHub，其余 = 前缀式镜像地址。
 ///
 /// 与 `set_update_proxy` 正交：一个换**出口**、一个换**地址**，两者可以同时生效。
-/// 校验值不在它覆盖的范围内 —— SHA256SUMS 永远直连 GitHub 取，见
+/// 它不改「谁说了这个安装包是什么」—— 那一层由内置 root 公钥验签，见
 /// [`crate::appconfig::UpdateMirror`]。
 ///
 /// 形状不合法的前缀在保存时就退回直连（见 `AppConfig::clamped`），返回值是**落盘后的真值**
@@ -696,10 +704,114 @@ pub fn set_update_mirror(
         UpdateMirror::Direct => log::info(&i18n::t("notify.mirror_direct")),
         UpdateMirror::Prefix(p) => log::info(&i18n::tf("notify.mirror_set", &[("mirror", p)])),
     }
-    Ok(match &saved {
-        UpdateMirror::Direct => String::new(),
-        UpdateMirror::Prefix(p) => p.clone(),
-    })
+    Ok(mirror_string(&saved))
+}
+
+/// 删掉一个预置镜像（见 [`crate::appconfig::MIRROR_PRESETS`]）。
+///
+/// 记进软件配置的 `mirror_hidden`，而不是把用户自选列表整个存下来 —— 预设跟着版本走，
+/// 存一份清单就多一个会说谎的来源。**正戴着它的那一个会同时退回直连**，否则下拉会停在
+/// 一个已经不存在的选项上。
+///
+/// 返回给界面的是**新的预设列表 + 当前生效的镜像**：删完下拉要按这份重建，而「正好删掉了
+/// 正在用的那个」时选中值变成了直连 —— 前端不重取就会显示成「选着一个已被删掉的镜像」。
+#[tauri::command(async)]
+pub fn hide_update_mirror(
+    state: State<'_, std::sync::Arc<AppState>>,
+    prefix: String,
+) -> Result<String, String> {
+    let prefix = prefix.trim().to_string();
+    if !crate::appconfig::MIRROR_PRESETS.contains(&prefix.as_str()) {
+        return Err(i18n::t("sett.mirror_not_preset"));
+    }
+    let (presets, mirror, hidden_count) = {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = s.clone();
+        cfg.hide_mirror_preset(&prefix);
+        let out = (
+            cfg.mirror_presets(),
+            mirror_string(&cfg.update_mirror),
+            cfg.mirror_hidden.len(),
+        );
+        cfg.save(&state.settings_path)?;
+        *s = cfg;
+        out
+    };
+    log::info(&i18n::tf("notify.mirror_removed", &[("mirror", &prefix)]));
+    Ok(serde_json::to_string(&json!({
+        "presets": presets,
+        "mirror": mirror,
+        "hidden_count": hidden_count,
+    }))
+    .unwrap_or_default())
+}
+
+/// 恢复全部被删的预置镜像（重新摆出来）。不动当前选中的那个 —— 用户没有要求换它。
+#[tauri::command(async)]
+pub fn restore_update_mirror_presets(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    let (presets, mirror) = {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = s.clone();
+        cfg.restore_mirror_presets();
+        let out = (cfg.mirror_presets(), mirror_string(&cfg.update_mirror));
+        cfg.save(&state.settings_path)?;
+        *s = cfg;
+        out
+    };
+    log::info(&i18n::t("notify.mirror_restored"));
+    Ok(serde_json::to_string(&json!({
+        "presets": presets,
+        "mirror": mirror,
+        "hidden_count": 0,
+    }))
+    .unwrap_or_default())
+}
+
+/// 给若干个下载镜像候选各测一次「取校验值」的真实请求。
+///
+/// 探的是 `releases/latest/download/SHA256SUMS`：更新时经镜像取回来的正是这一类 URL
+/// （`mirrored_url` 拼出来的形状）。不探 api.github.com —— 那一批加速镜像只代理
+/// github.com，拿 API 域名测镜像，测到的其实是镜像方自己的反代站点快不快。
+/// 空串 = 直连 GitHub。
+///
+/// 出口用**存着的那个代理设置**：镜像换地址、代理换出口，两个正交，测出来要同时算上两者
+/// 才等于用户真下载时会走的那条路。候选并行探测 —— 最慢的一个决定总时长，而不是四个加起来。
+#[tauri::command(async)]
+pub fn mirror_speed_test(
+    state: State<'_, std::sync::Arc<AppState>>,
+    prefixes: Vec<String>,
+) -> Result<String, String> {
+    // 界面摆得出来的候选是个位数；超出的一律拒，别让这个命令变成一个并发扫描器。
+    if prefixes.len() > 8 {
+        return Err(i18n::t("sett.mirror_too_many"));
+    }
+    let choice = proxy_choice_of(&state);
+    let proxy = crate::netproxy::curl_proxy_args(&choice);
+    const PROBE: &str = "https://github.com/imonior/netsense/releases/latest/download/SHA256SUMS";
+    let out: Vec<serde_json::Value> = std::thread::scope(|s| {
+        let handles: Vec<_> = prefixes
+            .iter()
+            .map(|raw| {
+                let proxy = &proxy;
+                s.spawn(move || {
+                    let prefix = raw.trim();
+                    let url = if prefix.is_empty() {
+                        PROBE.to_string()
+                    } else {
+                        crate::update::mirrored_url(
+                            PROBE,
+                            &crate::appconfig::UpdateMirror::Prefix(prefix.to_string()),
+                        )
+                    };
+                    json!({ "prefix": prefix, "ms": timed_get(&url, proxy) })
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    Ok(serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()))
 }
 
 /// DNS 兜底给界面看的形状。
@@ -815,39 +927,59 @@ pub fn proxy_speed_test(urls: Vec<String>) -> Result<String, String> {
             out.push(json!({ "url": raw, "ms": serde_json::Value::Null }));
             continue;
         };
-        // 应答落到临时文件而不是 /dev/null：那个路径名 Windows 上叫 NUL，而这里不该为了
-        // 丢字节去分叉 —— body 写走之后 stdout 只剩 `-w` 那一个数，读回来不用解析两掺。
-        let dest = std::env::temp_dir().join(format!("netsense-psprobe-{}.out", std::process::id()));
-        // curl 的参数全是常量、长度固定：数组就够，`vec!` 只多一次堆分配。
-        let dest_arg = dest.to_string_lossy().into_owned();
-        let argv: [&str; 10] = [
-            "-s",
-            "-o",
-            &dest_arg,
-            "-w",
-            "%{time_total}",
-            "--max-time",
-            "8",
-            "--proxy",
-            &url,
-            PROBE,
-        ];
-        let ms = crate::platform::run("curl", &argv)
-            .ok()
-            .and_then(|t| t.trim().parse::<f64>().ok())
-            .filter(|s| *s > 0.0)
-            .map(|s| (s * 1000.0).round() as i64);
-        let _ = std::fs::remove_file(&dest);
-        out.push(json!({ "url": url, "ms": ms }));
+        // 每个候选各带自己的代理参数：测的就是「走这个候选」要多久。
+        let proxy = ["--proxy".to_string(), url.clone()];
+        out.push(json!({ "url": url, "ms": timed_get(PROBE, &proxy) }));
     }
     Ok(serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()))
+}
+
+/// 探测序号：并行探测（`mirror_speed_test`）时每个候选要写自己的临时文件，
+/// 只共用进程号会互相覆盖，量到的就不是自己那一次的时间了。
+static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 发一次 GET，量完整个请求的总耗时（curl 的 `time_total`，不是 TCP 握手时间）。
+///
+/// `-L` 跟随重定向、且 `--proto =https` 保证跳转落点也必须是 https：一次「只是慢了一点」
+/// 的跳转不该把明文请求送出去。应答落到临时文件而不是 `/dev/null` —— 那个路径名 Windows
+/// 上叫 NUL，而这里不该为了丢字节去分叉；body 写走之后 stdout 只剩 `-w` 那一个数，
+/// 读回来不用解析两掺。
+///
+/// 返回毫秒；连不上 / 超时 / curl 不在 → `None`（界面上是「这个候选现在不通」）。
+fn timed_get(url: &str, proxy_args: &[String]) -> Option<i64> {
+    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dest = std::env::temp_dir().join(format!("netsense-probe-{}-{seq}.out", std::process::id()));
+    let dest_arg = dest.to_string_lossy().into_owned();
+    let base: [&str; 10] = [
+        "-s",
+        "-o",
+        &dest_arg,
+        "-w",
+        "%{time_total}",
+        "--max-time",
+        "8",
+        "-L",
+        "--proto",
+        "=https",
+    ];
+    let mut args: Vec<&str> = base.to_vec();
+    args.extend(proxy_args.iter().map(String::as_str));
+    args.push(url);
+    let ms = crate::platform::run("curl", &args)
+        .ok()
+        .and_then(|t| t.trim().parse::<f64>().ok())
+        .filter(|s| *s > 0.0)
+        .map(|s| (s * 1000.0).round() as i64);
+    let _ = std::fs::remove_file(&dest);
+    ms
 }
 
 /// 设「升级请求走哪条出口」：`direct` / `system` / `manual` + 一个地址。
 ///
 /// 认不出的 `mode` 一律拒绝，而不是退回默认值：这一句改的是这台机器的对外流量走哪条路，
-/// 猜错的代价远大于界面上多一条错误。地址形状由 [`crate::netproxy::normalize_proxy_url`]
-/// 判，拒绝时给同一句文案 —— 用户要的是「这个填法不行」，不是背一套错误码。
+/// 猜错的代价远大于界面上多一条错误。三态判定与地址形状由
+/// [`crate::netproxy::choice_from_ui`] 一处给出（探测候选出口的 `probe_public_ip` 用的是
+/// 同一句），拒绝时给同一句文案 —— 用户要的是「这个填法不行」，不是背一套错误码。
 ///
 /// 保存后**不**惊动引擎：这份设置不参与任何条件求值或下发（判据见 `appconfig.rs`）。
 #[tauri::command(async)]
@@ -858,13 +990,11 @@ pub fn set_update_proxy(
 ) -> Result<String, String> {
     use crate::netproxy::ProxySetting;
     let rejected = || i18n::t("sett.proxy_rejected");
-    let next = match mode.as_str() {
-        "direct" => ProxySetting::Direct,
-        "system" => ProxySetting::System,
-        "manual" => ProxySetting::Manual {
-            url: crate::netproxy::normalize_proxy_url(&url).ok_or_else(rejected)?,
-        },
-        _ => return Err(rejected()),
+    let next = match crate::netproxy::choice_from_ui(&mode, &url) {
+        Some(crate::netproxy::ProxyChoice::Direct) => ProxySetting::Direct,
+        Some(crate::netproxy::ProxyChoice::Follow) => ProxySetting::System,
+        Some(crate::netproxy::ProxyChoice::Use(url)) => ProxySetting::Manual { url },
+        None => return Err(rejected()),
     };
     {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1478,50 +1608,139 @@ fn fetch_text(url: &str, proxy_args: &[String]) -> Result<String, String> {
     }
 }
 
-/// 出口公网 IP 是否像样（架构上的 Egress / Public IP 层）：只放行 IPv4 / IPv6 文本，
-/// 挡掉任何带空格或异常字符的响应（外部服务被劫持时不能把脏东西喂给面板）。
-/// Whether a probed value looks like a public IP: IPv4 / IPv6 text only, rejecting anything odd.
-fn is_plausible_ip(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 45
-        && s.bytes().all(|b| b == b'.' || b == b':' || b.is_ascii_digit())
+/// 出口的 IP 与归属地：面板与设置页上「我现在从哪个地址出去」的那一行。
+///
+/// 归属地是**可选**的：给出位置的服务（ipip.net / ip.sb）被墙时，退到只回 IP 的服务
+/// （ipify）仍然回答得了「出口是哪」这个更重要的问题。
+#[derive(serde::Serialize)]
+struct IpInfo {
+    ip: String,
+    location: Option<String>,
 }
 
-/// 探测当前出口公网 IP（Egress / Public IP 层，独立于任何网卡）。
+/// 出口公网 IP 是否像样（架构上的 Egress / Public IP 层）。
 ///
-/// 走系统代理设置（与更新下载同一套出口），短超时，结果只用于面板展示，不落盘、不参与条件匹配。
-/// 端点可换（见 [`PUBLIC_IP_URL`]）；取不到时返回 `None`，前端整行收起。
-/// Probes the current egress public IP. Respects system proxy, short timeout, display-only.
-#[tauri::command]
-pub fn get_public_ip(state: State<'_, std::sync::Arc<AppState>>) -> Option<String> {
-    // 出口公网 IP 探测：依次尝试多个端点，第一个拿到像样结果即用。
-    // 单一第三方端点可能在部分网络下被墙 / 限流 / 超时，链起来更稳；任一端点返回非 IP 文本
-    // （如 JSON）会被 `is_plausible_ip` 挡掉、继续下一个。取不到时返回 `None`，前端整行保持
-    // 可见并显示「—」（不再整行收起，免得看起来像功能没做）。
-    // Probes egress public IP: tries several endpoints in order, first plausible wins. A single
-    // third-party host can be blocked/rate-limited/timeout on some networks, so we chain; any
-    // non-IP reply is skipped. None => frontend keeps the row visible showing a placeholder.
-    const ENDPOINTS: &[&str] = &[
-        "https://api.ipify.org",
-        "https://checkip.amazonaws.com",
-        "https://icanhazip.com",
-        "https://wtfismyip.com/text",
-    ];
-    let choice = proxy_choice_of(&state);
-    let proxy = if cfg!(windows) {
-        crate::netproxy::curl_proxy_args(&choice)
-    } else {
-        crate::netproxy::proxy_args(&choice, None)
-    };
-    for url in ENDPOINTS {
-        if let Ok(s) = fetch_text(url, &proxy) {
-            let ip = s.trim();
-            if is_plausible_ip(ip) {
-                return Some(ip.to_string());
+/// 比「字符集干净」更严一格：`999.999.999.999` 字符集也干净，但不是地址 —— 外部服务被
+/// 劫持或返回一段错误页时，摆出一个假 IP 比摆出「—」糟得多。
+fn is_plausible_ip(s: &str) -> bool {
+    s.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// 探测端点表：三个服务各带自己的解析器（返回形状不同，见各自的解析函数）。
+///
+/// 顺序有讲究 —— `myip.ipip.net` 一条就同时给出 IP 和中文归属地（国内可达性最好），
+/// `api.ip.sb` 给结构化归属地，`api.ipify` 只给 IP：越往后信息越少，但越不容易被挡。
+/// 单一第三方端点可能在部分网络下被墙 / 限流 / 超时，链起来更稳；任一端点返回不像 IP
+/// 的内容都会被挡掉、继续下一个。
+const IP_ENDPOINTS: [(&str, fn(&str) -> Option<IpInfo>); 3] = [
+    ("https://myip.ipip.net", parse_ipip),
+    ("https://api.ip.sb/geoip", parse_ipsb),
+    ("https://api.ipify.org?format=json", parse_ipify),
+];
+
+/// 探测当前出口的 IP 与归属地。走**给定的那个出口**（与更新下载同一套代理判定），
+/// 短超时；结果只用于展示，不落盘、不参与条件匹配。
+fn probe_ip(choice: &crate::netproxy::ProxyChoice) -> Option<IpInfo> {
+    // Windows 上「跟随系统」继续交给 PowerShell：它按 WinINET 的系统设置走，正是这个
+    // 选择的意思（curl 在 Windows 上不读系统代理）。另外两态要求明确表态，走 curl。
+    #[cfg(windows)]
+    if matches!(*choice, crate::netproxy::ProxyChoice::Follow) {
+        for (url, parse) in IP_ENDPOINTS {
+            if let Ok(bytes) = fetch_url_powershell(url) {
+                if let Some(info) = parse(&String::from_utf8_lossy(&bytes)) {
+                    return Some(info);
+                }
+            }
+        }
+        return None;
+    }
+    let proxy = crate::netproxy::curl_proxy_args(choice);
+    for (url, parse) in IP_ENDPOINTS {
+        if let Ok(body) = fetch_text(url, &proxy) {
+            if let Some(info) = parse(&body) {
+                return Some(info);
             }
         }
     }
     None
+}
+
+/// `myip.ipip.net` 的纯文本：「当前 IP：1.2.3.4  自来于：中国 湖北 武汉  电信」。
+///
+/// 锚「IP」后面那个全角冒号，取其后第一个空白分隔的词：那句话的前缀（「当前」）与归属地
+/// 都是会变的文案，锚错一次就会把「自来于」当成 IP。IPv6 含冒号，所以按空白切词。
+/// （服务返回的是中文文案，而源码里不写中文字面量 —— 锚点用转义写。）
+fn parse_ipip(text: &str) -> Option<IpInfo> {
+    let rest = text.split("IP\u{ff1a}").nth(1)?;
+    let ip = rest.split_whitespace().next()?;
+    if !is_plausible_ip(ip) {
+        return None;
+    }
+    let location = rest
+        .split("\u{81ea}\u{6765}\u{4e8e}\u{ff1a}")
+        .nth(1)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some(IpInfo {
+        ip: ip.to_string(),
+        location,
+    })
+}
+
+/// `api.ip.sb/geoip` 的 JSON：`{"ip":..,"country":..,"region":..,"city":..}`。
+///
+/// 归属地由不空的几段拼出来 —— 少任何一段都少点信息，但 IP 本身已经回答得了主要问题。
+fn parse_ipsb(text: &str) -> Option<IpInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let ip = v.get("ip")?.as_str()?;
+    if !is_plausible_ip(ip) {
+        return None;
+    }
+    let parts: Vec<&str> = ["country", "region", "city"]
+        .iter()
+        .filter_map(|k| v.get(*k).and_then(|x| x.as_str()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some(IpInfo {
+        ip: ip.to_string(),
+        location: (!parts.is_empty()).then(|| parts.join(", ")),
+    })
+}
+
+/// `api.ipify.org?format=json`：只有 `{"ip":..}`，没有归属地。
+fn parse_ipify(text: &str) -> Option<IpInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let ip = v.get("ip")?.as_str()?;
+    is_plausible_ip(ip).then(|| IpInfo {
+        ip: ip.to_string(),
+        location: None,
+    })
+}
+
+/// 探测当前出口公网 IP（架构上的 Egress / Public IP 层，独立于任何网卡）。
+///
+/// 走**软件设置里存着的那一个出口**（与更新下载同一套），短超时，结果只用于展示，
+/// 不落盘、不参与条件匹配。面板（`popup.html`）用它：那一行回答「我现在从哪出去」。
+/// 返回 JSON `{"ip":..,"location":..}`；取不到时 `null`，前端那一行显示「—」。
+#[tauri::command(async)]
+pub fn get_public_ip(state: State<'_, std::sync::Arc<AppState>>) -> Option<String> {
+    probe_ip(&proxy_choice_of(&state))
+        .and_then(|i| serde_json::to_string(&i).ok())
+}
+
+/// 探测一个**还没存下来的**候选出口：设置界面换代理选项时立刻能看见「选这个会从哪出去」。
+///
+/// 与 [`get_public_ip`] 的区别只在出口从哪来：那个用存好的设置，这个用界面上正选着的
+/// 三态 + 地址。判定抽成了 [`crate::netproxy::choice_from_ui`]，与保存（`set_update_proxy`）
+/// 共用一句 —— 探测走的必须是保存后将会走的那条路，否则这行数字本身就是错的。
+#[tauri::command(async)]
+pub fn probe_public_ip(mode: String, url: String) -> Result<String, String> {
+    let choice = crate::netproxy::choice_from_ui(&mode, &url)
+        .ok_or_else(|| i18n::t("sett.proxy_rejected"))?;
+    probe_ip(&choice)
+        .and_then(|i| serde_json::to_string(&i).ok())
+        .ok_or_else(|| i18n::t("sett.ip_unreachable"))
 }
 
 /// 这一次对外请求走哪个出口（软件设置里的那三态）。
@@ -1546,6 +1765,17 @@ pub(crate) fn mirror_of(state: &AppState) -> crate::appconfig::UpdateMirror {
         .unwrap_or_else(|e| e.into_inner())
         .update_mirror
         .clone()
+}
+
+/// `UpdateMirror` → 界面的那一份（前缀字符串或空串）。
+///
+/// 它自己的序列化形状（一个带标签的对象）对界面没有意义，而「下拉要按这个值回显」——
+/// 同一个换算在四个地方用（回显、保存返回、删预设返回、恢复返回），各写一遍就会漂。
+fn mirror_string(m: &crate::appconfig::UpdateMirror) -> String {
+    match m {
+        crate::appconfig::UpdateMirror::Direct => String::new(),
+        crate::appconfig::UpdateMirror::Prefix(p) => p.clone(),
+    }
 }
 
 /// 是否通过 Homebrew 安装（用于给出 `brew upgrade` 而非下载链接）。
@@ -1578,12 +1808,52 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_matches, install_verdict, installable_ext, pick_asset_for, platform_of, token_anchored};
+    use super::{
+        asset_matches, install_verdict, installable_ext, is_plausible_ip, parse_ipify, parse_ipip,
+        parse_ipsb, pick_asset_for, platform_of, token_anchored,
+    };
     use crate::netproxy::ProxyChoice;
     use serde_json::json;
 
     fn url(s: &str) -> Option<String> {
         Some(s.to_string())
+    }
+
+    /// 三个探测端点的返回形状各不一样，而「摆出一个假 IP 比摆出『—』糟得多」——
+    /// 所以每个解析器都要被不像 IP 的内容打回来。归属地缺失不是失败（IPify 那条路）。
+    #[test]
+    fn ip_probe_parsers_accept_real_shapes_and_reject_junk() {
+        // ipip.net：IP 与中文归属地在一行里，锚点是「IP：」之后第一个词。
+        let info = parse_ipip("当前 IP：171.83.70.248  自来于：中国 湖北 武汉  电信").unwrap();
+        assert_eq!(info.ip, "171.83.70.248");
+        assert_eq!(info.location.as_deref(), Some("中国 湖北 武汉  电信"));
+        // IPv6 含冒号：按空白切词才切得对。
+        let v6 = parse_ipip("当前 IP：2001:db8::1  自来于：美国 加州").unwrap();
+        assert_eq!(v6.ip, "2001:db8::1");
+        assert_eq!(v6.location.as_deref(), Some("美国 加州"));
+        // 没有归属地段（服务只回了 IP）→ 位置为空，不算失败。
+        let no_loc = parse_ipip("当前 IP：10.0.0.9").unwrap();
+        assert_eq!(no_loc.location, None);
+        // 劫持/错误页：不是这个形状就整个打回，让下一个端点接手。
+        assert!(parse_ipip("<html>502 Bad Gateway</html>").is_none());
+        assert!(parse_ipip("当前 IP：999.999.999.999").is_none());
+
+        // ip.sb：JSON，归属地由不空的几段拼出。
+        let sb = parse_ipsb(r#"{"ip":"8.8.8.8","country":"美国","region":"","city":"山景城"}"#).unwrap();
+        assert_eq!(sb.ip, "8.8.8.8");
+        assert_eq!(sb.location.as_deref(), Some("美国, 山景城"));
+        assert!(parse_ipsb(r#"{"country":"x"}"#).is_none());
+
+        // ipify：只有 IP。
+        let ify = parse_ipify(r#"{"ip":"1.1.1.1"}"#).unwrap();
+        assert_eq!(ify.ip, "1.1.1.1");
+        assert_eq!(ify.location, None);
+        assert!(parse_ipify("1.1.1.1").is_none()); // 不是 JSON
+
+        // 字符集干净但不是地址 → 不像样。
+        assert!(!is_plausible_ip("999.999.999.999"));
+        assert!(is_plausible_ip("171.83.70.248"));
+        assert!(is_plausible_ip("2001:db8::1"));
     }
 
     #[test]

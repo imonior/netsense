@@ -304,7 +304,15 @@
       if (now - publicIpFetched < 120000) return; // 2 min throttle / 2 分钟节流
       publicIpFetched = now;
       invoke("get_public_ip")
-        .then((ip) => setRow("public", ip || "", true))
+        .then((raw) => {
+          // 后端回的是 {"ip":..,"location":..}：面板窄，只摆 IP（归属地在设置页那一行）。
+          let ip = "";
+          try {
+            const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+            ip = (d && d.ip) || "";
+          } catch (e) { /* 读不懂就当没有，与拿不到同一待遇 */ }
+          setRow("public", ip, true);
+        })
         .catch(() => setRow("public", "", true));
     }
 

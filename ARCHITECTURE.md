@@ -184,6 +184,13 @@ disconnected. So 3A's criterion is **read-back of actual system state**, not the
 5. return Applied
 ```
 
+The read-back in step 4 compares **address / netmask / gateway / DNS / static routes / IPv6
+mode** against the live system. Routes are matched as *networks* (dest normalized to CIDR —
+macOS `netstat` writes the compressed `10/8` form), never as strings, and `metric` is
+deliberately not compared because macOS does not report it. A field the platform cannot read
+(`None`) is not a mismatch; an explicit empty read (`Some("")`) is — that is what makes
+"cleared DNS on a static address" a real, rescuable failure.
+
 `restore_from_snapshot` restores both the network config **and the pre-existing routes on the same  
 NIC** — a failed apply must never strip a third-party route the user already had. `Stage3A::Failed`  
 is the **only** result that blocks 3B (rule 3 in §3.2).

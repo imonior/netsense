@@ -72,6 +72,21 @@ pub fn normalize_proxy_url(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{rest}"))
 }
 
+/// 界面上那三态（`direct` / `system` / `manual` + 地址）→ 这一次请求的出口。
+///
+/// 抽成共享函数是因为同一句判定有两个消费者：`ipc::set_update_proxy`（存盘）与
+/// `ipc::probe_public_ip`（探测一个还没存下来的候选）。两边各写一遍时，改一处忘另一处
+/// 的后果是「探测走的根本不是保存后要走的那条路」—— 而探测结果正是用户做选择的依据。
+/// 认不出的 mode 或形状不对的地址一律 `None`，由调用方决定怎么报错。
+pub fn choice_from_ui(mode: &str, url: &str) -> Option<ProxyChoice> {
+    match mode {
+        "direct" => Some(ProxyChoice::Direct),
+        "system" => Some(ProxyChoice::Follow),
+        "manual" => normalize_proxy_url(url).map(ProxyChoice::Use),
+        _ => None,
+    }
+}
+
 /// 这一次请求该给 curl 追加哪些代理参数。`system` 是**现在**读到的系统代理地址
 /// （只在 [`ProxyChoice::Follow`] 时用到；读不到就是 `None`，等同没配代理）。
 ///
@@ -373,5 +388,23 @@ mod tests {
         ] {
             assert_eq!(normalize_proxy_url(bad), None, "{bad} 不该收下");
         }
+    }
+
+    /// 界面三态 → 出口：`manual` 的地址要过同一道形状检查，认不出的 mode 一律 `None`
+    /// （调用方报错，而不是猜一个默认出口）。
+    #[test]
+    fn ui_choices_map_to_the_same_exit_the_saver_would_store() {
+        assert_eq!(choice_from_ui("direct", ""), Some(ProxyChoice::Direct));
+        assert_eq!(choice_from_ui("system", ""), Some(ProxyChoice::Follow));
+        assert_eq!(
+            choice_from_ui("manual", "http://127.0.0.1:7890"),
+            Some(ProxyChoice::Use("http://127.0.0.1:7890".into()))
+        );
+        for bad_mode in ["", "DIRECT", "auto", "manual "] {
+            assert_eq!(choice_from_ui(bad_mode, ""), None, "{bad_mode} 不该认出");
+        }
+        // 形状不对的地址：与保存路径同一句判据，探测因此不会走上一条保存时会被拒的路。
+        assert_eq!(choice_from_ui("manual", "127.0.0.1:7890"), None);
+        assert_eq!(choice_from_ui("manual", ""), None);
     }
 }

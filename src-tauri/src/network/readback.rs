@@ -6,10 +6,12 @@
 //! 把「读不到」判成失败会让大量本来正确的下发被误报为 ERROR，
 //! 而误报的代价（用户从此不敢信状态灯）比漏报更高。
 
-use crate::config::{Mode, NetworkConfig};
+use crate::config::model::RouteConfig;
+use crate::config::{Mode, NetworkConfig, V6Mode};
 use crate::i18n;
 use crate::platform::{InterfaceStatus, NetworkPlatform};
 use std::fmt;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyFailure {
@@ -33,13 +35,32 @@ impl fmt::Display for VerifyFailure {
     }
 }
 
+/// 采样 + 判定。`pre_existing` 是下发前采集到的路由表（`apply_3a` 快照里的那一份），
+/// 只用来分辨「路由表读不到」与「表里确实没有这条路由」—— 两者的 [`NetworkPlatform::get_routes`]
+/// 都返回空 `Vec`，但前者不能算不符（与 DNS 的 `None` 同一条判据），后者要判失败。
 pub fn readback_match<P: NetworkPlatform>(
     plat: &P,
     want: &NetworkConfig,
+    pre_existing: &[RouteConfig],
 ) -> Result<(), VerifyFailure> {
     // `fresh_status` 而不是 `get_status`：校验循环靠的是「每次采样都真的去问一次系统」，
     // 拿到一份 TTL 内的旧快照等于少一次重试机会。
-    check(&plat.fresh_status(), want)
+    let mut st = plat.fresh_status();
+    // 路由表不在 `get_status` 里（多一次子进程，面板用不到）：只有这份 profile 真的配了
+    // 路由时才去采，没配路由的配置不多付这次开销。
+    if !want.routes.is_empty() {
+        let now = plat.get_routes();
+        if now.is_empty() && !pre_existing.is_empty() {
+            // 采回来是空的，而下发前同一张表上是有路由的 —— 一台活着的机器不可能一条
+            // IPv4 路由都没有，所以这一次是**读取失败**，不是「路由没进表」。判失败会把
+            // 本来正确的下发回滚掉，因此摘掉路由期望，让本轮只校验其余字段。
+            let mut relaxed = want.clone();
+            relaxed.routes.clear();
+            return check(&st, &relaxed);
+        }
+        st.routes = now;
+    }
+    check(&st, want)
 }
 
 /// 纯函数版本：把采样与判定分开，便于用假数据覆盖各种不符组合。
@@ -103,6 +124,43 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
         }
     }
 
+    // 静态路由：逐条核对「加的在了、删的没了」。
+    //
+    // 这一步曾经缺席，于是 `apply_3a` 对路由只认命令退出码 —— 而 `netsh` / `route` /
+    // `ip route` 在「路由已存在」时都返回 0 且不做任何事，「期望的没进去」与「进去了」
+    // 在退出码上完全同形。判据是 dest（归一化成标准 CIDR）+ gateway；**不比 metric** ——
+    // macOS 的 `netstat` 根本不给度量值（恒 0），拿它判等于全平台误报。
+    for r in &want.routes {
+        let hit = got.routes.iter().any(|g| route_matches(r, g));
+        if r.delete {
+            if hit {
+                mismatches.push(i18n::tf("net.route_left", &[("dest", &r.dest)]));
+            }
+        } else if !hit {
+            mismatches.push(i18n::tf(
+                "net.route_missing",
+                &[
+                    ("dest", &r.dest),
+                    ("gw", r.gateway.as_deref().unwrap_or("-")),
+                ],
+            ));
+        }
+    }
+
+    // IPv6 模式：期望与实读都是 off / automatic / manual 时才比。读不到一律不判 ——
+    // Windows 的「关 IPv6」是禁用 ms_tcpip6 绑定，之后 `Get-NetIPInterface` 连 IPv6 行
+    // 都没有，`v6mode` 于是是 None：那不是「模式不对」，是「这一支上读不回来」。
+    if let (Some(want_v6), Some(got_v6)) = (want.v6mode.as_ref(), got.v6mode.as_deref()) {
+        let want_s = match want_v6 {
+            V6Mode::Off => "off",
+            V6Mode::Automatic => "automatic",
+            V6Mode::Manual => "manual",
+        };
+        if got_v6.trim() != want_s {
+            mismatches.push(mismatch("v6mode", want_s, Some(got_v6.trim())));
+        }
+    }
+
     if mismatches.is_empty() {
         Ok(())
     } else {
@@ -147,6 +205,75 @@ fn split_list(s: &str) -> Vec<String> {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
+}
+
+/// 一条配置路由与一条实采路由是否指向同一件事。
+///
+/// dest 的书写形状三平台各不一样：配置与 Windows `Get-NetRoute` / Linux `ip route` 都是
+/// `10.0.0.0/8`，而 **macOS 的 `netstat -rn` 是压缩写法**（`10/8`，`192.168.1` 表示 /24）
+/// —— 直接比字符串会让 macOS 上每一条路由都不相符，所以先归一化再比。
+/// 配置这一支没带网关（`delete`）时 dest 对上了就算；带了就必须是同一个地址。
+fn route_matches(want: &RouteConfig, got: &RouteConfig) -> bool {
+    if !dest_eq(&want.dest, &got.dest) {
+        return false;
+    }
+    match want.gateway.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => got.gateway.as_deref().map(str::trim).filter(|s| !s.is_empty()) == Some(w),
+        None => true,
+    }
+}
+
+/// 两种 dest 写法是否指向同一个网络。任一侧归一化失败时退回原样比字符串。
+fn dest_eq(a: &str, b: &str) -> bool {
+    match (normalize_dest(a), normalize_dest(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.trim() == b.trim(),
+    }
+}
+
+/// 收敛成 `a.b.c.d/n` 的标准形状：`default` → `0.0.0.0/0`，主机位掩掉；
+/// 无斜杠的按八位组数推前缀（macOS netstat 的 `10` → /8、`192.168.1` → /24），
+/// 段数不足的地址补零（`10` → `10.0.0.0`）。解析不成 IPv4 返回 `None`，
+/// 由调用方退回字符串比对。
+fn normalize_dest(dest: &str) -> Option<String> {
+    let s = dest.trim();
+    if s.eq_ignore_ascii_case("default") {
+        return Some("0.0.0.0/0".to_string());
+    }
+    let (addr, prefix) = match s.split_once('/') {
+        Some((a, p)) => (a, p.trim().parse::<u32>().ok()?),
+        None => {
+            let octets = s.split('.').count();
+            (s, match octets {
+                1 => 8,
+                2 => 16,
+                3 => 24,
+                4 => 32,
+                _ => return None,
+            })
+        }
+    };
+    if prefix > 32 {
+        return None;
+    }
+    let ip = pad_ipv4(addr)?;
+    // prefix == 0 时 `!0u32 << 32` 是溢出移位，单独兜底。
+    let mask: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+    Some(format!("{}/{}", Ipv4Addr::from(u32::from(ip) & mask), prefix))
+}
+
+/// 段数不足四段的点分地址补零后解析：`10` → `10.0.0.0`，`192.168.1` → `192.168.1.0`
+/// （macOS `netstat -rn` 的目的地就是这种压缩形状）。超过四段或某段不是数字 → `None`。
+fn pad_ipv4(addr: &str) -> Option<Ipv4Addr> {
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let mut nums = [0u8; 4];
+    for (i, p) in parts.iter().enumerate() {
+        nums[i] = p.trim().parse().ok()?;
+    }
+    Some(Ipv4Addr::from(nums))
 }
 
 #[cfg(test)]
@@ -302,5 +429,124 @@ mod tests {
         // 读不到（None）仍然不判失败 —— 读不到不等于不符，这条判据没有变。
         let unreadable = InterfaceStatus { dns: None, ..got };
         check(&unreadable, &want).expect("读不到 DNS 时不参与判定");
+    }
+
+    /// 一条静态路由的完整期望（地址/DNS 都对齐，只留路由这一项在检验）。
+    fn with_route(routes: Vec<RouteConfig>) -> (NetworkConfig, InterfaceStatus) {
+        let want = NetworkConfig {
+            mode: Mode::Manual,
+            ip: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1".into()),
+            routes,
+            ..Default::default()
+        };
+        let got = InterfaceStatus {
+            connected: true,
+            ipv4: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1".into()),
+            ..Default::default()
+        };
+        (want, got)
+    }
+
+    fn route(dest: &str, gw: &str, delete: bool) -> RouteConfig {
+        RouteConfig {
+            dest: dest.into(),
+            gateway: Some(gw.into()),
+            metric: 0,
+            delete,
+        }
+    }
+
+    #[test]
+    fn a_route_that_landed_passes() {
+        let (want, mut got) = with_route(vec![route("10.0.0.0/8", "192.168.1.1", false)]);
+        got.routes = vec![route("10.0.0.0/8", "192.168.1.1", false)];
+        check(&got, &want).expect("路由在表里就必须通过");
+    }
+
+    /// 命令返回 0 但路由没进表（三平台的 route 工具对「已存在」都返回 0）——
+    /// 这正是回读要拦的那类静默失败，不能只认退出码。
+    #[test]
+    fn a_route_that_never_landed_is_a_failure() {
+        let (want, got) = with_route(vec![route("10.0.0.0/8", "192.168.1.1", false)]);
+        let f = check(&got, &want).expect_err("路由不在表里必须判失败");
+        assert!(
+            f.to_string().contains("10.0.0.0/8"),
+            "报错要指名是哪条路由（dest 各语言逐字保留）: {}",
+            f
+        );
+    }
+
+    #[test]
+    fn a_deleted_route_must_actually_be_gone() {
+        let (want, mut got) = with_route(vec![route("10.0.0.0/8", "192.168.1.1", true)]);
+        got.routes = vec![route("10.0.0.0/8", "192.168.1.1", false)];
+        check(&got, &want).expect_err("该删的路由还在表里必须判失败");
+        // 删干净了就通过。
+        got.routes = vec![route("192.168.0.0/16", "192.168.1.1", false)];
+        check(&got, &want).expect("目标路由不在表里即通过");
+    }
+
+    /// macOS `netstat -rn` 写的是压缩形状（`10/8`、`192.168.1`），与配置里的
+    /// `10.0.0.0/8` / `192.168.1.0/24` 是同一条路由 —— 判据必须是网络而非字符串。
+    #[test]
+    fn route_dest_is_compared_as_a_network_not_a_string() {
+        let (want, mut got) = with_route(vec![route("10.0.0.0/8", "192.168.1.1", false)]);
+        got.routes = vec![route("10/8", "192.168.1.1", false)];
+        check(&got, &want).expect("macOS 的压缩写法 10/8 就是 10.0.0.0/8");
+        got.routes = vec![route("10.1.2.3/8", "192.168.1.1", false)];
+        check(&got, &want).expect("主机位不同但同一网络（掩回 10.0.0.0/8）算相符");
+        got.routes = vec![route("11.0.0.0/8", "192.168.1.1", false)];
+        check(&got, &want).expect_err("不同网络必须判失败");
+    }
+
+    #[test]
+    fn route_gateway_must_match_the_one_asked_for() {
+        let (want, mut got) = with_route(vec![route("10.0.0.0/8", "192.168.1.1", false)]);
+        got.routes = vec![route("10.0.0.0/8", "10.1.1.1", false)];
+        check(&got, &want).expect_err("dest 对上网关不对，仍不是我们要的那条");
+    }
+
+    #[test]
+    fn v6_mode_mismatch_is_a_failure() {
+        let mut want = manual();
+        want.v6mode = Some(V6Mode::Off);
+        let got = InterfaceStatus {
+            ipv4: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1,8.8.8.8".into()),
+            v6mode: Some("automatic".into()),
+            ..Default::default()
+        };
+        let f = check(&got, &want).expect_err("IPv6 模式不符必须判失败");
+        assert!(f.to_string().contains("v6mode"), "报错要指名 v6mode: {}", f);
+    }
+
+    /// Windows「关 IPv6」是禁用 ms_tcpip6 绑定，之后 `Get-NetIPInterface` 没有 IPv6 行，
+    /// 读回来是 None —— 那是读不到，不是模式不对。
+    #[test]
+    fn v6_mode_unreadable_is_not_a_failure() {
+        let mut want = manual();
+        want.v6mode = Some(V6Mode::Off);
+        let got = InterfaceStatus {
+            ipv4: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1,8.8.8.8".into()),
+            v6mode: None,
+            ..Default::default()
+        };
+        check(&got, &want).expect("IPv6 模式读不到时不参与判定");
+        let got2 = InterfaceStatus {
+            v6mode: Some("off".into()),
+            ..got
+        };
+        check(&got2, &want).expect("读到的模式与期望一致时通过");
     }
 }

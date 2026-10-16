@@ -124,11 +124,23 @@ fn netsh_addr_static(iface: &str, ip: &str, mask: &str, gw: &str) -> String {
     )
 }
 
-/// DNS 清空为 DHCP：netwsh 同样会因"已是 DHCP"返回 1；这里只核验接口存在（能拦下"接口不存在"
-/// 的真错误），DNS 清空本身是幂等且安全的。
+/// DNS 清空为 DHCP。netwsh 对「已是 DHCP」会打印成功提示却返回 1，退出码因此判不了成败
+/// （与 `netsh_addr_dhcp` 同一段理由），这里的判据是**注册表里的静态 NameServer 真的没了**：
+/// `source=dhcp` 的实质就是把 `Tcpip\Parameters\Interfaces\{guid}` 下的静态列表清掉，
+/// 而 netsh 是同步写完才返回的，所以读回来是稳的 —— DHCP 递来的地址根本不进这个键，
+/// 不存在「等一等就有了」的竞态（与 `netsh_dns_static` 逐服务器核验 `ServerAddresses`
+/// 同一套路，只是一个核「在」、一个核「不在」）。
+/// 读不到注册表（键不存在/权限）时不判失败：那是读不到，不是没清掉 —— 与回读层
+/// 「`None` 不算不符」同一条判据；3A 的回读循环仍会在运行时侧兜底。
 fn netsh_dns_clear(iface: &str) -> String {
     format!(
-        "& netsh.exe @('interface','ipv4','set','dnsservers',{0},'source=dhcp') | Out-Null;\r\n$null=Get-NetAdapter -Name {1} -ErrorAction Stop;",
+        "& netsh.exe @('interface','ipv4','set','dnsservers',{0},'source=dhcp') | Out-Null;\r\n\
+         $null=Get-NetAdapter -Name {1} -ErrorAction Stop;\r\n\
+         $__g=(Get-NetAdapter -Name {1} -ErrorAction SilentlyContinue|Select-Object -ExpandProperty InterfaceGuid);\r\n\
+         if($__g){{\r\n\
+         $__ns=(Get-ItemProperty -Path \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$__g\" -Name NameServer -ErrorAction SilentlyContinue).NameServer;\r\n\
+         if(\"$__ns\".Trim() -ne ''){{ throw \"set dnsservers dhcp failed: static NameServer still present\" }}\r\n\
+         }};",
         psq(&format!("name={iface}")),
         psq(iface),
     )
@@ -539,6 +551,7 @@ $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix
   prefix  = $ip.PrefixLength;
   gateway = $rt.NextHop;
   dns     = ($dns.ServerAddresses -join ',');
+  dns_ok  = [bool]$dns
   v6dhcp  = $v6.Dhcp
 } | ConvertTo-Json -Compress"#
     );
@@ -561,7 +574,14 @@ $rt   = Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix
     st.ssid = get("ssid").or_else(|| get("prof"));
     st.ipv4 = get("ipv4");
     st.gateway = get("gateway");
-    st.dns = get("dns");
+    // `dns_ok` 分辨「读到了，而且一个都没有」与「根本没读到」：前者报 `Some("")` ——
+    // 静态地址这一支上「交回自动获取」落到系统里就是一个 nameserver 都没有，回读判据
+    // （`network::readback` 的 DNS 三分支）要看得见这个事实才会走兜底/回滚；后者照旧
+    // `None`（读不到不算不符）。空列表经 `-join` 已是 ""，这里的差别只在 `Some`/`None`。
+    st.dns = match v.get("dns_ok").and_then(|x| x.as_bool()) {
+        Some(true) => Some(get("dns").unwrap_or_default()),
+        _ => None,
+    };
     st.netmask = v
         .get("prefix")
         .and_then(|x| x.as_u64())

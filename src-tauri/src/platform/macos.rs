@@ -2092,16 +2092,26 @@ fn read_status() -> InterfaceStatus {
     if let Some(svc) = wifi_service() {
         if let Ok(o) = run("networksetup", &["-getdnsservers", &svc]) {
             let dns = o.trim();
-            // 未设置时输出英文提示语（"There aren't any DNS Servers set on ..."）或 "Empty"，
-            // 与 `dns_of_service` 同一套判据；空输出同样视为无 DNS，绝不填 Some("")。
-            if !dns.starts_with("There") && dns != "Empty" && !dns.is_empty() {
+            // 「Empty」/「There aren't any DNS Servers set on …」是命令成功执行之后对
+            // 「没有」的**明确陈述**，按回读判据报 `Some("")`：静态地址这一支上「交回
+            // 自动获取」的真实结果就是一个 nameserver 都没有，回读层要看得见这个事实
+            // 才会走 DNS 兜底 / 回滚（见 `network::readback` 的 DNS 三分支）。
+            // 命令本身失败（服务名对不上等）时 `run()` 返回 Err，`dns` 留 `None` ——
+            // 读不到不算不符，与 `Some("")` 不是一回事。
+            if dns == "Empty" || dns.starts_with("There") {
+                st.dns = Some(String::new());
+            } else if !dns.is_empty() {
                 st.dns = Some(dns.split_whitespace().collect::<Vec<_>>().join(","));
             }
         }
         if let Ok(o) = run("networksetup", &["-getinfo", &svc]) {
             // 取不到「IPv6:」行就如实留 None —— 绝不伪造 "automatic"（那是配置编辑器的事，
-            // 不是读路径能替系统下结论的）。
-            st.v6mode = parse_kv(&o, "IPv6:");
+            // 不是读路径能替系统下结论的）。读到了就归一成**小写**的 off / automatic /
+            // manual：这三个值是跨平台 canonical 集（Windows 与 Linux 发出来的就是小写），
+            // `restore_snapshot_impl` 按同一组字符串把快照翻译回 `V6Mode` —— 这里若留着
+            // networksetup 的大写 "Automatic"/"Off"，3A 回滚时一条都匹配不上，
+            // IPv6 模式会被静默地不恢复。
+            st.v6mode = parse_kv(&o, "IPv6:").map(|s| s.to_ascii_lowercase());
         }
     }
     if let Some(gw) = default_gateway() {

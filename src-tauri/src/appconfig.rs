@@ -5,25 +5,24 @@
 //! 的界面偏好。混在一起的话，改界面语言会惊动配置热重载与网络重评估，而一份写坏的自动化
 //! 配置也会连带让「日志留几天」一起读不出来。
 //!
-//! ## 只有四个字段
+//! ## 每个字段都过同一句判据
 //!
-//! `language`、`theme`、`log_retention_days`、`proxy`。看起来该有第五个的「开机启动」**不在这里**：
-//! 它的真相在操作系统那一侧（LaunchAgent / 登录项 / 注册表 Run 键），用户也可以绕开本应用
-//! 直接改它（系统设置里就能关掉某个登录项）。存一份布尔值就等于给自己造一个会说谎的缓存 ——
-//! 界面上的勾选框每次都是**读系统**读出来的。
+//! `language`、`theme`、`log_retention_days`、`proxy`、`window_sizes`、`silent_execution`、
+//! `update_mirror`、`mirror_hidden`、`dns_fallback`：改它们都不改变任何 Profile 的匹配结果，
+//! 也不改变任何下发内容 —— 能改这两样的只有 `config.json`。看起来该有第十个的「开机启动」
+//! **不在这里**：它的真相在操作系统那一侧（LaunchAgent / 登录项 / 注册表 Run 键），用户也可以
+//! 绕开本应用直接改它（系统设置里就能关掉某个登录项）。存一份布尔值就等于给自己造一个会说谎的
+//! 缓存 —— 界面上的勾选框每次都是**读系统**读出来的。
 //!
 //! `theme` 和 `language` 同一条判据，也同一个口径：认不出的值（手改的、从别的机器备过来的）
 //! 退回「跟随系统」，而不是让整份文件一起读不出来 —— 配色错了可远比语言丢了容易发现，
 //! 但它同样不该让用户打不开应用。
 //!
-//! `proxy` 进来是因为它过得了同一句判据：改了它不会改变自动化行为，只改变「检查更新、下载
-//! 安装包」这两次对外请求走哪条路。放在 `config.json` 里就等于让一台机器的网络出口跟着
-//! 自动化配置一起同步给另一台机器。
-//!
-//! `update_mirror` 的判据与 `proxy` 是同一句，只是它换的是**地址**而不是出口：改了它同样
-//! 不改变自动化行为，也不改变「谁说了这个安装包是什么」—— SHA256SUMS 永远直连 GitHub 取，
-//! 见 [`UpdateMirror`]。它更不该进 `config.json`：镜像是按地域挑的，跟着自动化配置同步到
-//! 另一台机器只会把一条快路变成一条慢路。
+//! `proxy` 与 `update_mirror` 是同一句判据的两半：一个换**出口**、一个换**地址**，改了都只
+//! 改变「检查更新、下载安装包」这两次对外请求走哪条路，不改变「谁说了这个安装包是什么」
+//! （那一层由内置 root 公钥验签，见 [`UpdateMirror`] 与 `update::verify_trust_chain`）。
+//! 它们更不该进 `config.json`：网络出口与镜像是按地域挑的，跟着自动化配置同步到另一台机器
+//! 只会把一条快路变成一条慢路。`mirror_hidden` 跟着 `update_mirror` 住，同此理。
 //!
 //! ## 三平台的开机启动落地方式
 //!
@@ -102,14 +101,16 @@ impl WindowSizes {
 
 /// 升级安装包的下载镜像。
 ///
-/// ⚠️ 它**只改下载走哪条路**，不改「谁说了这个安装包是什么」：那一份 SHA256SUMS 永远
-/// 直连 GitHub 取（见 `update::native_update` 与 `ipc::install_verdict`）。
+/// ⚠️ 它**只改下载走哪条路**，不改「谁说了这个安装包是什么」：SHA256SUMS 与配套的 `.sig`
+/// 也经镜像取回，但签名锚在**内置 root 公钥**上（两层信任链，见
+/// `update::verify_trust_chain`）—— 镜像换不掉校验值，反而能让「GitHub 被墙」时更新仍可完成。
 ///
 /// 这不是洁癖，而是那条校验本身的形状 —— `update::release_asset_pinned` 挡的正是「自己
 /// 托管一个 https 站点，同时给出二进制与配套的 SHA256SUMS」：**字节与校验值一旦由同一个
-/// 第三方给出，哈希可以逐字节对上而校验一步也验不出来**。所以镜像只覆盖「版本清单」与
-/// 「安装包字节」这两样大件，取校验值那一次请求仍走 GitHub 自己。分开之后镜像最坏只能让
-/// 下载变慢或下坏（哈希不符即中止安装），不能让一个假的安装包通过校验。
+/// 第三方给出，哈希可以逐字节对上而校验一步也验不出来**。有了签名链之后这一点才真的解决：
+/// 校验值那一次即使也走镜像，校验依然成立 —— 字节可以来自任何地方，「这些字节就是官方说的
+/// 那个安装包」由 root 公钥签的 `.sig` 说了算。镜像最坏只能让下载变慢或下坏（哈希或签名
+/// 不符即中止安装），不能让一个假的安装包通过校验。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateMirror {
@@ -138,6 +139,19 @@ impl UpdateMirror {
         }
     }
 }
+
+/// 设置界面「下载镜像」下拉里摆出来的预置前缀。
+///
+/// 只是把社区常用的几个摆出来、少打一串字：这类服务会换地址、会关停，所以「自定义前缀」
+/// 那一档始终留着，填什么都不必等下一个版本。用户删掉的记在 [`AppConfig::mirror_hidden`]
+/// 里，而不是把这份列表本身存下来 —— 列表跟着版本走（新版本可能新增预设），存一份自选
+/// 清单就多一个会说谎的来源。
+pub const MIRROR_PRESETS: [&str; 4] = [
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+    "https://ghproxy.net/",
+    "https://mirror.ghproxy.com/",
+];
 
 /// 一个能用的镜像前缀长什么样：`https://` 开头、host 非空、不含空白与路径回退。
 ///
@@ -218,6 +232,12 @@ pub struct AppConfig {
     /// 默认关闭，服务器由用户自己填 —— 本应用不预置任何公共解析器。
     #[serde(default, skip_serializing_if = "DnsFallback::is_off")]
     pub dns_fallback: DnsFallback,
+    /// 用户删掉的预置镜像（见 [`MIRROR_PRESETS`]）。
+    ///
+    /// 存的是「不再展示」而不是「用户自选列表」：预设跟着版本走，删掉的留下记录，
+    /// 新版本新增的预设才不会被一份旧清单挡住。恢复默认时有处可去（一键恢复）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mirror_hidden: Vec<String>,
 }
 
 /// DNS 兜底：3A 下发之后系统里**一个 nameserver 都没有**时，改下这几台。
@@ -288,6 +308,7 @@ impl Default for AppConfig {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            mirror_hidden: Vec::new(),
         }
     }
 }
@@ -338,7 +359,40 @@ impl AppConfig {
         self.window_sizes = self.window_sizes.clamped();
         self.update_mirror = self.update_mirror.clamped();
         self.dns_fallback = self.dns_fallback.clone().clamped();
+        self.mirror_hidden = clamp_mirror_hidden(&self.mirror_hidden);
         self
+    }
+
+    /// 此刻该展示的预置镜像：代码里那份减去用户删掉的。
+    pub fn mirror_presets(&self) -> Vec<String> {
+        MIRROR_PRESETS
+            .iter()
+            .filter(|p| !self.mirror_hidden.iter().any(|h| h == *p))
+            .map(|p| p.to_string())
+            .collect()
+    }
+
+    /// 删掉一个预置镜像。不是预设时返回 `false`（自定义前缀不进这张表）。
+    ///
+    /// 正戴着它的那一个**同时退回直连**：否则下拉会停在一个已经不存在的选项上，
+    /// 而界面按「已选中的值」回显 —— 与「没写进去就不许停在没写进去的那一档」同一条。
+    /// 重复删是幂等的（记一笔不重复的记录）。
+    pub fn hide_mirror_preset(&mut self, prefix: &str) -> bool {
+        if !MIRROR_PRESETS.contains(&prefix) {
+            return false;
+        }
+        if !self.mirror_hidden.iter().any(|h| h == prefix) {
+            self.mirror_hidden.push(prefix.to_string());
+        }
+        if matches!(&self.update_mirror, UpdateMirror::Prefix(p) if p == prefix) {
+            self.update_mirror = UpdateMirror::Direct;
+        }
+        true
+    }
+
+    /// 恢复全部被删的预设（重新摆出来）。不动当前选中的镜像 —— 用户没有要求换它。
+    pub fn restore_mirror_presets(&mut self) {
+        self.mirror_hidden.clear();
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -403,6 +457,22 @@ impl AppConfig {
 
 pub fn clamp_retention(days: u32) -> u32 {
     days.clamp(MIN_LOG_RETENTION_DAYS, MAX_LOG_RETENTION_DAYS)
+}
+
+/// 把 hidden 列表收成「只可能是预设、且不重复」。
+///
+/// 这份文件用户可以直接编辑：写进来的任何东西都不该让界面上的预设列表变形 ——
+/// `mirror_hidden` 回答的是「用户删过哪些预设」，不是一个自由列表。非预设条目直接丢：
+/// 它挡不住任何东西，留着只会让「恢复预设」少恢复一个用户没删过的。
+fn clamp_mirror_hidden(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in list {
+        let p = p.trim();
+        if MIRROR_PRESETS.contains(&p) && !out.iter().any(|x| x == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
 }
 
 /// 配色档位收敛：三档之外的值都当没设过。
@@ -752,6 +822,7 @@ mod tests {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            mirror_hidden: Vec::new(),
         };
         cfg.save(&p).unwrap();
         assert_eq!(AppConfig::load(&p).unwrap(), cfg);
@@ -785,6 +856,7 @@ mod tests {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            mirror_hidden: Vec::new(),
         }
         .clamped();
         assert_eq!(bad.proxy, ProxySetting::Direct);
@@ -799,6 +871,7 @@ mod tests {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            mirror_hidden: Vec::new(),
         }
         .clamped();
         assert_eq!(
@@ -926,6 +999,57 @@ mod tests {
         assert_eq!(old.update_mirror, UpdateMirror::Direct);
     }
 
+    /// 删预置镜像：列表少它、hidden 记上；正戴着它的那一个**退回直连** ——
+    /// 否则下拉会停在一个已经不存在的选项上，界面还按「已选中」回显。
+    #[test]
+    fn hiding_a_preset_drops_it_and_reverts_an_active_choice() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.mirror_presets().len(), MIRROR_PRESETS.len());
+
+        // 删一个没用过的：只是从列表消失。
+        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[1]));
+        assert!(!cfg.mirror_presets().iter().any(|p| p == MIRROR_PRESETS[1]));
+        assert_eq!(cfg.mirror_presets().len(), MIRROR_PRESETS.len() - 1);
+
+        // 删正在用的那一个：选中值退回直连。
+        cfg.update_mirror = UpdateMirror::Prefix(MIRROR_PRESETS[2].into());
+        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[2]));
+        assert_eq!(cfg.update_mirror, UpdateMirror::Direct);
+
+        // 重复删是幂等的；不是预设的一律拒（自定义前缀不进这张表）。
+        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[2]));
+        assert_eq!(cfg.mirror_hidden.len(), 2);
+        assert!(!cfg.hide_mirror_preset("https://example.com/"));
+
+        // 恢复：预设全部回来，当前选中的镜像不动（用户没有要求换它）。
+        cfg.update_mirror = UpdateMirror::Prefix("https://example.com/".into());
+        cfg.restore_mirror_presets();
+        assert_eq!(cfg.mirror_presets().len(), MIRROR_PRESETS.len());
+        assert_eq!(
+            cfg.update_mirror,
+            UpdateMirror::Prefix("https://example.com/".into())
+        );
+    }
+
+    /// `mirror_hidden` 是「删过哪些预设」的一张记录，不是一个自由列表：手改文件写进来的
+    /// 非预设条目在加载时就丢掉，trim 与去重也在这里做。
+    #[test]
+    fn mirror_hidden_only_keeps_real_presets() {
+        let mut cfg = AppConfig::default();
+        cfg.mirror_hidden = vec![
+            format!("  {}  ", MIRROR_PRESETS[0]), // trim 后是预设 → 收
+            MIRROR_PRESETS[0].into(),             // 重复 → 去重
+            "https://example.com/".into(),        // 不是预设 → 丢
+            String::new(),                        // 空 → 丢
+        ];
+        let clamped = cfg.clamped();
+        assert_eq!(clamped.mirror_hidden, vec![MIRROR_PRESETS[0].to_string()]);
+
+        // 没删过任何东西时，这个键不出现在文件里。
+        let s = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!s.contains("mirror_hidden"), "unexpected key in: {s}");
+    }
+
     /// DNS 兜底默认关闭；「开了却没有一台合法服务器」在加载时收成**关着** ——
     /// 否则 3A 会以为有兜底可用，真到用时什么都补不上，而界面上写的是「已启用」。
     #[test]
@@ -990,6 +1114,7 @@ mod tests {
                 silent_execution: false,
                 update_mirror: UpdateMirror::default(),
                 dns_fallback: DnsFallback::default(),
+                mirror_hidden: Vec::new(),
             }
             .clamped()
             .log_retention_days,

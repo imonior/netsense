@@ -676,9 +676,17 @@ fn device_ip_nmcli(dev: &str) -> DeviceIp {
         out.netmask = prefix;
     }
     out.gateway = get_field(dev, "IP4.GATEWAY");
-    let dns = get_field_all(dev, "IP4.DNS");
-    if !dns.is_empty() {
-        out.dns = Some(dns.join(","));
+    // IP4.DNS：`nmcli` 跑通了而列表为空 = 明确读到「没有」（`Some("")`）—— 静态地址这一支上
+    // 「交回自动获取」在 Linux 上的真实结果就是一个 nameserver 都没有，回读层要看得见这个
+    // 事实才会走兜底/回滚；命令本身失败（设备不存在等）才是读不到（`None`）。
+    // 过滤规则与 `get_field_all` 一致（丢空行与 nmcli 的 "--" 占位）。
+    if let Ok(o) = nmcli(&["-g", "IP4.DNS", "device", "show", dev]) {
+        let list: Vec<String> = o
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && l != "--")
+            .collect();
+        out.dns = Some(list.join(","));
     }
     // 全局 IPv6：跳过 link-local（`fe80:`），取第一条真正全局地址（与 `list_interfaces` 同判据）。
     // `IP6.ADDRESS` 形如 `2001:db8::1/64`：地址与前缀都在这一格里，一次拆完。

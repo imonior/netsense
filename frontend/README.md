@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 599 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 615 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -214,7 +214,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，51 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，56 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -229,7 +229,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `delete_profile` | `id` | 删除并按 id 找不到时报错 |
 | `apply_profile` | `id` | 请求「立即应用」。**不绕过条件**：引擎重评该 Profile 自己的 Rules/Conditions，禁用中直接拒、冲突中拒绝并回 `netsense://action` |
 | `force_dhcp` | — | 把当前网络（主网卡）切回 DHCP **并让自动化暂停**：引擎停止自动评估、下发与健康监测，直到网络下一次变化（采样照旧，变化即解除；面板/编辑器显示 PAUSED）。异步，结果走 `netsense://action` |
-| `get_public_ip` | — | 现探现回当前出口公网 IP（架构 Egress / Public IP 层，独立于任何网卡）：走系统代理设置，4s 超时，只用于面板展示、不落盘、不参与条件匹配。取不到回 `null`，面板整行收起。端点见 `ipc.rs` 的 `PUBLIC_IP_URL` |
+| `get_public_ip` | — | 现探现回当前出口公网 IP 与归属地（架构 Egress / Public IP 层，独立于任何网卡）：走**软件设置里存着的那一个出口**（与更新下载同一套代理判定），返回 JSON 字符串 `{"ip":..,"location":..}`，取不到回 `null`。归属地可选 —— ipip.net / ip.sb 被墙时退到只回 IP 的 ipify。面板那一行只摆 IP（面板窄），设置页两者都摆。端点在 `ipc.rs` 的 `IP_ENDPOINTS` |
+| `probe_public_ip` | `mode`, `url` | 探测一个**还没存下来的**候选出口：`direct` / `system` / `manual` + 地址，判定与 `set_update_proxy` 共用 `netproxy::choice_from_ui` 一句 —— 探测走的必须是保存后将会走的那条路，否则这行数字本身就是错的。返回同 `get_public_ip` 的 JSON；出口认不出或探不到时报错（`sett.proxy_rejected` / `sett.ip_unreachable`） |
 | `probe_network` | — | 重新采样并立即评估当前网络：唯一命中就走「立即应用」那条链路（网络 + 3B），多命中只报告名字、零命中只报告，都不动网卡。不受 DHCP 暂停约束，也不解除暂停（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字）。交的是**空中那个名字**，与面板「当前网络」那一格同源，判据见上面那段 |
 | `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |
@@ -247,9 +248,12 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `open_config_folder` | — | 在系统文件管理器里打开 `config.json` 所在目录（路径由后端现算，界面不自己拼） |
 | `open_app_settings_folder` | — | 打开 `settings.json` 所在目录。**不**复用上一条：自动化配置可以来自可执行文件同级，那时两条路径不是一个目录 |
 | `proxy_speed_test` | `urls` | 逐个代理地址真的发一次升级检查请求（就是 `check_update` 那个 URL），返回 JSON 字符串数组 `[{url,ms}]`；`ms` 是 curl 的 `time_total` 换算成毫秒，连不通或地址认不出来时为 `null`。之所以非要发真请求：本机端口握手成功并不等于它真能把你代理出去 |
+| `mirror_speed_test` | `prefixes` | 逐个下载镜像候选测一次「取校验值」的真实请求，返回 `[{prefix,ms}]`；空串 = 直连 GitHub。探的是 `releases/latest/download/SHA256SUMS` —— 更新时经镜像取的正是这一类 URL，而 api.github.com 不在镜像覆盖范围内（那一批加速镜像只代理 github.com），拿 API 域名测镜像测到的其实是镜像方自己的反代站点。出口用**存着的那个代理设置**（镜像换地址、代理换出口，两个正交，测出来要同时算上两者）；候选并行探测，最慢的一个决定总时长 |
+| `hide_update_mirror` | `prefix` | 删掉一个预置镜像（`appconfig::MIRROR_PRESETS` 之一）：记进软件配置的 `mirror_hidden`，而不是把自选列表整个存下来（预设跟着版本走，存一份清单就多一个会说谎的来源）。**正戴着它的那一个会同时退回直连**。返回新状态 `{presets,mirror,hidden_count}`，界面按它重建下拉 —— 否则会显示成「选着一个已经被删掉的镜像」 |
+| `restore_update_mirror_presets` | — | 恢复全部被删的预置镜像，不动当前选中的那个。返回同 `hide_update_mirror` 的新状态 |
 | `get_proxy_state` | — | 升级请求出口的现状，JSON 字符串 `{mode,url,system_proxy}`：`mode` 是磁盘上那三态之一，`system_proxy` 只在 mode 为 system 时**现问**操作系统（macOS 一条 `scutil --proxy`，Linux 几条 `gsettings`），问不到就是 `null`。这条命令只在设置窗口打开与保存之后各调一次 —— 不进 `get_app_settings`，那个每次窗口获得焦点都会被调，popup.html 也调它 |
 | `set_update_proxy` | `mode`, `url` | 设升级请求走哪条出口：`direct` / `system` / `manual` + 一个 `scheme://host[:port]` 形状的地址。认不出的 mode 或地址一律拒绝（`sett.proxy_rejected`）而不是退回默认值 —— 这一句改的是这台机器的对外流量走哪条路。落盘 + 更新内存里的 `settings`，返回并记一条 `notify.proxy_set`；**不**惊动引擎，这份设置不参与条件求值与下发 |
-| `set_update_mirror` | `prefix` | 设安装包从哪儿下：空串 = 直连 GitHub，其余 = 前缀式镜像（`https://host/` + 原 URL，见 `appconfig::UpdateMirror`）。与 `set_update_proxy` 正交 —— 一个换出口、一个换**地址**，可同时生效。覆盖「版本清单」与「安装包字节」两样大件，**不**覆盖取 SHA256SUMS 那一次请求：字节与校验值若都由同一个第三方给出，哈希可以逐字节对上而校验一步也验不出来。形状不合法的前缀在保存时退回直连（`AppConfig::clamped`），返回值是**落盘后的真值**（直连为 `""`），界面按它回显 |
+| `set_update_mirror` | `prefix` | 设安装包从哪儿下：空串 = 直连 GitHub，其余 = 前缀式镜像（`https://host/` + 原 URL，见 `appconfig::UpdateMirror`）。与 `set_update_proxy` 正交 —— 一个换出口、一个换**地址**，可同时生效。它不改「谁说了这个安装包是什么」：SHA256SUMS 与 `.sig` 也经镜像取回，但签名锚在**内置 root 公钥**上（两层信任链，见 `update::verify_trust_chain`）—— 镜像最坏只能让下载变慢或下坏，不能让一个假的安装包通过校验。形状不合法的前缀在保存时退回直连（`AppConfig::clamped`），返回值是**落盘后的真值**（直连为 `""`），界面按它回显 |
 | `set_dns_fallback` | `enable`, `servers` | 设「DNS 兜底」：某支网络配置要求「DNS 自动获取」，而回读发现系统里一个 nameserver 都没有时，改下 `servers` 这几台（见 `network::apply_3a`）。默认关闭，**不预置任何公共解析器** —— 服务器由用户自己填：往企业内网塞一台公共 DNS 会打断内网域名解析，而把查询静默导向用户没指定的第三方解析器，本就不该由本应用替他决定。认不出的地址在 `AppConfig::clamped` 里被剔除，而「开着却没有一台合法服务器」会收成关着；返回值是**落盘后的真值**（`{enabled,servers}`），界面按它回显，否则会显示成「填了个错的却已保存」 |
 | `export_backup` | — | 导出一份备份：把自动化配置、软件配置、受信脚本目录里的脚本打成一个 JSON 文件写进 `<配置目录>/backups/`，返回文件名。脚本报错只回文本 —— 那里是 `run_script` 的 allow-list，一次静默失败会让用户以为备份是全的 |
 | `get_backups` | — | 现存备份清单（JSON 字符串，新→旧）：`[{name,bytes,modified}]`。只列形状认得出的名字，手放进去的文件不会出现在恢复选项里 |

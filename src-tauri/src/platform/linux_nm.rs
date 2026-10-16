@@ -189,7 +189,13 @@ fn read_ip4(conn: &Connection, path: &str) -> Option<Ip4Parts> {
     // （内存 4 字节 = 网络序八位组，小端数值反序，如 1.2.3.4 → 0x04030201），
     // 交给 cfg 无关的 `decode_nm_nameservers` 用 `to_ne_bytes()` 还原——切勿直接用
     // `Ipv4Addr::from(n)`，否则小端机得到 4.3.2.1 这类反序地址（旧实现即此 bug）。
+    //
+    // 属性读到了而列表为空 = 明确「没有」：报 `Some("")`。静态地址这一支上「交回自动获取」
+    // 落到系统里就是一个 nameserver 都没有，回读层（`network::readback` 的 DNS 三分支）
+    // 要看得见这个事实才会走兜底/回滚；两个属性都读不到才是 `None`（读不到不算不符）。
+    let mut dns_readable = false;
     if let Ok(list) = ip.get_property::<Vec<HashMap<String, OwnedValue>>>("NameserverData") {
+        dns_readable = true;
         let parts: Vec<String> = list
             .iter()
             .filter_map(|m| m.get("address").and_then(str_of))
@@ -201,10 +207,14 @@ fn read_ip4(conn: &Connection, path: &str) -> Option<Ip4Parts> {
     }
     if out.dns.is_none() {
         if let Ok(ns) = ip.get_property::<Vec<u32>>("Nameservers") {
+            dns_readable = true;
             if !ns.is_empty() {
                 out.dns = Some(crate::platform::decode_nm_nameservers(&ns).join(","));
             }
         }
+    }
+    if dns_readable && out.dns.is_none() {
+        out.dns = Some(String::new());
     }
 
     // 路由：`RouteData`（`aa{sv}`）每条带 `dest`(s) 与 `prefix`(u)。

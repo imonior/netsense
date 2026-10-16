@@ -32,8 +32,8 @@ const READBACK_SETTLE: Duration = Duration::from_millis(800);
 
 /// 执行 3A：快照当前状态 → 下发 → 路由 → 回读校验（必要时补 DNS 兜底）。
 ///
-/// 任一步失败都尝试回滚到快照状态，再返回 [`Stage3A::Failed`]。
-/// 调用方据此**不要**执行 3B。
+/// 回读比对覆盖地址/掩码/网关/DNS/静态路由/IPv6 模式；任一步失败都尝试回滚到快照状态，
+/// 再返回 [`Stage3A::Failed`]。调用方据此**不要**执行 3B。
 ///
 /// `dns_fallback` 是设置里那份兜底服务器列表（**空 = 没启用**，见
 /// [`crate::appconfig::DnsFallback`]）。它只在一种失败上起作用：静态地址 + 「DNS 交回
@@ -93,7 +93,7 @@ pub fn apply_3a<P: NetworkPlatform>(
     }
     let mut last: Option<VerifyFailure> = None;
     for attempt in 0..READBACK_ATTEMPTS {
-        match readback_match(plat, cfg) {
+        match readback_match(plat, cfg, &before.routes) {
             Ok(()) => return Stage3A::Applied { note: None },
             Err(f) => {
                 last = Some(f);
@@ -116,7 +116,7 @@ pub fn apply_3a<P: NetworkPlatform>(
         if f.dns_left_empty
             && !dns_fallback.is_empty()
             && plat.apply_dns_only(cfg.target, dns_fallback).is_ok()
-            && readback_match(plat, cfg).is_ok()
+            && readback_match(plat, cfg, &before.routes).is_ok()
         {
             let servers = dns_fallback.join(", ");
             crate::log::warn(&i18n::tf("net.dns_fallback_used", &[("servers", &servers)]));

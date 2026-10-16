@@ -4,6 +4,35 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [未發布]
+
+### 新增
+
+- **設定頁顯示目前公網 IP 與歸屬地，並為更新通道測速。** 代理卡會顯示出口 IP 及其歸屬地
+  （開啟設定視窗、切換代理方式、儲存後各重新整理一次）；直連與全部預設鏡像在開啟時平行探測，
+  延遲顯示在選項旁。預設鏡像可以刪除 —— 應用程式會記住刪過哪些預設（預設隨版本發布），
+  並可一鍵還原。（`ipc.rs`、`appconfig.rs`、`settings.html`）
+
+### 修復
+
+- **回讀校驗現在覆蓋靜態路由與 IPv6 模式。** 3A 此前只認路由命令的結束代碼，而 `netsh` /
+  `route` / `ip route` 在「路由已存在」時都返回 0 —— 於是靜默沒進去路由會被當成「已套用」。
+  現在回讀會把每條路由與即時路由表逐條比對（目的地正歸化成 CIDR，macOS 的壓縮寫法 `10/8`
+  因此能對上組態裡的 `10.0.0.0/8`；閘道必須一致；`metric` 不比對，因為 macOS 根本不報度量值），
+  以及組態的 IPv6 模式（`off` / `automatic` / `manual`）。讀不到路由表不算不符，讀不到 IPv6
+  模式同樣不算（Windows 停用 IPv6 繫結後這一行整個消失）。（`network/readback.rs`、`network/mod.rs`）
+- **「清空 DNS」現在會被明確讀回。** 三個平台過去都把「一個 nameserver 都沒有」報成*讀不到*
+  （`None`），使得回讀裡 `manual` + 「DNS 交回自動」這條分支 —— 正是 DNS 兜底唯一能救的那種
+  失敗 —— 永遠不會觸發。現在查詢成功且清單確實為空時報 `Some("")`，於是 `apply_3a` 會回滾
+  （或啟用設定裡 opt-in 的兜底），而不是留給使用者一部「IP 通、閘道通、網域名稱全解析不了」的
+  機器。（`platform/macos.rs`、`platform/windows.rs`、`platform/linux.rs`、`platform/linux_nm.rs`）
+- **Windows 現在會核驗「清空 DNS 為 DHCP」真的清掉了。** `netsh … source=dhcp` 在「已是 DHCP」
+  時返回 1，結束代碼證明不了任何事；命令現在還會讀回該網卡登錄檔裡的靜態 `NameServer`，
+  只要仍有殘留就算失敗。（`platform/windows.rs`）
+- **macOS 的回滾恢復 IPv6 模式了。** `networksetup -getinfo` 報的是大寫的 `IPv6: Automatic` /
+  `Off`，而快照復原比對的是小寫 canonical 值 —— 於是失敗的 3A 下發從不把 IPv6 模式改回去。
+  讀取路徑現在正歸化成與另兩個平台一致的小寫集合。（`platform/macos.rs`）
+
 ## [1.6.4] - 2026-10-10
 
 ### 修復
