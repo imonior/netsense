@@ -218,6 +218,16 @@ fn main() {
                 ],
             ));
 
+            // Windows：开机探一次常驻提权通道并落日志。这是用户侧唯一能自己判断
+            // 「为什么每次启动都要授权」的依据 —— 上一个会话的 helper 还在不在、
+            // 不在是哪种失败（CreateFile=2 从没起来 / 5 权限 / 130 版本不符），
+            // 都写进这一行（见 win_helper::probe_channel）。
+            #[cfg(target_os = "windows")]
+            log::info(&i18n::tf(
+                "app.helper_probe",
+                &[("state", platform::win_helper::probe_channel())],
+            ));
+
             app.manage(shared.clone());
 
             // 保存 AppHandle 供后续事件广播 / 面板刷新使用
@@ -270,9 +280,9 @@ fn main() {
                     || window.label() == popup::SETTINGS_LABEL
                     || window.label() == popup::LOGS_LABEL =>
             {
-                // 关掉 = 收回托盘常驻（不是退出），此刻把窗口尺寸记下来 —— 下次打开照原样
-                // 恢复并收敛到工作区，见 `popup::apply_geometry`。
-                popup::remember_size(window);
+            // 关掉 = 收回托盘常驻（不是退出），此刻把窗口几何记下来 —— 下次打开照原样
+            // 恢复并收敛到工作区，见 `popup::apply_geometry` / `popup::apply_spot`。
+            popup::remember_geometry(window);
                 api.prevent_close();
                 let _ = window.hide();
             }

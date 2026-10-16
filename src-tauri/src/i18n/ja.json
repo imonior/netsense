@@ -19,6 +19,7 @@
   "app.config_loaded": "{path} から設定を読み込みました",
   "app.startup": "NetSense v{version} を起動しました（プラットフォーム: {backend}、ログフォルダ: {dir}）",
   "app.backend": "NetSense v{version}、プラットフォーム {backend}（昇格チャネル: {channel}）",
+  "app.helper_probe": "Windows 昇格ヘルパーチャネル（起動時プローブ）: {state}",
   "app.webview2_missing": "WebView2 ランタイムが見つからないため画面を作成できません",
   "app.config_failed": "設定の読み込みに失敗しました: {error}",
   "app.config_absent": "設定ファイルはまだありません: {path} - エディタで初めて保存すると作成されます",

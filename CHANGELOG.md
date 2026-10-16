@@ -4,6 +4,20 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-10-16
+
+### Fixed
+
+- **In-app update no longer fails verification with "netsense-1.7.0-amd64.exe not in SHA256SUMS".** The update picker preferred an installer whose name was absent from the release `SHA256SUMS`, so the download succeeded but the fail-closed checksum step rejected it — even though a manually installed copy verified fine. The picker is now checksum-aware: among the installable candidates it prefers the one actually listed in `SHA256SUMS`, so a renamed or mis-listed installer no longer blocks the upgrade. A CI reverse gate now fails the build if any Release asset is missing from `SHA256SUMS`, catching this class of release accident before shipping. (`ipc.rs`, `build.yml`)
+- **Tray double-click opens the automation editor again.** A single click toggles the panel, and the second click of a double-click used to land on a panel row and apply that rule. The click is now debounced: a lone click toggles the panel only after a 500 ms double-click window; a double-click opens the automation editor directly and never opens the panel. (`tray.rs`)
+- **Elevated changes no longer prompt twice on every launch.** Two authorization prompts appeared at startup (the NetSense prompt and a PowerShell prompt) because the elevated helper channel had already expired. The helper now stays alive for roughly a login session (~12 hours) instead of 30 minutes, and a diagnostic probe reports whether the channel survived, so a single authorization after install is enough. (`win_helper.rs`, `i18n`)
+- **The automation editor opens without the multi-second blank delay.** Enumerating installed apps on Windows (scanning the Start Menu and resolving `.lnk` shortcuts through COM) took 5–15 s and blocked first paint. The app list is now fetched in the background after the form is drawn, so the editor appears immediately and the launch-app candidates fill in a moment later. (`editor.html`)
+- **Window position and size are remembered across launches.** The main, settings, and log windows now persist their geometry and restore it on open, clamped to the usable work area. (`appconfig.rs`, `popup.rs`)
+
+### Changed
+
+- **The Settings "Update proxy" and "Updates" sections are merged into one Updates card**, and the in-app update now shows a progress bar that matches the tray popup. (`settings.html`, `settings.css`)
+
 ## [1.7.0] - 2026-10-16
 
 ### Added

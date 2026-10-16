@@ -44,6 +44,14 @@ fn last_click() -> &'static Mutex<Option<Instant>> {
     LAST_CLICK.get_or_init(|| Mutex::new(None))
 }
 
+/// 图标抬起的单调计数。每记一次点击 +1；「延迟单击」的等待线程拿它当取消令牌 ——
+/// 醒来时发现计数已经不是自己那一下，说明期间又来了一次抬起（双击的后半），
+/// 这一次的单击动作就该作废，不再开合面板。
+fn click_seq() -> &'static std::sync::atomic::AtomicU64 {
+    static SEQ: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+    SEQ.get_or_init(|| std::sync::atomic::AtomicU64::new(0))
+}
+
 /// 记一次图标「抬起」，返回这次是否构成双击。命中双击后清空 —— 三连击是
 /// 「双击 + 单击」，那一下单击该去开合面板，不该把编辑器再叫一遍。
 fn register_click() -> bool {
@@ -89,17 +97,50 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                     tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
                     tauri::Size::Logical(s) => (s.width, s.height),
                 };
+                let app = tray.app_handle().clone();
+                let anchor = popup::anchor_center_bottom(x, y, w, h);
+                // 单击动作**延迟一个双击窗口**再执行，执行前再确认期间没有第二次抬起。
+                //
+                // 不能不延迟：直接开面板的话，第二下物理点击会落在面板里（面板某一行
+                // 恰好与图标同高），变成「点应用了一条配置」—— 用户以为的双击从未抵达
+                // 图标。延迟之后，双击过程里面板始终不出现，第二下仍落在图标上。
+                // 代价是单次点击开合面板多等 500ms，换取「双击图标 = 打开自动化配置」
+                // 这个约定在三平台上一真正成立。
+                let seq = click_seq().fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 if register_click() {
-                    popup::open_automation(tray.app_handle());
+                    // 双击的后半：上面这次 +1 已经把所有待触发的单击作废（它们的
+                    // 醒来判据都是「计数仍等于自己那一下」）。
+                    popup::open_automation(&app);
                 } else {
-                    popup::toggle(tray.app_handle(), popup::anchor_center_bottom(x, y, w, h));
+                    std::thread::spawn(move || {
+                        std::thread::sleep(DOUBLE_CLICK);
+                        // 期间又有一次抬起（双击的后半）/ 原生 DoubleClick：作废。
+                        if click_seq().load(std::sync::atomic::Ordering::SeqCst) != seq {
+                            return;
+                        }
+                        // 醒来后仍要回到主线程：面板显隐是 GUI 操作，且 popup::toggle
+                        // 内部要读窗口可见性 —— 从任意线程调 Tauri 窗口 API 不安全。
+                        //
+                        // `app` 已 move 进本线程，这里 clone 出两个：一个给 `run_on_main_thread`
+                        // 当 `&self`（借用），另一个 move 进内层闭包给 `popup::toggle` 借用 ——
+                        // 不能让同一个 `app` 既被 `&self` 借用又被内层 `move` 捕获，否则 E0505。
+                        let app_rt = app.clone();
+                        let app_cl = app.clone();
+                        let _ = app_rt.run_on_main_thread(move || {
+                            if click_seq().load(std::sync::atomic::Ordering::SeqCst) != seq {
+                                return;
+                            }
+                            popup::toggle(&app_cl, anchor);
+                        });
+                    });
                 }
                 return;
             }
             // Windows 会在这两次 Click 之后再发一次 DoubleClick。编辑器本来就已经被上面
             // 那下叫出来了，这里再叫一次只是把它重新拉到前台 —— 幂等，而且换来的是不依赖
-            // 「自家 WebView 有没有把第二次抬起也发上来」。
+            // 「自家 WebView 有没有把第二次抬起也发上来」。顺手把待触发的单击作废。
             if let TrayIconEvent::DoubleClick { .. } = &event {
+                click_seq().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 *last_click().lock().unwrap_or_else(|e| e.into_inner()) = None;
                 popup::open_automation(tray.app_handle());
             }

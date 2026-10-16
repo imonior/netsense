@@ -1211,8 +1211,17 @@ pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_
         })
         .unwrap_or_default();
 
-    // 挑出当前平台的最佳安装包（含 SHA256SUMS 链接，供 run_update 校验）。
-    let (download_url, asset_name, checksum_url, size) = pick_install_asset(&v, &assets);
+    // SHA256SUMS 只取一次：既喂「校验感知」挑包（见 pick_verified_asset），也喂随后的
+    // 可安装性判定（install_verdict）。已是最新时一次都不发 —— 没人会点安装。
+    let sums = if update_available {
+        fetch_sums(&v, &choice)
+    } else {
+        Sums::Absent
+    };
+    // 挑出当前平台的最佳安装包（含 SHA256SUMS 链接，供 run_update 校验）。挑包是「校验
+    // 感知」的：装得上的候选里优先挑 SHA256SUMS 列得上的那一个，见 pick_verified_asset。
+    let (download_url, asset_name, checksum_url, size) =
+        pick_install_asset(&v, &assets, sums.text());
 
     // 「能不能装、验不验得了」在这里就判完：`run_update` 是 fail-closed 的，校验值拿不到
     // 就拒绝安装，所以让用户点下去才发现，等于把他的一次下载白白花掉。
@@ -1222,7 +1231,7 @@ pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_
             download_url.as_ref(),
             asset_name.as_ref(),
             checksum_url.as_ref(),
-            &choice,
+            &sums,
         )
     } else {
         // 已是最新：不会有人点安装，不必为一次用不上的判定多发请求。
@@ -1246,14 +1255,71 @@ pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_
     }))
 }
 
+/// 这次发布的 SHA256SUMS 正文，按「取没取到」分成三种状态。
+///
+/// 存在的理由：挑包与可安装性判定都要用它，而「没有校验链接」「有链接没取到」「取到了」
+/// 三件事在界面上是**不同**的话（没有发布清单 / 下载不了清单 / 清单里没有这个安装包）。
+/// 合成一个 `Option` 就把后两种压成同一种，日志与提示都会指错方向。
+enum Sums {
+    /// 这次发布没有（可用的）SHA256SUMS 资产。
+    Absent,
+    /// 链接在，但没取到正文（重试之后的最终失败；原因已经在获取处记过日志）。
+    Unreachable,
+    /// 正文。
+    Text(String),
+}
+
+impl Sums {
+    /// 给挑包用的正文视图：取到才有。
+    fn text(&self) -> Option<&str> {
+        match self {
+            Sums::Text(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// 取这次发布的 SHA256SUMS 正文（带重试）。链接缺失 / 形状不对 / 取不到都归成非
+/// `Text` 状态，**不**在这里返回 Err：调用方（检查更新）按状态决定提示，而一次
+/// `check_update` 不该因为取不到校验清单就整体失败 —— 「已是最新」这个答案仍然有效。
+fn fetch_sums(release: &serde_json::Value, choice: &crate::netproxy::ProxyChoice) -> Sums {
+    let cu = release["assets"].as_array().and_then(|arr| {
+        arr.iter()
+            .find(|a| {
+                let n = a["name"].as_str().unwrap_or("").to_ascii_lowercase();
+                matches!(n.as_str(), "sha256sums" | "sha256sums.txt" | "checksums.txt" | "checksums" | "sha256.txt" | "shasums")
+            })
+            .and_then(|a| a["browser_download_url"].as_str())
+    });
+    let Some(cu) = cu.filter(|u| !u.trim().is_empty()) else {
+        return Sums::Absent;
+    };
+    // 非 https 等同没有：这一道必须在拨号之前判掉（同 install_verdict 的原判据）。
+    if crate::update::require_https(cu).is_err() {
+        return Sums::Absent;
+    }
+    match fetch_url(cu, choice) {
+        Ok(body) => Sums::Text(body),
+        Err(e) => {
+            // 重试的 warn 只覆盖中间的尝试（见 [`fetch_url`]），最后一次的失败原因要在
+            // 这里落一条 —— 否则用户报「SHA256SUMS 无法下载」时，日志里只有前两次的。
+            log::warn(&i18n::tf("upd.sums_fetch", &[("error", &e)]));
+            Sums::Unreachable
+        }
+    }
+}
+
 /// 这次更新能不能就地完成。`None` = 能；`Some(码)` = 不能，码是给界面看的
 /// （`popup.no_installable` / `popup.cannot_verify`），不参与任何判定逻辑。
+///
+/// `sums` 是 check_update 已经取好的 SHA256SUMS 状态：这里不再自己拨号 —— 同一份正文
+/// 挑包时也用过了，再取一次只是多一次可能不一致的请求。
 fn install_verdict(
     homebrew: bool,
     download_url: Option<&String>,
     asset_name: Option<&String>,
     checksum_url: Option<&String>,
-    choice: &crate::netproxy::ProxyChoice,
+    sums: &Sums,
 ) -> Option<&'static str> {
     // Homebrew 渠道什么都不下载，来源校验由 brew 自己负责。
     if homebrew {
@@ -1270,16 +1336,14 @@ fn install_verdict(
     if crate::update::require_https(cu).is_err() {
         return Some("no_sums");
     }
-    // 这一次拉取同时回答两个问题：拿不拿得到、里面列没列我们这个资产。
-    match fetch_url(cu, choice) {
-        Err(e) => {
-            // 重试的 warn 只覆盖中间的尝试（见 [`fetch_url`]），最后一次的失败原因要在
-            // 这里落一条 —— 否则用户报「SHA256SUMS 无法下载」时，日志里只有前两次的。
-            log::warn(&i18n::tf("upd.sums_fetch", &[("error", &e)]));
-            Some("sums_unreachable")
-        }
-        Ok(sums) if crate::update::parse_hash(&sums, name).is_some() => None,
-        Ok(_) => Some("no_sums"),
+    match sums {
+        // 清单压根没有 / 链接不可用：能说的只有「没有可校验的发布清单」。
+        Sums::Absent => Some("no_sums"),
+        // 取不到：与「没有」是两回事，界面提示「下载不了校验清单」。
+        Sums::Unreachable => Some("sums_unreachable"),
+        // 取到了：这一份同时回答「拿不拿得到」与「列没列我们这个资产」。
+        Sums::Text(s) if crate::update::parse_hash(s, name).is_some() => None,
+        Sums::Text(_) => Some("no_sums"),
     }
 }
 
@@ -1287,9 +1351,13 @@ fn install_verdict(
 /// 平台判定拆出去做纯函数（[`pick_asset_for`]），这样三个平台的挑法在任何一台机器上
 /// 都能被同一次 `cargo test` 覆盖到 —— 否则「mac 挑不到包」这类只在某个平台成立的错，
 /// 在其余两个平台的 runner 上是测不出来的。
+///
+/// `sums` 是取回的 SHA256SUMS 正文（若有）：挑包改为**校验感知**，见
+/// [`pick_verified_asset`]。
 fn pick_install_asset(
     release: &serde_json::Value,
     assets: &[serde_json::Value],
+    sums: Option<&str>,
 ) -> (Option<String>, Option<String>, Option<String>, Option<u64>) {
     let goos = if cfg!(target_os = "macos") {
         "macos"
@@ -1306,7 +1374,7 @@ fn pick_install_asset(
         "other"
     };
 
-    let best = pick_asset_for(assets, goos, goarch);
+    let best = pick_verified_asset(assets, goos, goarch, sums);
 
     let checksum_url = release["assets"]
         .as_array()
@@ -1327,6 +1395,33 @@ fn pick_install_asset(
         ),
         None => (None, None, checksum_url, None),
     }
+}
+
+/// [`pick_asset_for`] 的校验感知外壳：偏好不变（先本平台扩展名、后 OS token），只在
+/// 「偏好项不在 SHA256SUMS 里、而另一个**同样装得上**的候选在」时改挑后者。
+///
+/// 它把一类发布事故从「每个用户的更新都卡在下载后的校验上」降级为「换个包照样更新」：
+/// Windows 上恒有两个装得上的候选（nsis 的 setup.exe 与 WiX 的 msi），任一个改名 /
+/// 清单漏一行都不再阻断升级；单候选平台（mac / linux）行为与原来一致。没拿到清单
+/// （`sums` 为 None）时完全退回原挑法。替代候选只认**装得上**的（installable_ext），
+/// 便携 zip 没有安装代码，任何时候都不拿它当安装包。
+fn pick_verified_asset<'a>(
+    assets: &'a [serde_json::Value],
+    goos: &str,
+    goarch: &str,
+    sums: Option<&str>,
+) -> Option<&'a serde_json::Value> {
+    let preferred = pick_asset_for(assets, goos, goarch)?;
+    let sums = sums?;
+    if crate::update::parse_hash(sums, asset_name(preferred)).is_some() {
+        return Some(preferred);
+    }
+    assets
+        .iter()
+        .filter(|a| {
+            asset_matches(asset_name(a), goos, goarch) && installable_ext(asset_name(a), goos)
+        })
+        .find(|a| crate::update::parse_hash(sums, asset_name(a)).is_some())
 }
 
 /// 在 `assets` 里为 `goos`+`goarch` 挑一个装得上的包：先要架构与平台都对得上，在同为
@@ -1812,9 +1907,8 @@ fn is_newer(latest: &str, current: &str) -> bool {
 mod tests {
     use super::{
         asset_matches, install_verdict, installable_ext, is_plausible_ip, parse_ipify, parse_ipip,
-        parse_ipsb, pick_asset_for, platform_of, token_anchored,
+        parse_ipsb, pick_asset_for, platform_of, token_anchored, Sums,
     };
-    use crate::netproxy::ProxyChoice;
     use serde_json::json;
 
     fn url(s: &str) -> Option<String> {
@@ -1862,7 +1956,7 @@ mod tests {
     fn a_homebrew_install_is_always_installable() {
         // brew 渠道不下载任何东西，也就没有「拿不到校验值」这一说。
         // 这条同时钉住：判定不会为 Homebrew 多发一次请求。
-        assert_eq!(install_verdict(true, None, None, None, &ProxyChoice::Direct), None);
+        assert_eq!(install_verdict(true, None, None, None, &Sums::Absent), None);
     }
 
     #[test]
@@ -1873,7 +1967,7 @@ mod tests {
                 None,
                 None,
                 url("https://example.invalid/SHA256SUMS").as_ref(),
-                &ProxyChoice::Direct,
+                &Sums::Absent,
             ),
             Some("no_asset")
         );
@@ -1887,7 +1981,7 @@ mod tests {
                 url("https://example.invalid/NetSense.dmg").as_ref(),
                 url("NetSense.dmg").as_ref(),
                 None,
-                &ProxyChoice::Direct,
+                &Sums::Absent,
             ),
             Some("no_sums")
         );
@@ -1903,7 +1997,7 @@ mod tests {
                 url("https://example.invalid/NetSense.dmg").as_ref(),
                 url("NetSense.dmg").as_ref(),
                 url("http://example.invalid/SHA256SUMS").as_ref(),
-                &ProxyChoice::Direct,
+                &Sums::Absent,
             ),
             Some("no_sums")
         );
@@ -1913,7 +2007,7 @@ mod tests {
                 url("https://example.invalid/NetSense.dmg").as_ref(),
                 url("NetSense.dmg").as_ref(),
                 url("   ").as_ref(),
-                &ProxyChoice::Direct,
+                &Sums::Absent,
             ),
             Some("no_sums")
         );

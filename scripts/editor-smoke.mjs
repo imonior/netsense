@@ -591,7 +591,7 @@ const resetSaves = () => {
 
 group("装载");
 await settle();
-// 首屏那一帧：外部六份里最慢的一份还停在半路。这一段断言的是「表单先画、系统清单后到」这条
+// 首屏那一帧：外部五份里最慢的一份（get_status，替身）还停在半路。这一段断言的是「表单先画、系统清单后到」这条
 // 分工 —— 它挡得住的回归是「把外部数据又请回首绘的关键路径」（用户看到的正是那一句空白），
 // 以及第一帧漏掉语言/配色这两份便宜数据。它挡不住的是「第一帧画错了内容」：那时 view 同样是
 // null，界面却已经不该长这样 —— 那一条由下面「四格与徽标来自快照」那几组负责。
@@ -604,10 +604,10 @@ eq("语言与配色由首屏那一批便宜取数写上，不等状态快照",
 await releaseHeld();
 check("启动脚本无异常地跑完（顶层 IIFE 已读到配置）", h.cfg.profiles.length === 3);
 eq(
-  "启动时按顺序读了后端：文案 → 六份外部数据一起发 → 首屏那三份（配置 / 语言 / 配色）",
+  "启动时按顺序读了后端：文案 → 五项外部数据（已装程序改后台补拉，不在首屏关键路径）一起发 → 首屏那三份（配置 / 语言 / 配色）→ 已装程序后台补拉",
   invokeLog.map((c) => c.cmd).slice(0, 10),
-  ["get_strings", "get_networks", "get_interfaces", "get_adapters", "get_printers", "get_installed_apps",
-   "get_status", "get_config", "get_language", "get_theme"],
+  ["get_strings", "get_networks", "get_interfaces", "get_adapters", "get_printers",
+   "get_status", "get_config", "get_language", "get_theme", "get_installed_apps"],
 );
 eq("已存 SSID、在用网卡、本机网卡、打印机与已装程序各取一份（条件值与动作目标的候选）",
   [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name),
@@ -615,13 +615,15 @@ eq("已存 SSID、在用网卡、本机网卡、打印机与已装程序各取�
   [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"],
    ["Broken", "Firefox", "Keka", "Slack"]]);
 // 上面那条只说得出「读了哪几项」，说不出「是不是排队读的」，而排队读的代价就是现场那句
-// 「自动化管理打开要好几秒空白」：六项各要拉一次子进程，串起来就是它们之和。
+// 「自动化管理打开要好几秒空白」：五项外部数据各要拉一次子进程，串起来就是它们之和；
+// 已装程序那一趟最慢（Windows 扫开始菜单 5–15 秒），现在改后台补拉、不在首屏关键路径上，
+// 所以它的发出比首屏三份还晚 —— 下面这条并发判据只数首屏这批，不放它进来。
 // 判据是并发与否唯一看得见的痕迹：最后发出的那一项，早于最早落回的那一项 —— 被按住的那份
 // 落回得最晚，取 min 时自然不会算进最早的那一个，所以它按住的是首绘、压不垮这条判据。
-const bootIpc = ["get_networks", "get_interfaces", "get_adapters", "get_printers", "get_installed_apps",
+const bootIpc = ["get_networks", "get_interfaces", "get_adapters", "get_printers",
                  "get_status", "get_config", "get_language", "get_theme"];
-const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 9);
-eq("开机那九份各发一次（外部六份 + 首屏三份，没有哪一项被读了两遍）", bootBatch.length, 9);
+const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 8);
+eq("开机那八份各发一次（外部五份 + 首屏三份，没有哪一项被读了两遍；已装程序不在此列）", bootBatch.length, 8);
 check("它们是并发发出的：最后发出的那一项，早于最早落回的那一项",
   Math.min(...bootBatch.map((t) => t.resolved)) > Math.max(...bootBatch.map((t) => t.issued)),
   `发出 ${bootBatch.map((t) => t.issued)}，落回 ${bootBatch.map((t) => t.resolved)}`);

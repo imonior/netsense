@@ -134,11 +134,13 @@ const LIVING_TICK: Duration = Duration::from_secs(600);
 
 /// GUI 进程已经退出之后，继续等一个「刚重启的 GUI」来接管的上限。
 ///
-/// 这段时间就是「关掉再打开不必再授权」的窗口，也是「一个提权进程在无人使用后仍然
-/// 存在」的上限 —— 两者是同一个数字，因为它们说的是同一件事：helper 愿意为一个可能
-/// 马上回来的客户端多留多久。取 30 分钟：一次普通的「关掉应用、过一会儿再打开」一定
-/// 落在里面，而一台真的不再用 NetSense 的机器不会在半小时后还留着它。
-const RECONNECT_WAIT: Duration = Duration::from_secs(30 * 60);
+/// 这段时间就是「关掉再打开不必再授权」的窗口。取 12 小时而不是原来的 30 分钟：30 分钟
+/// 覆盖不了「关掉应用去吃顿饭 / 开一下午会」这种最常见的重启间隔，用户于是每次重新打开
+/// 都再挨一次授权框 —— 而按 SID 命名的管道本来就不随 GUI 进程消失，没有理由让一个还在
+/// 同一登录会话里的用户反复授权。12 小时封顶同时守住另一侧：一台真的不再用 NetSense 的
+/// 机器不会在第二天还留着这个提权进程；真到了上限，下一次使用只多弹一次框。
+/// 判活每 [`RECONNECT_TICK`] 一次，一个空转的提权进程为此多醒几百次，开销可以忽略。
+const RECONNECT_WAIT: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// 处在重连宽限里时的轮询间隔：这时要把「宽限到期」判得准一点，所以比 [`LIVING_TICK`]
 /// 密得多。宽限最多 30 分钟，也就是每小时多醒 360 次 —— 一个空转的提权进程，这点开销
@@ -546,6 +548,23 @@ fn helper_live() -> &'static AtomicBool {
 /// 供 PAL 查询：常驻通道此刻是不是已经接上、后续批次不用再弹框。
 pub(crate) fn channel_live() -> bool {
     helper_live().load(Ordering::Relaxed)
+}
+
+/// 开机探一次常驻通道，返回给人看的一行诊断（只连不拉、不弹框）。
+///
+/// 存在的理由：用户侧唯一能自己判断「为什么每次启动都要授权」的依据就是日志。原来只有
+/// 走到 `log_fallback`（第一批发不出去）才留一条，而「开机时上一个会话的 helper 还在
+/// 不在」这件事没有任何痕迹 —— 它恰恰是分水岭：还在=这次启动一次授权都不用；不在=本
+/// 会话首批会拉起它（一次 netsense 授权框），此后理应静默。
+///
+/// 探法就是 [`open_conn`]：免费的开管尝试，连上就地断开（helper 的 accept 循环会接着
+/// 等下一位客户端），**绝不**在这里拉起 helper —— 开机日志里平白多一次授权框比没有诊断
+/// 更糟。返回值直接进日志：`alive` 或 [`connect_reason`] 里的具体 Win32 失败码。
+pub(crate) fn probe_channel() -> String {
+    match open_conn() {
+        Some(_) => "alive (a helper from a previous session answered)".to_string(),
+        None => connect_reason(),
+    }
 }
 
 /// 连续「这一批没能走常驻通道」的次数：一次成功的调用清零，攒到 [`GIVE_UP_AFTER`]

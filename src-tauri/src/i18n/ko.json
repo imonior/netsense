@@ -19,6 +19,7 @@
   "app.config_loaded": "{path}에서 설정 로드됨",
   "app.startup": "NetSense v{version} 시작 (플랫폼 백엔드: {backend}, 로그 폴더: {dir})",
   "app.backend": "NetSense v{version}, 백엔드 {backend} (권한 채널: {channel})",
+  "app.helper_probe": "Windows 권한 상승 헬퍼 채널(시작 시 프로브): {state}",
   "app.webview2_missing": "WebView2 런타임을 찾지 못해 화면을 만들 수 없습니다",
   "app.config_failed": "설정 로드 실패: {error}",
   "app.config_absent": "아직 설정 파일이 없습니다: {path} - 편집기에서 처음 저장하면 생성됩니다",

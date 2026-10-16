@@ -99,6 +99,34 @@ impl WindowSizes {
     }
 }
 
+/// 三个主窗口上次关闭时的**位置**（物理像素，屏幕坐标 x,y 的原点）。
+///
+/// 尺寸之外把位置也记下来，是用户明确的诉求（「下次启动后打开时位置和大小和上次关闭时
+/// 一致」）。这里只存**窗口仍在某块屏幕内时**的值；会不会落回屏幕外的收敛不在保存时做，
+/// 而在打开时实时算（`popup::apply_geometry`）—— 「外接屏拔掉之后照旧坐标摆会落得满屏
+/// 都找不到」这件事靠**打开时**判「这点还在不在某块屏幕里」来解决，与尺寸用工作区收敛是
+/// 同一套路：写进配置那一刻的屏幕拓扑，下一次打开时未必还成立。
+///
+/// 存的是物理像素而非逻辑值：position 是操作系统直接给出的屏幕坐标，缩放比变化时逻辑值
+/// 需要一个「当初记的时候是哪块屏、什么缩放」的附注才还原得回去，物理值配上打开时的
+/// 「在不在屏内」判定已经够用，且尺寸那一半仍按逻辑存。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WindowSpots {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main: Option<(i32, i32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<(i32, i32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<(i32, i32)>,
+}
+
+impl WindowSpots {
+    /// 三个窗口都没记过位置（序列化跳过条件，与 [`WindowSizes::is_empty`] 同理）。
+    pub fn is_empty(&self) -> bool {
+        self.main.is_none() && self.settings.is_none() && self.logs.is_none()
+    }
+}
+
 /// 升级安装包的下载镜像。
 ///
 /// ⚠️ 它**只改下载走哪条路**，不改「谁说了这个安装包是什么」：SHA256SUMS 与配套的 `.sig`
@@ -217,6 +245,13 @@ pub struct AppConfig {
     /// 它改变的是界面怎么显示，不改任何下发内容 —— 与上面几个字段同一条判据。
     #[serde(default, skip_serializing_if = "WindowSizes::is_empty")]
     pub window_sizes: WindowSizes,
+    /// 三个主窗口上次关闭时的位置（见 [`WindowSpots`]）。
+    ///
+    /// 与 `window_sizes` 分开存，而不是把位置并进那一半：尺寸在旧版本里就是
+    /// `[宽, 高]` 的元组，并进去就要为一种新形状改序列化；而位置是这次新增的诉求，
+    /// 独立一键对旧配置文件零影响（没有这个键 = 从没记过位置，退回默认摆放）。
+    #[serde(default, skip_serializing_if = "WindowSpots::is_empty")]
+    pub window_spots: WindowSpots,
     /// 静默执行：开启时尽量建立并使用免密通道（Windows 常驻 helper / macOS sudoers /
     /// Linux sudo），应用网络配置不再逐次弹 UAC / 授权框。首次开启会请求一次授权以建立通道，
     /// 之后全部静默。它只控制「要不要走免密通道」，不改变任何 Profile 的匹配或下发内容。
@@ -305,6 +340,7 @@ impl Default for AppConfig {
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
             proxy: crate::netproxy::ProxySetting::default(),
             window_sizes: WindowSizes::default(),
+            window_spots: WindowSpots::default(),
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
@@ -819,6 +855,7 @@ mod tests {
                 url: "http://127.0.0.1:7890".into(),
             },
             window_sizes: WindowSizes::default(),
+            window_spots: WindowSpots::default(),
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
@@ -853,6 +890,7 @@ mod tests {
                 url: "file:///etc/passwd".into(),
             },
             window_sizes: WindowSizes::default(),
+            window_spots: WindowSpots::default(),
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
@@ -868,6 +906,7 @@ mod tests {
                 url: "SOCKS5://10.0.0.1:1080".into(),
             },
             window_sizes: WindowSizes::default(),
+            window_spots: WindowSpots::default(),
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
@@ -912,6 +951,28 @@ mod tests {
         // 读回来还是同一个值 —— 尺寸走的是同一份文件、同一条 serde 链路
         let back: AppConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.window_sizes.main, Some((1180, 700)));
+    }
+
+    /// 位置与尺寸同一条道理：没记过就不进文件；记了要原样读得回来。
+    ///
+    /// 位置单独一键（`window_spots`）而不是并进 `window_sizes`：旧配置文件里尺寸是
+    /// `[宽, 高]` 元组，并进去就得改序列化形状；分开存让这次新增对旧文件零影响。
+    #[test]
+    fn window_spots_round_trip_and_stay_out_until_a_window_is_moved() {
+        let s = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!s.contains("window_spots"), "unexpected key in: {s}");
+
+        let mut with = AppConfig::default();
+        with.window_spots.main = Some((2560, 140));
+        let s = serde_json::to_string(&with).unwrap();
+        assert!(s.contains("window_spots"), "spot was dropped: {s}");
+        let back: AppConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.window_spots.main, Some((2560, 140)));
+
+        // 旧文件没有这个键：读出来就是「从没记过位置」，由打开时按需收敛
+        let old = r#"{"theme":"dark","log_retention_days":7}"#;
+        let back: AppConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(back.window_spots, WindowSpots::default());
     }
 
     /// 镜像前缀的准入：只挡「一眼就看得出拼不出 URL」的那些。
@@ -1111,6 +1172,7 @@ mod tests {
                 log_retention_days: 0,
                 proxy: ProxySetting::default(),
                 window_sizes: WindowSizes::default(),
+                window_spots: WindowSpots::default(),
                 silent_execution: false,
                 update_mirror: UpdateMirror::default(),
                 dns_fallback: DnsFallback::default(),

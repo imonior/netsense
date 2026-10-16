@@ -582,6 +582,32 @@ jobs:
           fi
           cat SHA256SUMS
 
+          # Reverse gate: every installer-style asset already on the Draft Release must appear in
+          # the merged SHA256SUMS by exact name. This catches the release-accident class that the
+          # forward check (one fragment per leg) does not: a leg that uploads an asset whose name
+          # diverges from its fragment line -- or a fragment that mis-spells the asset name -- would
+          # otherwise ship a Release where the in-app updater refuses to verify that platform's
+          # update ("asset not in SHA256SUMS"). The forward check proves "every leg produced a line";
+          # this one proves "every line matches a real asset". Both must hold.
+          echo "--- reverse gate: every release asset covered by SHA256SUMS ---"
+          bad=""
+          while IFS= read -r aname; do
+            # Only installer-style assets matter; the manifest, its signature, release notes and
+            # bare-executable artifacts are not update targets and are not expected in SHA256SUMS.
+            case "$aname" in
+              *.exe|*.msi|*.dmg|*.deb|*.rpm|*.AppImage) ;;
+              *) continue ;;
+            esac
+            if ! grep -qF "$aname" SHA256SUMS; then
+              bad="$bad $aname"
+            fi
+          done < <(gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" --jq '.[].name')
+          if [ -n "$bad" ]; then
+            echo "::error::asset(s) missing from SHA256SUMS:${bad}"
+            echo "::error::the in-app updater would refuse to verify these updates. Fix the asset naming or the fragment."
+            exit 1
+          fi
+
           # Sign the manifest with the Ed25519 *signing* key (the online, rotatable one -- never the
           # root key). The app verifies this signature with the signing public key it reads out of
           # the root-signed trust manifest, so a malicious mirror or a tampered Release cannot forge

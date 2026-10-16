@@ -19,6 +19,7 @@
   "app.config_loaded": "已從 {path} 載入配置",
   "app.startup": "NetSense v{version} 啟動（平台後端：{backend}，日誌目錄：{dir}）",
   "app.backend": "NetSense v{version}，平台後端 {backend}（提權通道：{channel}）",
+  "app.helper_probe": "Windows 提權助手通道（啟動時探測）：{state}",
   "app.webview2_missing": "未偵測到 WebView2 執行期，無法建立介面",
   "app.config_failed": "配置載入失敗：{error}",
   "app.config_absent": "還沒有設定檔：{path} —— 在編輯器裡第一次儲存就會建立它",

@@ -19,6 +19,7 @@
   "app.config_loaded": "已从 {path} 加载配置",
   "app.startup": "NetSense v{version} 启动（平台后端：{backend}，日志目录：{dir}）",
   "app.backend": "NetSense v{version}，平台后端 {backend}（提权通道：{channel}）",
+  "app.helper_probe": "Windows 提权助手通道（启动时探测）：{state}",
   "app.webview2_missing": "未检测到 WebView2 运行时，无法创建界面",
   "app.config_failed": "配置加载失败：{error}",
   "app.config_absent": "还没有配置文件：{path} —— 在编辑器里第一次保存就会创建它",

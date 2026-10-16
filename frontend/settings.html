@@ -83,6 +83,23 @@
     .err { margin-top: 6px; color: var(--t-err); font-size: 11px; word-break: break-word; }
     .err[hidden], .hint[hidden] { display: none; }
     .val { color: var(--muted); }
+    /* 合并后的「更新」卡里，代理是第一个子区块：用比卡片标题低一级的小标题把它和下面的
+       镜像 / 检查区分开，又不另起一张卡（那样又回到「两处各一张」的散）。 */
+    .card > h4.sub {
+      margin: 14px 0 6px; font-size: 11px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .8px;
+      border-top: 1px solid var(--line); padding-top: 12px;
+    }
+    /* 进度条：与托盘弹窗同一套视觉（`popup.html` 的 .progress / .bar），升级时这里也画一条，
+       不再只有一行文字。不确定的阶段（安装 / 刷新 / 大小未知时的下载起步）走无限滑动动画，
+       免得进度条停在 0% 看上去像卡死。 */
+    .progress { height: 6px; background: var(--t-sunken); border: 1px solid var(--line);
+      border-radius: var(--t-r-pill); overflow: hidden; margin: 8px 0 4px; }
+    .progress .bar { height: 100%; width: 0%; background: var(--accent); border-radius: var(--t-r-pill);
+      transition: width .2s ease; }
+    .progress .bar.indeterminate { width: 35% !important; animation: indet 1s ease-in-out infinite; }
+    @keyframes indet { 0% { margin-left: 0; } 100% { margin-left: 65%; } }
+    .mv { font-size: 11px; color: var(--muted); margin-top: 4px; }
     /* 报错回执（代理地址不合法、还原失败）比窗口还长时，`nowrap` 会把两头切到窗口外：限宽截断。 */
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -140,44 +157,6 @@
       </div>
       <div class="hint" id="hint-autostart" data-i18n="sett.autostart_hint">Takes effect the next time you sign in.</div>
       <div class="err" id="err-autostart" hidden></div>
-    </div>
-
-    <div class="card">
-      <h3 id="sec-proxy" data-i18n="sett.section_proxy">Update proxy</h3>
-      <div class="hint" id="hint-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
-      <div class="row">
-        <label class="chk"><input type="radio" name="proxy" value="system" id="rd-proxy-system" checked><span id="k-proxy-system" data-i18n="sett.proxy_system">Follow system</span></label>
-      </div>
-      <div class="row">
-        <label class="chk"><input type="radio" name="proxy" value="manual" id="rd-proxy-manual"><span id="k-proxy-manual" data-i18n="sett.proxy_manual">Manual address</span></label>
-      </div>
-      <div class="row">
-        <input type="text" id="in-proxy-url" disabled spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
-      </div>
-      <div class="row">
-        <span class="k" id="k-proxy-presets" data-i18n="sett.proxy_presets">Common local proxies</span>
-        <select id="sel-proxy-preset"></select>
-        <button id="btn-proxy-test" data-i18n="sett.speed_test">Test speed</button>
-      </div>
-      <div class="hint" id="hint-proxy-speed" data-i18n="sett.proxy_speed_hint">Times the real update request through each candidate, so you can pick whichever is actually fastest right now.</div>
-      <div class="hint" id="hint-proxy-result" hidden></div>
-      <div class="row">
-        <label class="chk"><input type="radio" name="proxy" value="direct" id="rd-proxy-direct"><span id="k-proxy-direct" data-i18n="sett.proxy_direct">Direct</span></label>
-      </div>
-      <div class="hint" id="hint-proxy-now" hidden></div>
-      <!-- 出口 IP 与归属地：探的是**界面上正选着的那个出口**（还没保存也算）——
-           选代理时看得见「选这个会从哪出去」，这一行才对选择有用。读不到也给一句话：
-           静悄悄的「—」看起来像功能没做。 -->
-      <div class="row">
-        <span class="k" id="k-proxy-ip" data-i18n="sett.proxy_ip">Current IP</span>
-        <span id="v-proxy-ip" class="path">—</span>
-        <button id="btn-proxy-ip" data-i18n="sett.refresh">Refresh</button>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <span class="k"></span>
-        <button class="primary" id="btn-proxy" data-i18n="sett.save">Save</button>
-      </div>
-      <div class="err" id="err-proxy" hidden></div>
     </div>
 
     <div class="card">
@@ -243,6 +222,43 @@
 
     <div class="card">
       <h3 id="sec-update" data-i18n="sett.section_update">Updates</h3>
+      <div class="hint" id="hint-update-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
+
+      <h4 class="sub" id="sub-proxy" data-i18n="sett.section_proxy">Update proxy</h4>
+      <div class="row">
+        <label class="chk"><input type="radio" name="proxy" value="system" id="rd-proxy-system" checked><span id="k-proxy-system" data-i18n="sett.proxy_system">Follow system</span></label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="radio" name="proxy" value="manual" id="rd-proxy-manual"><span id="k-proxy-manual" data-i18n="sett.proxy_manual">Manual address</span></label>
+      </div>
+      <div class="row">
+        <input type="text" id="in-proxy-url" disabled spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
+      </div>
+      <div class="row">
+        <span class="k" id="k-proxy-presets" data-i18n="sett.proxy_presets">Common local proxies</span>
+        <select id="sel-proxy-preset"></select>
+        <button id="btn-proxy-test" data-i18n="sett.speed_test">Test speed</button>
+      </div>
+      <div class="hint" id="hint-proxy-speed" data-i18n="sett.proxy_speed_hint">Times the real update request through each candidate, so you can pick whichever is actually fastest right now.</div>
+      <div class="hint" id="hint-proxy-result" hidden></div>
+      <div class="row">
+        <label class="chk"><input type="radio" name="proxy" value="direct" id="rd-proxy-direct"><span id="k-proxy-direct" data-i18n="sett.proxy_direct">Direct</span></label>
+      </div>
+      <div class="hint" id="hint-proxy-now" hidden></div>
+      <!-- 出口 IP 与归属地：探的是**界面上正选着的那个出口**（还没保存也算）——
+           选代理时看得见「选这个会从哪出去」，这一行才对选择有用。读不到也给一句话：
+           静悄悄的「—」看起来像功能没做。 -->
+      <div class="row">
+        <span class="k" id="k-proxy-ip" data-i18n="sett.proxy_ip">Current IP</span>
+        <span id="v-proxy-ip" class="path">—</span>
+        <button id="btn-proxy-ip" data-i18n="sett.refresh">Refresh</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="k"></span>
+        <button class="primary" id="btn-proxy" data-i18n="sett.save">Save</button>
+      </div>
+      <div class="err" id="err-proxy" hidden></div>
+
       <div class="row">
         <span class="k" id="k-mirror" data-i18n="sett.mirror">Download mirror</span>
         <select id="sel-mirror">
@@ -262,10 +278,12 @@
       </div>
       <div class="hint" id="hint-mirror" data-i18n="sett.mirror_hint">Both the installer and its checksum and signature travel through the mirror. The signature is checked against a key built into this app, so a mirror can slow or break a download, but it cannot make a fake installer pass.</div>
       <div class="err" id="err-mirror" hidden></div>
+
       <div class="row">
         <span class="k" id="k-update-note" data-i18n="sett.update_note">The panel checks quietly once after start-up; this button asks again, right now.</span>
         <button id="btn-update-check" data-i18n="popup.check_update">Check for Updates</button>
       </div>
+      <div class="progress" id="up-progress" hidden><div class="bar indeterminate" id="up-bar"></div></div>
       <div class="hint" id="hint-update" hidden></div>
       <div class="err" id="err-update" hidden></div>
       <div class="row" id="row-update-actions" hidden>
@@ -274,6 +292,7 @@
         <button id="btn-update-release" data-i18n="popup.release_page">Release Page</button>
       </div>
       <div class="hint" id="hint-update-run" hidden></div>
+      <div class="mv" id="up-pct" hidden></div>
     </div>
 
     <div class="card">
@@ -792,8 +811,29 @@
           : t("popup.verify_no_sums", "the release publishes no SHA256SUMS, or that file does not list this installer");
       return tf("popup.cannot_verify", "This update cannot be verified: {reason}", { reason });
     }
+    // 设置窗口的升级进度条：与托盘弹窗同一套视觉（见 popup.html 的 showUpdateProgress）。
+    // phase 为空 = 清除（隐藏）；install / refresh / 总大小未知时的下载起步用不确定滑动动画，
+    // 其余按真实百分比画实心进度。文字阶段由 hint-update-run 负责，这里只画条与百分比。
+    function setUpdateBar(phase, percent) {
+      const box = el("up-progress");
+      const bar = el("up-bar");
+      const pct = el("up-pct");
+      if (!phase) { box.hidden = true; pct.hidden = true; return; }
+      box.hidden = false; pct.hidden = false;
+      const p = Math.max(0, Math.min(100, percent || 0));
+      if (phase === "" || phase === "install" || phase === "refresh" || p <= 0) {
+        bar.classList.add("indeterminate");
+        bar.style.width = "";
+        pct.textContent = "";
+      } else {
+        bar.classList.remove("indeterminate");
+        bar.style.width = p + "%";
+        pct.textContent = p + "%";
+      }
+    }
     function renderUpdate(d) {
       updInfo = null;
+      setUpdateBar("", 0);   // 检查出结果：清掉检查途中的不确定动画
       const act = el("row-update-actions");
       act.hidden = true;
       show("hint-update-run", "");
@@ -825,6 +865,7 @@
       updBusy = true;
       show("hint-update", t("popup.updating", "Checking…"));
       show("err-update", "");
+      setUpdateBar("download", 0);   // 检查途中画一条不确定动画，结果出来由 renderUpdate 清掉
       const r = await invoke("check_update").catch(e => ({ __error: String(e) }));
       renderUpdate(typeof r === "string" ? JSON.parse(r) : r);
       updBusy = false;
@@ -835,6 +876,7 @@
       updBusy = true;
       el("row-update-actions").hidden = true;
       show("hint-update-run", t("popup.downloading", "Downloading…"));
+      setUpdateBar("download", 0);   // 起手不确定动画，真百分比由进度事件接管
       const target = {
         download_url: d.download_url || null,
         asset_name: d.asset_name || null,
@@ -845,8 +887,10 @@
       try {
         // 控制能返回就说明没被替换进程杀掉（Homebrew 渠道就是退出码 0），这时提示重启才有意义。
         await invoke("run_update", { target: JSON.stringify(target) });
+        setUpdateBar("", 0);
         show("hint-update-run", [t("popup.update_ok", "Update complete"), t("popup.update_restart", "Restarting…")].join("\n"));
       } catch (e) {
+        setUpdateBar("", 0);
         show("hint-update-run", "");
         show("err-update", String(e));
         el("btn-update-now").hidden = false;
@@ -874,8 +918,9 @@
         const label = p.phase === "refresh" ? t("popup.refreshing", "Refreshing Homebrew…")
           : p.phase === "install" ? t("popup.installing", "Installing…")
           : t("popup.downloading", "Downloading…");
-        const timed = p.phase === "" || p.phase === "install" || p.phase === "refresh";
-        show("hint-update-run", timed ? label : label + ": " + Math.max(0, Math.min(100, p.percent || 0)) + "%");
+        // 文字只说阶段，百分比交给进度条（与托盘弹窗同一套视觉）。
+        show("hint-update-run", label);
+        setUpdateBar(p.phase, p.percent);
       });
     }
 

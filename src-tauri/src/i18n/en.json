@@ -19,6 +19,7 @@
   "app.config_loaded": "Config loaded from {path}",
   "app.startup": "NetSense v{version} starting (platform backend: {backend}, log directory: {dir})",
   "app.backend": "NetSense v{version}, backend {backend} (privilege channel: {channel})",
+  "app.helper_probe": "Windows elevation helper channel at startup: {state}",
   "app.webview2_missing": "WebView2 runtime not found, cannot create the interface",
   "app.config_failed": "Failed to load the config: {error}",
   "app.config_absent": "No config file yet at {path} - the first save from the editor creates it",

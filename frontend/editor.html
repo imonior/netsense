@@ -371,6 +371,8 @@
   let adapterList = []; // 本机装着的网卡（get_adapters，含没插线的口）—— 接口条件值的候选
   let printerList = []; // 系统打印机（[{name, is_default}]）—— 默认打印机动作的候选
   let appList = [];     // 本机已装程序（[{name, path}]）—— 启动程序动作的候选
+  let appListLoading = false; // `get_installed_apps` 是否正在后台补拉，避免重复触发
+  let appListReady = false;   // 是否已经补拉过一次（成功与否都算），避免 `loadAll` 每趟重扫
   let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
   let dirty = false;
@@ -1522,14 +1524,17 @@
 
   async function loadAllInner(keepSelection) {
     const prevSel = sel && { ...sel };
-    // 这六份**先一起发出去**，但第一帧不等它们（原因见下面第二处注释）。
+    // 这五份**先一起发出去**，但第一帧不等它们（原因见下面第二处注释）。`get_installed_apps`
+    // 故意**不在**这里：它是六份里最慢的（Windows 扫开始菜单 + COM 解析 .lnk 常要 5–15 秒），
+    // 而它只喂「启动程序」那一格的候选下拉 —— 一旦被算进首屏第二帧，整屏状态徽标与
+    // 网卡 / 打印机遇就会跟着它一起等，现场那句「点开空白好几秒」就是这么来的。它改为后台
+    // 补拉（见文末 [`loadInstalledApps`]），到了再单独刷新候选，不再占任何首屏关键路径。
     let nicsFailed = false;
     const external = Promise.all([
       invoke("get_networks").catch(() => []),
       invoke("get_interfaces").catch(() => { nicsFailed = true; return []; }),
       invoke("get_adapters").catch(() => []),
       invoke("get_printers").catch(() => []),
-      invoke("get_installed_apps").catch(() => []),
       invoke("get_status"),
     ]);
     try {
@@ -1564,18 +1569,17 @@
       loadFailed(e);
       return;
     }
-    // 剩下这六份每一项都要拉起一个系统子进程：Windows 上每一趟是一整条 PowerShell 启动链，
+    // 剩下这五份每一项都要拉起一个系统子进程：Windows 上每一趟是一整条 PowerShell 启动链，
     // macOS 的降级链里 `get_status` 那一趟可以走到几秒。它们喂的是状态条、徽标与下拉候选，
     // 不是表单本身 —— 让它们排进首绘的关键路径，就是现场那句「自动化配置点开以后空白好几秒」。
     // 只有 `get_status` 的失败会落到下面的 catch：它带着「当前网络」那几项地址和引擎视图，
     // 取不到就等于窗口没起来，不该装作没事。
     try {
-      const [nets, nics, adapters, printers, apps, rawSt] = await external;
+      const [nets, nics, adapters, printers, rawSt] = await external;
       wifiList = asArray(nets);
       nicList = asArray(nics);
       adapterList = asArray(adapters);
       printerList = asArray(printers);
-      appList = asArray(apps);
       const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
       statusSnap = st.status || null;
       view = st.engine || null;
@@ -1593,6 +1597,31 @@
       if (dirty) refreshLive(); else renderAll();
     } catch (e) {
       loadFailed(e);
+    }
+    // 后台补拉已装程序：不进首屏关键路径（见上面 external 处的注释）。`appList` 是机器级
+    // 缓存、与配置无关，所以即便随后又有一次 `loadAll` 也不会重复扫描 —— 它已经在了。
+    loadInstalledApps();
+  }
+
+  /// 后台补拉本机已装程序（喂「启动程序」那一格的候选下拉）。从不在首屏关键路径上：
+  // 它慢（Windows 5–15 秒），而缺了候选只是「没有下拉、只能手输 / 浏览」，两样都始终在，
+  // 不阻塞任何操作。取失败当作没有候选。`appListLoading` 防重入 —— `loadAllInner` 每趟都会
+  // 调一次，但第二趟起应该直接复用第一趟已经填好的 `appList`，而不是再起一次系统扫描。
+  async function loadInstalledApps() {
+    // 已经补拉过（成功与否都算）就直接复用：它是机器级缓存、与配置无关，`loadAll` 每趟都
+    // 会调一次，但第二趟起不该再起一次 Windows 开始菜单扫描。进行中也跳过，避免并发重入。
+    if (appListLoading || appListReady) return;
+    appListLoading = true;
+    try {
+      const apps = await invoke("get_installed_apps").catch(() => []);
+      appList = asArray(apps);
+      // 候选到了再重画：用户正在编辑时不抢焦点（走 `refreshLive` 原地更新），但 `refreshLive`
+      // 不碰表单里的应用格，所以真正让下拉出现的是「没在编辑时的 renderAll」—— 编辑途中
+      // 它会在用户停手后的下一次自然重画里出现，不影响手上这一条。
+      if (dirty) refreshLive(); else renderAll();
+    } finally {
+      appListLoading = false;
+      appListReady = true;
     }
   }
 

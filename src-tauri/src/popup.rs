@@ -170,6 +170,36 @@ fn apply_geometry(win: &WebviewWindow, label: &str) {
     };
     let (w, h) = fit_to_work_area(win, w, h);
     let _ = win.set_size(Size::Logical(LogicalSize::new(w as f64, h as f64)));
+    apply_spot(win, label);
+}
+
+/// 把窗口恢复到「上次关掉时的位置」，并先确认那点还落在某块屏幕里。
+///
+/// 只恢复「在屏幕内」的位置：外接屏拔掉、分辨率改过之后，旧坐标可能落得满屏都找不到
+/// （用户连改回来的抓手都没有，只能删配置文件）。这种时候不摆 —— 让 Tauri 按默认位置
+/// 开，用户再拖一次就是。判据用**整块屏幕**而不是工作区：窗口贴屏幕边缘摆放完全正常，
+/// 拿工作区判会把合法位置误杀。
+fn apply_spot(win: &WebviewWindow, label: &str) {
+    let Some((x, y)) = saved_spot(win, label) else {
+        return;
+    };
+    if !spot_on_some_monitor(win, x, y) {
+        return;
+    }
+    let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+}
+
+/// 这点（物理像素）是否落在任一块显示器的整块屏幕范围内。读不到屏幕列表时回答 false：
+/// 摆不摆是偏好，而摆错地方的代价（窗口整个消失）远比不摆大。
+fn spot_on_some_monitor(win: &WebviewWindow, x: i32, y: i32) -> bool {
+    let Ok(mons) = win.available_monitors() else {
+        return false;
+    };
+    mons.iter().any(|m| {
+        let p = m.position();
+        let s = m.size();
+        x >= p.x && x < p.x + s.width as i32 && y >= p.y && y < p.y + s.height as i32
+    })
 }
 
 /// 当前客户区尺寸，换算成**逻辑像素**。
@@ -202,6 +232,20 @@ fn saved_size(win: &WebviewWindow, label: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// 配置里记着的这个窗口的位置（物理像素屏幕坐标）。
+fn saved_spot(win: &WebviewWindow, label: &str) -> Option<(i32, i32)> {
+    let state = win
+        .app_handle()
+        .try_state::<std::sync::Arc<crate::state::AppState>>()?;
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+    match label {
+        MAIN_LABEL => s.window_spots.main,
+        SETTINGS_LABEL => s.window_spots.settings,
+        LOGS_LABEL => s.window_spots.logs,
+        _ => None,
+    }
+}
+
 /// 把目标尺寸（逻辑像素）收敛到窗口所在显示器的**工作区**内，四周留一点余量。
 ///
 /// 用工作区而不是整块屏幕：Windows 的它是整屏减掉任务栏，macOS 的它是整屏减掉菜单栏。
@@ -225,14 +269,16 @@ fn fit_to_work_area(win: &WebviewWindow, w: u32, h: u32) -> (u32, u32) {
     ((w as i64).min(max_w) as u32, (h as i64).min(max_h) as u32)
 }
 
-/// 窗口被关掉（收回托盘）时记下它的尺寸，下次打开照原样恢复。
+/// 窗口被关掉（收回托盘）时记下它的尺寸与位置，下次打开照原样恢复。
 ///
-/// 存**逻辑像素**：物理像素在换到不同缩放比的显示器后会还原出一个两倍大的窗口，而逻辑
-/// 值在任何缩放比下都是同一个「看起来这么大」。
+/// 存**逻辑像素尺寸 + 物理像素坐标**：尺寸换缩放比显示器后逻辑值还原出同一个「看起来
+/// 这么大」；位置是操作系统给的屏幕坐标，配一道打开时的「这点还在不在某块屏里」判定
+/// 就够（见 [`apply_spot`]）—— 外接屏拔掉之后照旧坐标摆会落得满屏都找不到，那件事交给
+/// 打开时收敛，与尺寸用工作区收敛同一套路。
 ///
-/// 写不进去只记一条日志：尺寸是偏好，不是配置 —— 为了它打断「关窗口」这个动作不值得，
+/// 写不进去只记一条日志：几何是偏好，不是配置 —— 为了它打断「关窗口」这个动作不值得，
 /// 而静默失败又会让「为什么下次又变回去了」无从查起。
-pub fn remember_size(window: &tauri::Window) {
+pub fn remember_geometry(window: &tauri::Window) {
     let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
         return;
     };
@@ -248,9 +294,18 @@ pub fn remember_size(window: &tauri::Window) {
     let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
     let mut next = s.clone();
     match window.label() {
-        MAIN_LABEL => next.window_sizes.main = Some((w, h)),
-        SETTINGS_LABEL => next.window_sizes.settings = Some((w, h)),
-        LOGS_LABEL => next.window_sizes.logs = Some((w, h)),
+        MAIN_LABEL => {
+            next.window_sizes.main = Some((w, h));
+            next.window_spots.main = spot_of(window);
+        }
+        SETTINGS_LABEL => {
+            next.window_sizes.settings = Some((w, h));
+            next.window_spots.settings = spot_of(window);
+        }
+        LOGS_LABEL => {
+            next.window_sizes.logs = Some((w, h));
+            next.window_spots.logs = spot_of(window);
+        }
         _ => return,
     }
     next.window_sizes = next.window_sizes.clamped();
@@ -264,6 +319,17 @@ pub fn remember_size(window: &tauri::Window) {
             ],
         )),
     }
+}
+
+/// 关闭这一刻的窗口位置（物理像素）。最小化中的 Windows 会给出 `(-32000, -32000)`
+/// 这种哨兵坐标，存它等于存一个「下次一定落在屏幕外」的值 —— 直接不记，位置留着上次
+/// 那个正常值（或没有），由打开时的收敛决定。
+fn spot_of(window: &tauri::Window) -> Option<(i32, i32)> {
+    let pos = window.outer_position().ok()?;
+    if pos.x <= -32_000 || pos.y <= -32_000 {
+        return None;
+    }
+    Some((pos.x, pos.y))
 }
 
 /// 定位：面板水平居中对齐图标，垂直紧贴图标下方，并收敛到显示器**工作区**内。
