@@ -222,11 +222,12 @@ fn main() {
             // 「为什么每次启动都要授权」的依据 —— 上一个会话的 helper 还在不在、
             // 不在是哪种失败（CreateFile=2 从没起来 / 5 权限 / 130 版本不符），
             // 都写进这一行（见 win_helper::probe_channel）。
-            #[cfg(target_os = "windows")]
-            log::info(&i18n::tf(
-                "app.helper_probe",
-                &[("state", platform::win_helper::probe_channel())],
-            ));
+                // `probe_channel()` 返回的是 `String`；`tf` 的参数位要 `&str`，所以这里借一次。
+                #[cfg(target_os = "windows")]
+                log::info(&i18n::tf(
+                    "app.helper_probe",
+                    &[("state", platform::win_helper::probe_channel().as_str())],
+                ));
 
             app.manage(shared.clone());
 
