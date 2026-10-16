@@ -1632,7 +1632,9 @@ fn is_plausible_ip(s: &str) -> bool {
 /// `api.ip.sb` 给结构化归属地，`api.ipify` 只给 IP：越往后信息越少，但越不容易被挡。
 /// 单一第三方端点可能在部分网络下被墙 / 限流 / 超时，链起来更稳；任一端点返回不像 IP
 /// 的内容都会被挡掉、继续下一个。
-const IP_ENDPOINTS: [(&str, fn(&str) -> Option<IpInfo>); 3] = [
+type IpEndpoint = (&'static str, fn(&str) -> Option<IpInfo>);
+
+const IP_ENDPOINTS: [IpEndpoint; 3] = [
     ("https://myip.ipip.net", parse_ipip),
     ("https://api.ip.sb/geoip", parse_ipsb),
     ("https://api.ipify.org?format=json", parse_ipify),

@@ -1035,13 +1035,13 @@ mod tests {
     /// 非预设条目在加载时就丢掉，trim 与去重也在这里做。
     #[test]
     fn mirror_hidden_only_keeps_real_presets() {
-        let mut cfg = AppConfig::default();
-        cfg.mirror_hidden = vec![
+        let cfg = AppConfig {
+            mirror_hidden: vec![
             format!("  {}  ", MIRROR_PRESETS[0]), // trim 后是预设 → 收
             MIRROR_PRESETS[0].into(),             // 重复 → 去重
             "https://example.com/".into(),        // 不是预设 → 丢
             String::new(),                        // 空 → 丢
-        ];
+        ], ..Default::default() };
         let clamped = cfg.clamped();
         assert_eq!(clamped.mirror_hidden, vec![MIRROR_PRESETS[0].to_string()]);
 
