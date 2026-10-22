@@ -1741,11 +1741,14 @@ fn fetch_url_curl(url: &str, proxy_args: &[String]) -> Result<Vec<u8>, String> {
 }
 
 /// 短超时纯文本 GET：公网 IP 探测专用，不复用 [`fetch_url_curl`] 的 GitHub 专用头与 15s 上限。
-/// Short-timeout plain-text GET for the public-IP probe (no GitHub headers, 4s cap).
+///
+/// 3s：探测端点有五个、顺序回退，最坏总耗时 15s，与旧三个端点 @5s 持平 —— 加 geo 端点
+/// 不劣化「全挂」时的等待。结果只用于展示，不值得为它多等。
+/// Short-timeout plain-text GET for the public-IP probe (no GitHub headers, 3s cap).
 fn fetch_text(url: &str, proxy_args: &[String]) -> Result<String, String> {
     use std::process::Command;
     let mut cmd = Command::new("curl");
-    cmd.args(["-fsSL", "--proto", "=https", "--max-time", "5", "-H", "User-Agent: netsense"])
+    cmd.args(["-fsSL", "--proto", "=https", "--max-time", "3", "-H", "User-Agent: netsense"])
         .args(proxy_args)
         .arg(url);
     #[cfg(windows)]
@@ -1763,24 +1766,33 @@ fn fetch_text(url: &str, proxy_args: &[String]) -> Result<String, String> {
 
 /// 出口的 IP 与归属地：面板与设置页上「我现在从哪个地址出去」的那一行。
 ///
-/// 归属地是**可选**的：给出位置的服务（ipip.net / ip.sb）被墙时，退到只回 IP 的服务
-/// （ipify）仍然回答得了「出口是哪」这个更重要的问题。
+/// 归属地是**可选**的：给出位置的服务（ipip.net / ip.sb / ipapi.co / ipwho.is）都被挡时，
+/// 退到只回 IP 的服务（ipify）仍然回答得了「出口是哪」这个更重要的问题。
 #[derive(serde::Serialize)]
 struct IpInfo {
     ip: String,
     location: Option<String>,
+    /// ISO 3166-1 alpha-2 国家码（JSON 端点给；ipip.net 的纯文本没有）。
+    /// 大陆判定以它为准：`CN` 精确，且天然排除 HK / 澳门 / 台湾。
+    country_code: Option<String>,
     /// 归属地是否在中国大陆（HK / 澳门 / 台湾是独立国名，不算）。用于设置界面「仅在大陆摆出预置镜像」。
     is_mainland: bool,
 }
 
-/// 由归属地推导是否中国大陆：location 以「中国」开头即算（api.ip.sb 等对中国返回「中国」，
-/// 对境外返回「美国 / 日本」等独立国名）。源码不出现中文字面量 —— 比较用转义写。
+/// 由归属地推导是否中国大陆：优先认 ISO 国家码 `CN`（JSON 端点给的值，精确，且天然排除
+/// HK / 澳门 / 台湾）；没有国家码的端点（ipip.net 纯文本）退回 location 前缀判据。
+/// 源码不出现中文字面量 —— 前缀比较用转义写。
+///
+/// 已知边界：ipip.net 的中文文案不带国家码，若把 HK / 澳门 / 台湾 拼成「中国 香港」式
+/// 前缀，前缀判据会把它算成大陆 —— 纯文本端点区分不到更细，保持既有判据、不猜。
 fn mark_mainland(mut info: IpInfo) -> IpInfo {
-    info.is_mainland = info
+    let by_code = info.country_code.as_deref() == Some("CN");
+    let by_prefix = info
         .location
         .as_deref()
         .map(|l| l.starts_with("\u{4e2d}\u{56fd}"))
         .unwrap_or(false);
+    info.is_mainland = by_code || by_prefix;
     info
 }
 
@@ -1792,17 +1804,21 @@ fn is_plausible_ip(s: &str) -> bool {
     s.parse::<std::net::IpAddr>().is_ok()
 }
 
-/// 探测端点表：三个服务各带自己的解析器（返回形状不同，见各自的解析函数）。
+/// 探测端点表：五个服务各带自己的解析器（返回形状不同，见各自的解析函数）。
 ///
 /// 顺序有讲究 —— `myip.ipip.net` 一条就同时给出 IP 和中文归属地（国内可达性最好），
-/// `api.ip.sb` 给结构化归属地，`api.ipify` 只给 IP：越往后信息越少，但越不容易被挡。
+/// `api.ip.sb` / `ipapi.co` / `ipwho.is` 给结构化归属地（都带 ISO 国家码，大陆判定靠它），
+/// `api.ipify` 只给 IP：越往后信息越少，但越不容易被挡。
 /// 单一第三方端点可能在部分网络下被墙 / 限流 / 超时，链起来更稳；任一端点返回不像 IP
-/// 的内容都会被挡掉、继续下一个。
+/// 的内容都会被挡掉、继续下一个。geo 端点有四个，「只显示 IP 没有归属地」只剩四条腿
+/// 全挂这一种可能；探测专用 [`fetch_text`] 3s 上限，五个全挂的最坏总耗时与旧版持平。
 type IpEndpoint = (&'static str, fn(&str) -> Option<IpInfo>);
 
-const IP_ENDPOINTS: [IpEndpoint; 3] = [
+const IP_ENDPOINTS: [IpEndpoint; 5] = [
     ("https://myip.ipip.net", parse_ipip),
     ("https://api.ip.sb/geoip", parse_ipsb),
+    ("https://ipapi.co/json/", parse_ipapi),
+    ("https://ipwho.is/", parse_ipwho),
     ("https://api.ipify.org?format=json", parse_ipify),
 ];
 
@@ -1853,13 +1869,16 @@ fn parse_ipip(text: &str) -> Option<IpInfo> {
     Some(IpInfo {
         ip: ip.to_string(),
         location,
+        country_code: None, // 纯文本文案不带 ISO 国家码，大陆判定退回 location 前缀
         is_mainland: false,
     })
 }
 
-/// `api.ip.sb/geoip` 的 JSON：`{"ip":..,"country":..,"region":..,"city":..}`。
+/// `api.ip.sb/geoip` 的 JSON：`{"ip":..,"country":..,"country_code":..,"region":..,"city":..}`。
 ///
 /// 归属地由不空的几段拼出来 —— 少任何一段都少点信息，但 IP 本身已经回答得了主要问题。
+/// `country` 是**国名**（对中国返回 `China` 而非「中国」），大陆判定因此认 `country_code`；
+/// `location` 仍拼 `country`（给人看的）。
 fn parse_ipsb(text: &str) -> Option<IpInfo> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let ip = v.get("ip")?.as_str()?;
@@ -1874,6 +1893,69 @@ fn parse_ipsb(text: &str) -> Option<IpInfo> {
     Some(IpInfo {
         ip: ip.to_string(),
         location: (!parts.is_empty()).then(|| parts.join(", ")),
+        country_code: v
+            .get("country_code")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        is_mainland: false,
+    })
+}
+
+/// `ipapi.co/json/` 的 JSON。它的 `country` 是 **ISO 码**（`US`），国名在 `country_name`
+/// —— 拼给人看的 `location` 用后者，大陆判定取 `country_code`（与 `country` 同值，二者
+/// 取不到时互为兜底）。免费端点限流时回 `{"error":{...}}`，整个打回。
+fn parse_ipapi(text: &str) -> Option<IpInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if v.get("error").is_some() {
+        return None;
+    }
+    let ip = v.get("ip")?.as_str()?;
+    if !is_plausible_ip(ip) {
+        return None;
+    }
+    let parts: Vec<&str> = ["country_name", "region", "city"]
+        .iter()
+        .filter_map(|k| v.get(*k).and_then(|x| x.as_str()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let code = v
+        .get("country_code")
+        .or_else(|| v.get("country"))
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    Some(IpInfo {
+        ip: ip.to_string(),
+        location: (!parts.is_empty()).then(|| parts.join(", ")),
+        country_code: code,
+        is_mainland: false,
+    })
+}
+
+/// `ipwho.is/` 的 JSON：`{"success":true,"ip":..,"country":..,"country_code":..,...}`。
+///
+/// `success` 不为 true 即错误响应（带 `message`），整个打回；`country` 是国名，
+/// 大陆判定认 `country_code`（与 ip.sb 同一套）。
+fn parse_ipwho(text: &str) -> Option<IpInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
+        return None;
+    }
+    let ip = v.get("ip")?.as_str()?;
+    if !is_plausible_ip(ip) {
+        return None;
+    }
+    let parts: Vec<&str> = ["country", "region", "city"]
+        .iter()
+        .filter_map(|k| v.get(*k).and_then(|x| x.as_str()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some(IpInfo {
+        ip: ip.to_string(),
+        location: (!parts.is_empty()).then(|| parts.join(", ")),
+        country_code: v
+            .get("country_code")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         is_mainland: false,
     })
 }
@@ -1885,6 +1967,7 @@ fn parse_ipify(text: &str) -> Option<IpInfo> {
     is_plausible_ip(ip).then(|| IpInfo {
         ip: ip.to_string(),
         location: None,
+        country_code: None,
         is_mainland: false,
     })
 }
@@ -1980,8 +2063,9 @@ fn is_newer(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_matches, install_verdict, installable_ext, is_plausible_ip, parse_ipify, parse_ipip,
-        parse_ipsb, pick_asset_for, platform_of, token_anchored, Sums,
+        asset_matches, install_verdict, installable_ext, is_plausible_ip, mark_mainland, parse_ipapi,
+        parse_ipify, parse_ipip, parse_ipsb, parse_ipwho, pick_asset_for, platform_of,
+        token_anchored, Sums,
     };
     use serde_json::json;
 
@@ -2008,22 +2092,104 @@ mod tests {
         assert!(parse_ipip("<html>502 Bad Gateway</html>").is_none());
         assert!(parse_ipip("当前 IP：999.999.999.999").is_none());
 
-        // ip.sb：JSON，归属地由不空的几段拼出。
-        let sb = parse_ipsb(r#"{"ip":"8.8.8.8","country":"美国","region":"","city":"山景城"}"#).unwrap();
+        // ip.sb：JSON，归属地由不空的几段拼出。country 是英文国名（中国 → "China"），
+        // 大陆判定认 country_code —— 实测形状：{"country":"United States","country_code":"US",...}。
+        let sb = parse_ipsb(
+            r#"{"ip":"8.8.8.8","country":"美国","country_code":"US","region":"","city":"山景城"}"#,
+        )
+        .unwrap();
         assert_eq!(sb.ip, "8.8.8.8");
         assert_eq!(sb.location.as_deref(), Some("美国, 山景城"));
+        assert_eq!(sb.country_code.as_deref(), Some("US"));
         assert!(parse_ipsb(r#"{"country":"x"}"#).is_none());
+
+        // ipapi.co：country 是 ISO 码、country_name 才是国名；限流回 error 体。
+        let co = parse_ipapi(
+            r#"{"ip":"1.2.3.4","country":"CN","country_name":"China","region":"Hubei","city":"Wuhan"}"#,
+        )
+        .unwrap();
+        assert_eq!(co.ip, "1.2.3.4");
+        assert_eq!(co.location.as_deref(), Some("China, Hubei, Wuhan"));
+        assert_eq!(co.country_code.as_deref(), Some("CN"));
+        let co_nocode = parse_ipapi(r#"{"ip":"1.2.3.4","country":"US","country_name":"United States"}"#)
+            .unwrap();
+        assert_eq!(co_nocode.country_code.as_deref(), Some("US")); // country 兜底
+        assert!(parse_ipapi(r#"{"error":{"message":"rate limited"}}"#).is_none());
+
+        // ipwho.is：success 不为 true 即错误响应，整个打回。
+        let who = parse_ipwho(
+            r#"{"success":true,"ip":"5.6.7.8","country":"China","country_code":"CN","region":"Hubei","city":"Wuhan"}"#,
+        )
+        .unwrap();
+        assert_eq!(who.ip, "5.6.7.8");
+        assert_eq!(who.location.as_deref(), Some("China, Hubei, Wuhan"));
+        assert_eq!(who.country_code.as_deref(), Some("CN"));
+        assert!(parse_ipwho(r#"{"success":false,"message":"boycott"}"#).is_none());
 
         // ipify：只有 IP。
         let ify = parse_ipify(r#"{"ip":"1.1.1.1"}"#).unwrap();
         assert_eq!(ify.ip, "1.1.1.1");
         assert_eq!(ify.location, None);
+        assert_eq!(ify.country_code, None);
         assert!(parse_ipify("1.1.1.1").is_none()); // 不是 JSON
 
         // 字符集干净但不是地址 → 不像样。
         assert!(!is_plausible_ip("999.999.999.999"));
         assert!(is_plausible_ip("171.83.70.248"));
         assert!(is_plausible_ip("2001:db8::1"));
+    }
+
+    /// 大陆判据：ISO 国家码 `CN` 精确命中；JSON 端点给英文国名（"China"）时前缀判据本来
+    /// 会漏，码判据补上；HK / 澳门 / 台湾 的码不是 `CN`，天然排除。无国家码的纯文本端点
+    /// （ipip.net）退回中文前缀判据。
+    #[test]
+    fn mainland_judgement_prefers_iso_country_code() {
+        // 英文国名 + CN 码：location 是 "China, ..."，不以「中国」开头，只有码判据救得回来。
+        let cn = mark_mainland(super::IpInfo {
+            ip: "1.2.3.4".into(),
+            location: Some("China, Hubei, Wuhan".into()),
+            country_code: Some("CN".into()),
+            is_mainland: false,
+        });
+        assert!(cn.is_mainland);
+
+        // 境外：码与前缀都不命中。
+        let us = mark_mainland(super::IpInfo {
+            ip: "8.8.8.8".into(),
+            location: Some("United States, Delaware".into()),
+            country_code: Some("US".into()),
+            is_mainland: false,
+        });
+        assert!(!us.is_mainland);
+
+        // HK / 澳门 / 台湾：地区码独立，不算大陆。
+        for code in ["HK", "MO", "TW"] {
+            let r = mark_mainland(super::IpInfo {
+                ip: "1.1.1.1".into(),
+                location: Some("Hong Kong".into()),
+                country_code: Some(code.into()),
+                is_mainland: false,
+            });
+            assert!(!r.is_mainland, "{code} must not count as mainland");
+        }
+
+        // ipip.net 纯文本：无国家码，退回中文前缀判据。
+        let text = mark_mainland(super::IpInfo {
+            ip: "171.83.70.248".into(),
+            location: Some("中国 湖北 武汉".into()),
+            country_code: None,
+            is_mainland: false,
+        });
+        assert!(text.is_mainland);
+
+        // 两个判据都没有（ipify 只给 IP）：不算大陆。
+        let bare = mark_mainland(super::IpInfo {
+            ip: "1.1.1.1".into(),
+            location: None,
+            country_code: None,
+            is_mainland: false,
+        });
+        assert!(!bare.is_mainland);
     }
 
     #[test]

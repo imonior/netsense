@@ -4,6 +4,14 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [1.8.1] - 2026-10-23
+
+### 修復
+
+- **Windows 上「跟隨系統」不再讓下載那一腿脫開系統代理。** `system_proxy()` 過去在 Windows 上傳回 `None`，而 `curl` 在 Windows 上不讀 WinINET，於是檢查更新（走 PowerShell）跟得上系統代理，安裝包下載卻悄悄直連。現在從 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 讀那份靜態「手動設定代理」（`ProxyEnable` + `ProxyServer`）交給 `curl`，取用順序 https → http → socks。PAC（`AutoConfigURL`）與自動偵測（`AutoDetect`）兩種自動設定不求解一段 JavaScript 就得不出代理，維持已知邊界——與 macOS 側同一個決定：寧可不帶，也不猜。（`netproxy.rs`）
+- **「預置鏡像只在大陸顯示」在英文歸屬地端點上不再恆不生效。** `mark_mainland` 原來依歸屬地字串是否以「中國」開頭判定，而 `api.ip.sb` 等端點傳回英文國名（對中國是 `China`），於是走這些腿時 `is_mainland` 恆為 false。現在優先認 ISO 國家碼 `CN`（中國香港 / 中國澳門 / 中國台灣天然排除），純文字端點保留中文前綴判據兜底。（`ipc.rs`）
+- **公網 IP 探測不再那麼容易退化成「有位址、沒歸屬地」。** 探測鏈從 3 個端點擴到 5 個：`ipapi.co` 與 `ipwho.is` 插在 `api.ipify` 之前（兩者都帶 ISO 國家碼），於是四個歸屬地端點順序後退、只給 IP 的服務墊底。探測逾時收紧到 3s，五個端點全掛的最壞等待與原來持平。（`ipc.rs`）
+
 ## [1.8.0] - 2026-10-23
 
 ### 修復

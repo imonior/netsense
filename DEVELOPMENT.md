@@ -1051,11 +1051,17 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
   「没有代理时本来会怎么走」。
 - **系统代理怎么问**：macOS 跑一次 `scutil --proxy`，按 HTTPS → HTTP → SOCKS 取第一个 `*Enable` 为 1、
   有 host 且 port>0 的条目（只有 PAC 时算「没有代理」）；Linux 走 `gsettings`（`mode=manual` 时先 HTTP
-  再 SOCKS）；Windows 不读。两个解析器都是纯函数，输入输出即字典，所以三条分支在任何一台机器上都测得全。
+  再 SOCKS）；Windows 跑一次 `reg query` 读 `HKCU\…\Internet Settings` 的 `ProxyEnable` + `ProxyServer`
+  （分协议写法按 https → http → socks 取，与 macOS 同一条判据）。三个解析器都是纯函数，输入输出即
+  文本与字典，所以三条分支在任何一台机器上都测得全。
 - **Windows 上 `system` 仍走 PowerShell `Invoke-WebRequest`**（与已实测过的那条命令逐字相同），`direct` /
   `manual` 走 `curl.exe`：`Invoke-WebRequest -Proxy` 表达不了 socks，而 Windows 10 1803 起自带 curl ——
-  下载那一腿本来就在用它。已知边界：curl 在 Windows 上不读 WinINET 里那份系统代理，所以那一腿的
-  「跟随系统」只能由 PowerShell 实现；这是既有行为，不是这一版引入的。
+  下载那一腿本来就在用它。curl 在 Windows 上不读 WinINET，所以「跟随系统」那份地址由 `reg query`
+  读出来再交给 curl（见上一条），下载因此与检查更新走同一条路。
+- **已知边界：只覆盖静态代理**。PAC 脚本（`AutoConfigURL`）与自动检测（`AutoDetect`）读不出来 ——
+  要知道该用哪个代理得下载并求值一段 JavaScript，与 macOS 侧对 PAC 的态度是同一个决定：宁可不带
+  代理，也不猜一个。这两种配置下「跟随系统」退化为直连；需要走代理时选手动地址即可（`manual`
+  三个平台、两次请求都只认它）。
 - **探测只挂在显式动作上**：`get_proxy_state` 由设置窗口打开时与保存后各调一次，**不进** `get_app_settings`
   —— 那个每次窗口获得焦点都会被调，popup.html 也调它，而 Linux 上「问一次系统代理」是好几条 `gsettings`
   子进程。界面上「现在走……」那一行说的是磁盘上那份选择会怎么落地，不是实时监视器。

@@ -4,6 +4,14 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.1] - 2026-10-23
+
+### Fixed
+
+- **On Windows, "Follow system" no longer leaves the download leg off the system proxy.** `system_proxy()` used to return `None` on Windows, and `curl` does not read WinINET there, so checking for updates (which goes through PowerShell) followed the system proxy while the installer download quietly went direct. The static "manual setup" proxy is now read from `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` (`ProxyEnable` + `ProxyServer`) and handed to `curl`, chosen in the order https → http → socks. The two automatic configurations (PAC via `AutoConfigURL`, `AutoDetect`) cannot be resolved without evaluating JavaScript, so they remain a known boundary — the same decision as the macOS side: rather no proxy than a guessed one. (`netproxy.rs`)
+- **"Preset mirrors show only in mainland China" no longer silently never triggers on English-locale endpoints.** `mark_mainland` judged by whether the location string began with the Chinese country name, but `api.ip.sb` and friends return English country names (`China`, not the Chinese one), so `is_mainland` was always false on those legs. The ISO country code `CN` is now preferred (which naturally excludes Hong Kong, China / Macao, China / Taiwan, China), with the Chinese-prefix check kept as the fallback for the plain-text endpoint. (`ipc.rs`)
+- **The public-IP probe no longer degrades to "address but no location" so easily.** The probe chain grew from 3 to 5 endpoints: `ipapi.co` and `ipwho.is` were added ahead of `api.ipify` (both carry an ISO country code), so four geolocation endpoints now fall back in order and the IP-only service stays last. The probe timeout is tightened to 3s, keeping the worst-case wait for an all-down chain the same as before. (`ipc.rs`)
+
 ## [1.8.0] - 2026-10-23
 
 ### Fixed

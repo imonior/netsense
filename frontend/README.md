@@ -229,7 +229,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `delete_profile` | `id` | 删除并按 id 找不到时报错 |
 | `apply_profile` | `id` | 请求「立即应用」。**不绕过条件**：引擎重评该 Profile 自己的 Rules/Conditions，禁用中直接拒、冲突中拒绝并回 `netsense://action` |
 | `force_dhcp` | — | 把当前网络（主网卡）切回 DHCP **并让自动化暂停**：引擎停止自动评估、下发与健康监测，直到网络下一次变化（采样照旧，变化即解除；面板/编辑器显示 PAUSED）。异步，结果走 `netsense://action` |
-| `get_public_ip` | — | 现探现回当前出口公网 IP 与归属地（架构 Egress / Public IP 层，独立于任何网卡）：走**软件设置里存着的那一个出口**（与更新下载同一套代理判定），返回 JSON 字符串 `{"ip":..,"location":..}`，取不到回 `null`。归属地可选 —— ipip.net / ip.sb 被墙时退到只回 IP 的 ipify。面板那一行只摆 IP（面板窄），设置页两者都摆。端点在 `ipc.rs` 的 `IP_ENDPOINTS` |
+| `get_public_ip` | — | 现探现回当前出口公网 IP 与归属地（架构 Egress / Public IP 层，独立于任何网卡）：走**软件设置里存着的那一个出口**（与更新下载同一套代理判定），返回 JSON 字符串 `{"ip":..,"location":..,"country_code":..,"is_mainland":..}`，取不到回 `null`。归属地可选 —— 四个 geo 端点（ipip.net / ip.sb / ipapi.co / ipwho.is）顺序回退，全被挡时才退到只回 IP 的 ipify。`is_mainland` 供设置页「仅大陆摆出预置镜像」，判据是 ISO 国家码 `CN` 优先、中文前缀兜底。面板那一行只摆 IP（面板窄），设置页两者都摆。端点在 `ipc.rs` 的 `IP_ENDPOINTS` |
 | `probe_public_ip` | `mode`, `url` | 探测一个**还没存下来的**候选出口：`direct` / `system` / `manual` + 地址，判定与 `set_update_proxy` 共用 `netproxy::choice_from_ui` 一句 —— 探测走的必须是保存后将会走的那条路，否则这行数字本身就是错的。返回同 `get_public_ip` 的 JSON；出口认不出或探不到时报错（`sett.proxy_rejected` / `sett.ip_unreachable`） |
 | `probe_network` | — | 重新采样并立即评估当前网络：唯一命中就走「立即应用」那条链路（网络 + 3B），多命中只报告名字、零命中只报告，都不动网卡。不受 DHCP 暂停约束，也不解除暂停（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字）。交的是**空中那个名字**，与面板「当前网络」那一格同源，判据见上面那段 |

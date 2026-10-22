@@ -12,8 +12,11 @@
 //! - 跟随系统：读操作系统自己的代理设置。macOS 上这是必需的而不是锦上添花：`curl` 完全
 //!   不看系统代理，只传代理参数过去才真的走。Linux 上 `curl` 本来就读 `http_proxy`，
 //!   这里额外读 GNOME 的系统设置（KDE 那份没有统一的命令行走，读不到时等同没配）。
-//!   Windows 上是**唯一一条不需要探测**的分支：检查更新走 PowerShell，而 PowerShell 默认
-//!   就跟随系统代理。
+//!   Windows 上读注册表那份「手动设置代理」（`ProxyEnable` + `ProxyServer`）：检查更新本来
+//!   就走 PowerShell（它按 WinINET 走，天然跟随），而下载走 curl、curl 在 Windows 上不读
+//!   WinINET，只有把这份地址交给 curl 才能让下载跟上同一条路。PAC 脚本与自动检测这两种
+//!   自动配置读不出来（要知道代理是哪个得求值一段 JavaScript），与 macOS 侧同一个决定：
+//!   宁可不带代理，也不猜一个。
 //! - 手动：用写死的这一个地址，三个平台、两次请求都只认它。
 //!
 //! ## 为什么探测函数不收在 trait 里
@@ -114,8 +117,7 @@ pub fn system_proxy() -> Option<String> {
             .ok()
             .and_then(|text| parse_scutil(&text)),
         "linux" => gnome_proxy(),
-        // Windows：检查更新走 PowerShell，它本来就跟随系统代理；下载那一步读不到 WinINET
-        // 是已知边界（`DEVELOPMENT.md` §13 的升级流程里写明了要手动指定代理的情形）。
+        "windows" => windows_proxy(),
         _ => None,
     }
 }
@@ -126,6 +128,24 @@ pub fn curl_proxy_args(choice: &ProxyChoice) -> Vec<String> {
         .then(system_proxy)
         .flatten();
     proxy_args(choice, system.as_deref())
+}
+
+/// Windows 那份「手动设置代理」所在的键：开关 `ProxyEnable` + 地址 `ProxyServer`。
+const WIN_INET_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+/// Windows 上 [`ProxyChoice::Follow`] 此刻对应的代理地址。
+///
+/// 覆盖的是**静态**那一份 —— 「设置 → 代理 → 手动设置代理」那一栏写的就是这两个值，
+/// 第三方客户端的「系统代理」开关最终也落在这里。另外两种自动配置读不出来：
+/// `AutoConfigURL`（PAC 脚本）与 `AutoDetect`（自动检测）都要下载并求值一段 JavaScript
+/// 才知道该用哪个代理，与 macOS 侧 [`parse_scutil`] 对 PAC 的态度是同一个决定 ——
+/// 宁可不带代理，也不猜一个。那种情况下这里返回 `None`，调用方按「没配代理」处理。
+///
+/// 补这一腿的意义：下载安装包走 curl，而 curl 在 Windows 上不读 WinINET，此前「跟随系统」
+/// 时只有检查更新（走 PowerShell）跟得上系统代理、下载却悄悄直连。补上后两条腿一致。
+fn windows_proxy() -> Option<String> {
+    let text = crate::platform::run("reg", &["query", WIN_INET_KEY]).ok()?;
+    parse_internet_settings(&text)
 }
 
 // —————————————————————————————— 探测与解析 ——————————————————————————————
@@ -204,6 +224,101 @@ pub fn parse_gnome_entry(host_text: &str, port_text: &str) -> Option<(String, u3
         return None;
     }
     Some((host.to_string(), port))
+}
+
+/// `reg query <键>` 的一条值行 → 它的值（跳过 `REG_SZ` / `REG_DWORD` 那个类型 token）。
+fn reg_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        if it.next()? != name {
+            return None;
+        }
+        let _ty = it.next()?;
+        let rest: Vec<&str> = it.collect();
+        (!rest.is_empty()).then(|| rest.join(" "))
+    })
+}
+
+/// 一个 `REG_DWORD` 值是不是 1（`reg query` 打成 `0x1`）。认不出形状一律当「没开」——
+/// 猜一个开关状态比承认读不到更糟。
+fn reg_flag(text: &str, name: &str) -> bool {
+    reg_value(text, name)
+        .and_then(|v| {
+            let hex = v
+                .strip_prefix("0x")
+                .or_else(|| v.strip_prefix("0X"))
+                .unwrap_or(v.as_str());
+            u32::from_str_radix(hex, 16).ok()
+        })
+        == Some(1)
+}
+
+/// `reg query <WIN_INET_KEY>` 的输出 → Windows 那份静态代理地址。
+///
+/// 值行形如 `    ProxyServer    REG_SZ    http=10.0.0.1:8080;https=10.0.0.2:8443`
+/// 与 `    ProxyEnable    REG_DWORD    0x1`。开关没开就是没配：一个关掉的地址照它发请求
+/// 只会连不上，而系统里确实还有「配了但先关着」这回事，不能看着地址就当能用。
+pub fn parse_internet_settings(text: &str) -> Option<String> {
+    if !reg_flag(text, "ProxyEnable") {
+        return None;
+    }
+    let raw = reg_value(text, "ProxyServer")?;
+    pick_proxy_server(&raw)
+}
+
+/// `ProxyServer` 的写法 → 一个能给 curl 用的代理地址。
+///
+/// 两种写法：裸地址（`proxy.corp:8080`，所有协议同一个）与分协议
+/// （`http=a:8080;https=b:8443;socks=c:1080`）。取用顺序 https → http → socks，
+/// 与 [`parse_scutil`] 同一条判据：本应用发出的都是 https 请求，系统里单列了 https 代理
+/// 时按它走才是用户的意思。`https=` / `http=` 都是 HTTP 代理（curl 走 CONNECT 隧道发
+/// https），`socks=` 按 socks5 拼 —— Windows 早已不限于 socks4，与 macOS 侧一致。
+///
+/// 值里自带 scheme（`socks5://a:1080`）时原样保留，最后都过一遍 [`normalize_proxy_url`]：
+/// 它能挡掉 `file://` 之类不该成为代理的写法。
+pub fn pick_proxy_server(raw: &str) -> Option<String> {
+    let mut bare: Option<&str> = None;
+    let mut by_scheme: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for part in raw.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('=') {
+            Some((k, v)) => {
+                by_scheme.insert(k.trim().to_ascii_lowercase(), v.trim());
+            }
+            None => {
+                if bare.is_none() {
+                    bare = Some(part);
+                }
+            }
+        }
+    }
+
+    let mut candidates: Vec<String> = Vec::new();
+    for key in ["https", "http"] {
+        if let Some(v) = by_scheme.get(key) {
+            candidates.push(schemed(v, "http"));
+        }
+    }
+    for key in ["socks", "socks5"] {
+        if let Some(v) = by_scheme.get(key) {
+            candidates.push(schemed(v, "socks5"));
+        }
+    }
+    if let Some(v) = bare {
+        candidates.push(schemed(v, "http"));
+    }
+    candidates.iter().find_map(|c| normalize_proxy_url(c))
+}
+
+/// 给一个 `host:port` 补上 scheme；自带 `scheme://` 时原样返回。
+fn schemed(value: &str, default_scheme: &str) -> String {
+    if value.contains("://") {
+        return value.to_string();
+    }
+    format!("{default_scheme}://{value}")
 }
 
 /// 一次 `gsettings get <schema> <key>`。命令不存在（非 GNOME 桌面）或报错时 `None`。
@@ -406,5 +521,67 @@ mod tests {
         // 形状不对的地址：与保存路径同一句判据，探测因此不会走上一条保存时会被拒的路。
         assert_eq!(choice_from_ui("manual", "127.0.0.1:7890"), None);
         assert_eq!(choice_from_ui("manual", ""), None);
+    }
+
+    /// Windows 那份静态代理：开关 + 分协议地址。取用顺序 https → http → socks 与 macOS 一致，
+    /// 因为本应用发出的都是 https —— 系统里单列了 https 代理时按它走才是用户的意思。
+    #[test]
+    fn windows_static_proxy_is_read_from_the_internet_settings_key() {
+        let reg = "\
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings
+    ProxyEnable    REG_DWORD    0x1
+    ProxyServer    REG_SZ    http=10.0.0.1:8080;https=10.0.0.2:8443;socks=10.0.0.3:1080
+    ProxyOverride    REG_SZ    localhost;127.0.0.1
+
+End of search: 3 match(es) found.";
+        assert_eq!(
+            parse_internet_settings(reg).as_deref(),
+            Some("http://10.0.0.2:8443")
+        );
+    }
+
+    /// 关掉的开关 / 只有 PAC 脚本，一律「没配」。PAC 那份要下载并求值一段 JavaScript 才知道
+    /// 用哪个代理，与 macOS 侧 `parse_scutil` 对 PAC 的态度是同一个决定 —— 宁可不带，也不猜。
+    #[test]
+    fn a_disabled_or_pac_only_windows_proxy_is_not_a_proxy() {
+        let off = "\
+HKEY_CURRENT_USER\\Software\\...\\Internet Settings
+    ProxyEnable    REG_DWORD    0x0
+    ProxyServer    REG_SZ    http=10.0.0.1:8080";
+        assert_eq!(parse_internet_settings(off), None);
+
+        let pac = "\
+HKEY_CURRENT_USER\\Software\\...\\Internet Settings
+    AutoConfigURL    REG_SZ    http://intranet/proxy.pac
+    AutoDetect    REG_DWORD    0x1";
+        assert_eq!(parse_internet_settings(pac), None);
+    }
+
+    /// `ProxyServer` 的三种写法：裸地址、分协议的 socks、自带 scheme。
+    #[test]
+    fn proxy_server_accepts_bare_addresses_and_explicit_schemes() {
+        // 裸地址：所有协议同一个，Windows 设置里填「地址:端口」就是这种。
+        assert_eq!(
+            pick_proxy_server("proxy.corp.local:8080").as_deref(),
+            Some("http://proxy.corp.local:8080")
+        );
+        // 只有 socks：拼成 socks5（Windows 早已不限于 socks4，与 macOS 侧一致）。
+        assert_eq!(
+            pick_proxy_server("socks=127.0.0.1:1080").as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        // 值里自带 scheme 时原样保留，不再叠一层。
+        assert_eq!(
+            pick_proxy_server("socks5://127.0.0.1:1080").as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        // 没有 https 但有 http：退回 http，而不是当作没配。
+        assert_eq!(
+            pick_proxy_server("http=10.0.0.1:8080").as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+        // 形状不对的地址照样被挡掉（scheme 白名单那一层）。
+        assert_eq!(pick_proxy_server("file:///etc/passwd"), None);
+        assert_eq!(pick_proxy_server(""), None);
     }
 }
