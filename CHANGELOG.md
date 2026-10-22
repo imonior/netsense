@@ -4,6 +4,21 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-10-23
+
+### Fixed
+
+- **Windows no longer prompts for authorization repeatedly.** The elevated apply path was chosen from whether the helper channel reported `Direct` (already connected), which made it bypass the helper and spawn a fresh `-Verb RunAs` for every batch even while the helper was alive — that was the real root cause of the repeated UAC prompts. Apply now always uses the elevated helper when reachable, and falls back to a per-batch UAC only when the helper genuinely cannot be reached. (`windows.rs`, `win_helper.rs`)
+- **First-boot settings load is no longer slow on Windows.** `is_admin()` spawned a PowerShell probe on every settings open and every apply; it now caches the result for the session. (`windows.rs`)
+- **Admin machines no longer pop a UAC on every restart or app reopen.** A logon-time, highest-privilege scheduled task (`schtasks /Create /SC ONLOGON /RL HIGHEST`) now launches the elevated helper, so the always-on privilege channel is ready at login and the 15-second helper spawn poll no longer delays first paint. On standard-user / non-elevatable machines the task cannot register, and the helper gracefully falls back to per-batch UAC (unchanged behavior). (`win_helper.rs`, `platform.rs`)
+- **Standard-user / non-elevatable Windows no longer triggers a UAC or a 15-second stall on a config-already-satisfied boot.** `apply_3a` now diffs the live system against the desired config *before* any elevated apply; a read needs no privilege, so when the system already matches, the apply (and its UAC / helper poll) is skipped entirely. A real mismatch (e.g. a non-persistent route lost after reboot) still applies as before. (`network/mod.rs`)
+- **A user-added proxy no longer disappears from the Update path list after reloading settings.** It was applied but not re-rendered; the manual proxy is now persisted and shown as a deletable row. (`settings.html`)
+
+### Changed
+
+- **Preset update mirrors are shown only when the egress IP is in mainland China, and the list is reduced to the two highest-value mirrors** (`gh-proxy.com`, `ghfast.top`). Custom mirrors remain deletable and addable everywhere. The mainland decision is computed backend-side (`is_mainland`, derived from the geolocation string) so no Chinese literal lives in the frontend. (`appconfig.rs`, `ipc.rs`, `settings.html`)
+- **The Update path speed test now measures the real download through each path's own choice.** Each row is probed against the exact URL it would use to upgrade (`releases/latest/download/SHA256SUMS`, mirror-prefixed when a mirror is selected) through that row's own proxy/mirror combination, so the latency shown is the actual upgrade cost for that path. (`ipc.rs`)
+
 ## [1.7.1] - 2026-10-16
 
 ### Fixed

@@ -276,8 +276,18 @@ fn run_elevated_target(file: &str, args: &[&str]) -> Result<(), String> {
 }
 
 /// 当前是否以管理员身份运行（决定 `PrivChannel`）。
+///
+/// 进程令牌在一次会话内不会变，缓存结果：否则每次下发、每次打开设置（`get_app_settings`
+/// 都走 `priv_channel`）都要新拉一次 PowerShell —— 冷启动时 PowerShell 5.1 的启动叠上 CIM /
+/// 模块加载单项就到一两秒，叠加起来正是「首次启动加载太慢」的来源之一。
 fn is_admin() -> bool {
-    // 用 .NET 判组身份，比 `net session` 之类的探测更快且无副作用。
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(compute_is_admin)
+}
+
+/// 真正去问一次管理员身份（见 [`is_admin`] 的缓存理由）。用 .NET 判组身份，比 `net session`
+/// 之类的探测更快且无副作用。
+fn compute_is_admin() -> bool {
     ps("$id=[Security.Principal.WindowsIdentity]::GetCurrent();\
         $p=New-Object Security.Principal.WindowsPrincipal($id);\
         if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { '1' } else { '0' }")
@@ -940,8 +950,13 @@ fn exec_ops(ops: &[WinOp]) -> Result<(), String> {
     // 只弹一次」—— helper 按登录用户命名、跨应用重启存活，所以正常用法下整个下午都只弹
     // 一次，而不是每启动一次应用弹一次。执行的本就是同一份 PowerShell。够不着 helper 才退回
     // 原来的逐批 `run_elevated_ps`，而且退回的那一刻在日志里留下原因（`win_helper::log_fallback`）。
-    // 已是管理员（Direct）时 -Verb RunAs 本就不弹窗，不必多绕一条管道。
-    let r = if matches!(priv_channel(), PrivChannel::Prompt) {
+    // 这里**不再**用 `priv_channel()` 决定走哪条路：那个函数回答的是「现在还要不要弹框」，而
+    // 一旦 helper 已经连上它返回 Direct —— 若据此跳过 helper 直走 `run_elevated_ps`，反而会在
+    // helper 活着的时候每批都弹一次 UAC（正是此前反复弹授权的根因）。下发走 helper 与否只取决于
+    // helper 此刻够不够得着。已是管理员（进程本身提权）时 -Verb RunAs 本就不弹窗，不必多绕一条管道。
+    let r = if is_admin() {
+        run_elevated_ps(&body)
+    } else {
         match super::win_helper::run_batch(&body) {
             super::win_helper::Outcome::Done(r) => r,
             super::win_helper::Outcome::Unavailable(reason) => {
@@ -949,8 +964,6 @@ fn exec_ops(ops: &[WinOp]) -> Result<(), String> {
                 run_elevated_ps(&body)
             }
         }
-    } else {
-        run_elevated_ps(&body)
     };
     invalidate_cache();
     r

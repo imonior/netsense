@@ -174,11 +174,13 @@ impl UpdateMirror {
 /// 那一档始终留着，填什么都不必等下一个版本。用户删掉的记在 [`AppConfig::mirror_hidden`]
 /// 里，而不是把这份列表本身存下来 —— 列表跟着版本走（新版本可能新增预设），存一份自选
 /// 清单就多一个会说谎的来源。
-pub const MIRROR_PRESETS: [&str; 4] = [
+// 只留两个高价值主镜像：这类社区加速站会换地址、会关停，列太多反而凑数。
+// 预设只在「公网 IP 归属地为大陆」时才摆出来（见 settings.html 的 buildPaths），
+// 其余地区用「自定义前缀」那一档自己填。gh-proxy.com 是最早的主站，ghfast.top 是
+// 当前活跃度较高的一档；要换更稳的，改这里即可，预设跟着版本走、不用存用户自选清单。
+pub const MIRROR_PRESETS: [&str; 2] = [
     "https://gh-proxy.com/",
     "https://ghfast.top/",
-    "https://ghproxy.net/",
-    "https://mirror.ghproxy.com/",
 ];
 
 /// 一个能用的镜像前缀长什么样：`https://` 开头、host 非空、不含空白与路径回退。
@@ -406,6 +408,13 @@ impl AppConfig {
             .filter(|p| !self.mirror_hidden.iter().any(|h| h == *p))
             .map(|p| p.to_string())
             .collect()
+    }
+
+    /// 代码里那份**完整的**预置镜像清单（不受用户删除影响）。界面用它区分「预置」与
+    /// 「用户自定义」：非大陆时把预置行整体收起，但用户自己加的镜像仍照常显示 —— 否则
+    /// 漫游出大陆后，曾选中的预置镜像会被误当成「自定义」重新摆出来。
+    pub fn mirror_presets_all() -> Vec<String> {
+        MIRROR_PRESETS.iter().map(|p| p.to_string()).collect()
     }
 
     /// 删掉一个预置镜像。不是预设时返回 `false`（自定义前缀不进这张表）。
@@ -1072,13 +1081,18 @@ mod tests {
         assert!(!cfg.mirror_presets().iter().any(|p| p == MIRROR_PRESETS[1]));
         assert_eq!(cfg.mirror_presets().len(), MIRROR_PRESETS.len() - 1);
 
-        // 删正在用的那一个：选中值退回直连。
-        cfg.update_mirror = UpdateMirror::Prefix(MIRROR_PRESETS[2].into());
-        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[2]));
+        // 再删另一个没用过的：列表清空，hidden 记上两个。
+        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[0]));
+        assert_eq!(cfg.mirror_presets().len(), 0);
+        assert_eq!(cfg.mirror_hidden.len(), 2);
+
+        // 删正在用的那一个：选中值退回直连（先重新设一个再删）。
+        cfg.update_mirror = UpdateMirror::Prefix(MIRROR_PRESETS[0].into());
+        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[0]));
         assert_eq!(cfg.update_mirror, UpdateMirror::Direct);
 
         // 重复删是幂等的；不是预设的一律拒（自定义前缀不进这张表）。
-        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[2]));
+        assert!(cfg.hide_mirror_preset(MIRROR_PRESETS[0]));
         assert_eq!(cfg.mirror_hidden.len(), 2);
         assert!(!cfg.hide_mirror_preset("https://example.com/"));
 

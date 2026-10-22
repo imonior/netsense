@@ -82,6 +82,16 @@ use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 /// GUI 拉起 helper 时传的隐藏子命令（放在第一个参数位置）。
 pub(crate) const HELPER_ARG: &str = "--netsense-helper";
 
+/// 由计划任务（Task Scheduler）在用户登录时以最高权限拉起的 helper 形态。
+///
+/// 与 [`HELPER_ARG`] 的区别在于**不绑定某个 GUI 进程的生命周期**：整个登录会话常驻，
+/// 直到注销由任务计划程序回收。这样升级后 / 重启机器后，常驻提权通道在用户登录时就绪，
+/// 应用不再为每一次开机多弹一次 UAC，也省掉拉起 helper 那段 15 秒轮询对首屏的拖累。
+/// 它仍按**登录用户**的 SID 命名管道（与 GUI 侧算出的名字逐字相同），DACL 与「同一个 exe」
+/// 核验也照旧 —— 授权范围没有因此放松。两种形态都会在启动时顺手注册计划任务，于是第一次
+/// 走逐次 UAC 之后，「下一次开机」起就转由本形态接管。
+pub(crate) const HELPER_SVC_ARG: &str = "--netsense-helper-service";
+
 /// 管道行协议版本。每次改了请求/响应形状都必须 +1，否则旧 helper（升级前起、同管道名
 /// 还活着的那一个）会按旧语义执行这一批，而它和「版本不符」的客户端之间没有任何东西能
 /// 拦住这条错配（审计 W4：macOS 那一侧早就有「版本不符」通道检查，Windows 这一侧缺）。
@@ -95,7 +105,15 @@ const VERSION_MISMATCH: u32 = 130;
 
 /// 本进程是否处于 helper 模式（`main` 在所有 GUI 装配之前问这个）。
 pub(crate) fn helper_mode() -> bool {
-    std::env::args().nth(1).as_deref() == Some(HELPER_ARG)
+    matches!(
+        std::env::args().nth(1).as_deref(),
+        Some(HELPER_ARG) | Some(HELPER_SVC_ARG)
+    )
+}
+
+/// 本进程是否处于「服务形态」helper（由计划任务以最高权限拉起，不绑定某个 GUI 进程）。
+pub(crate) fn helper_service_mode() -> bool {
+    std::env::args().nth(1).as_deref() == Some(HELPER_SVC_ARG)
 }
 
 /// 管道名按**登录用户**而不是按 GUI 进程 PID 命名。
@@ -173,31 +191,48 @@ pub(crate) fn serve() -> i32 {
     // 字典装起来只有一个理由：spawn 子进程失败时的错误文本是给用户看的（经管道回到
     // GUI 界面），没装字典就只剩裸 key。
     i18n::init();
-    let raw = std::env::args().nth(2).unwrap_or_default();
-    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
-        return EXIT_BAD_ARG;
-    }
-    let Ok(gui_pid) = raw.parse::<u32>() else {
-        return EXIT_BAD_ARG;
+    // 服务形态（计划任务在登录时拉起）不绑定某个 GUI 进程；普通形态由 GUI 经 UAC 拉起、
+    // 带着 GUI 的 PID 用于判活。两种形态都会顺手注册计划任务，于是「下一次开机」起就转由
+    // 服务形态接管，避免每次重启机器都再多弹一次 UAC、以及拉起 helper 那段 15 秒轮询对首屏的拖累。
+    let service = helper_service_mode();
+    let gui_pid: Option<u32> = if service {
+        None
+    } else {
+        let raw = std::env::args().nth(2).unwrap_or_default();
+        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+            return EXIT_BAD_ARG;
+        }
+        match raw.parse::<u32>() {
+            Ok(p) => Some(p),
+            Err(_) => return EXIT_BAD_ARG,
+        }
     };
     if !matches!(priv_channel(), PrivChannel::Direct) {
         return EXIT_NOT_ADMIN;
     }
-    // 管道名与 DACL 都以 GUI 那个账户的 SID 为准（[`gui_user_sid`]）。读不出来就没有
-    // SID —— 管道名算不出来、DACL 也没法点名谁，一律退场（fail-closed）。这与旧实现
-    // 「退到 IU（交互式登录组）」是相反的选择：IU 也许能覆盖真正的登录用户，但它同时
-    // 把这条常提权通道开放给了机器上所有交互式会话，而现在这条通道已经按 SID 命名、
-    // 授权范围必须跟着收窄，不能靠一个更宽的兜底来「提高成功率」。
-    let Some(sid) = gui_user_sid(gui_pid) else {
-        return EXIT_NO_CLIENT;
+    // 登录时就把常驻通道的任务注册好（幂等、非致命）。放在管理员校验之后、管道创建之前：
+    // 即便这一次管道建不起来，任务也已就位，下一次开机由它接手。
+    register_helper_task();
+    // 管道名与 DACL 都以**登录用户**的 SID 为准。普通形态按 GUI PID 取 SID（兼容「标准用户 +
+    // 管理员凭据」那种抬升，那个情形下 helper 跑在另一个账户下）；服务形态没有 GUI 可查，
+    // 改用本进程自己的令牌（提权侧与 GUI 同属一个登录用户，SID 一致）。读不出来一律退场
+    // （fail-closed）：管道名算不出来、DACL 也没法点名谁。
+    let sid = if let Some(pid) = gui_pid {
+        match gui_user_sid(pid) {
+            Some(s) => s,
+            None => return EXIT_NO_CLIENT,
+        }
+    } else {
+        match own_user_sid() {
+            Some(s) => s,
+            None => return EXIT_NO_CLIENT,
+        }
     };
     let name = to_wide(&pipe_path(&sid));
     let sddl = format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;MM)");
-    // GUI 进程句柄（带 SYNCHRONIZE），用于判活。句柄在本函数结束时随进程一起消失，不需要
-    // 显式 CloseHandle —— 而这里也**不能**提前关：整个退场判据都建立在它身上。
-    let Some(gui) = open_gui_handle(gui_pid) else {
-        return EXIT_NO_CLIENT;
-    };
+    // GUI 进程句柄（带 SYNCHRONIZE），仅普通形态用于判活；服务形态不跟随单个 GUI，为 `None`。
+    // 句柄在本函数结束时随进程一起消失，不需要显式 CloseHandle。
+    let gui = gui_pid.and_then(open_gui_handle);
 
     let (tx, rx) = std::sync::mpsc::channel::<Result<File, i32>>();
     // accept 工作线程：反复建实例、直到接上**同一个 exe**（`accept_one` 内部核验），
@@ -227,37 +262,55 @@ pub(crate) fn serve() -> i32 {
     match rx.recv_timeout(FIRST_CLIENT_WAIT) {
         Ok(Ok(pipe)) => session(pipe),
         Ok(Err(code)) => return code,
-        Err(_) => return EXIT_NO_CLIENT,
-    }
-
-    // 之后：GUI 还在就无限等，GUI 走了再给一段重连宽限。
-    // 「GUI 退出的时刻」要在**进入宽限之前**记下来 —— 判活每 RECONNECT_TICK 一次，
-    // 拿「这一轮开始时」当基准会把退出时刻一次次往后推，宽限就永远不到期。
-    let mut gone_since: Option<Instant> = None;
-    loop {
-        let tick = if gone_since.is_some() {
-            RECONNECT_TICK
-        } else {
-            LIVING_TICK
-        };
-        if let Some(since) = gone_since {
-            if since.elapsed() >= RECONNECT_WAIT {
-                return 0;
+        Err(_) => {
+            // 服务形态：登录后一时没人用，不退出 —— 整个会话常驻，等用户打开应用再接。
+            // 普通形态：GUI 在连上之前就没了，一个提权进程留着毫无意义。
+            if gui_pid.is_some() {
+                return EXIT_NO_CLIENT;
             }
         }
-        match rx.recv_timeout(tick) {
-            Ok(Ok(pipe)) => {
-                // 有客户端接上了：宽限重新开始计（客户端来了就说明 GUI 回来了，
-                // 先前判定的「GUI 已退出」不再成立）。
-                session(pipe);
-                gone_since = None;
-            }
-            Ok(Err(code)) => return code,
-            Err(_) => {
-                if gui_is_gone(gui) && gone_since.is_none() {
-                    gone_since = Some(Instant::now());
+    }
+
+    if let Some(gui) = gui {
+        // 普通形态：GUI 还在就无限等，GUI 走了再给一段重连宽限。
+        // 「GUI 退出的时刻」要在**进入宽限之前**记下来 —— 判活每 RECONNECT_TICK 一次，
+        // 拿「这一轮开始时」当基准会把退出时刻一次次往后推，宽限就永远不到期。
+        let mut gone_since: Option<Instant> = None;
+        loop {
+            let tick = if gone_since.is_some() {
+                RECONNECT_TICK
+            } else {
+                LIVING_TICK
+            };
+            if let Some(since) = gone_since {
+                if since.elapsed() >= RECONNECT_WAIT {
+                    return 0;
                 }
-                // gui_is_gone() 为 false 时什么都不做：GUI 还活着，继续等下一轮。
+            }
+            match rx.recv_timeout(tick) {
+                Ok(Ok(pipe)) => {
+                    // 有客户端接上了：宽限重新开始计（客户端来了就说明 GUI 回来了，
+                    // 先前判定的「GUI 已退出」不再成立）。
+                    session(pipe);
+                    gone_since = None;
+                }
+                Ok(Err(code)) => return code,
+                Err(_) => {
+                    if gui_is_gone(gui) && gone_since.is_none() {
+                        gone_since = Some(Instant::now());
+                    }
+                    // gui_is_gone() 为 false 时什么都不做：GUI 还活着，继续等下一轮。
+                }
+            }
+        }
+    } else {
+        // 服务形态：不做判活、不随 GUI 退出，整个登录会话服务；注销时由任务计划程序回收。
+        // 任一客户端断开（EOF）就回到等待，下一个连上来的 GUI 接的是同一个提权进程。
+        loop {
+            match rx.recv_timeout(LIVING_TICK) {
+                Ok(Ok(pipe)) => session(pipe),
+                Ok(Err(code)) => return code,
+                Err(_) => {} // 空转一拍，继续等下一个客户端。
             }
         }
     }
@@ -784,6 +837,42 @@ fn open_conn() -> Option<Conn> {
             None
         }
     }
+}
+
+/// 注册 / 注销「登录时以最高权限常驻的提权助手」计划任务。
+///
+/// 这个任务在用户登录时由任务计划程序拉起 [`HELPER_SVC_ARG`] 形态的服务助手（无需 UAC
+/// 弹窗），于是重启机器、或关掉应用再打开，都不再为建立提权通道多弹一次框，也省掉拉起
+/// helper 那段 15 秒轮询对首屏的拖累。任务幂等：`/F` 覆盖同名旧任务。
+///
+/// 必须在**提权侧**调用（helper 本身就是 elevated）。普通形态（GUI 经 UAC 拉起的那种）
+/// 也会顺手注册，所以即便第一次使用走的是逐次 UAC，下一次开机就转由本任务接管。
+///
+/// 失败是非致命的：注册不成功只是退回「下次开机仍弹一次 UAC」的旧行为，不影响本次会话。
+fn register_helper_task() {
+    // 注册这一步只依赖本进程的路径，不需要 GUI 在场 —— 服务形态在登录那一刻本就没有 GUI。
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let tr = format!("\"{}\" {}", exe.display(), HELPER_SVC_ARG);
+    // `schtasks /Create /SC ONLOGON /RL HIGHEST`：以最高权限、在用户登录时静默拉起，
+    // 不弹 UAC（这是任务计划程序对「已配置最高权限的登录任务」的标准行为）。
+    match crate::platform::run(
+        "schtasks.exe",
+        &[
+            "/Create", "/TN", "NetSenseHelper", "/TR", &tr, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
+        ],
+    ) {
+        Ok(_) => {}
+        Err(e) => crate::log::warn(&i18n::tf("pal.task_register_failed", &[("error", e.as_str())])),
+    }
+}
+
+/// 撤销 [`register_helper_task`] 注册的计划任务（「移除免密通道」在 Windows 侧的落点）。
+///
+/// 注销时找不到任务（本来就没注册 / 已被手动删）一律当成功：这是「移除」语义，多删一次无害。
+pub(crate) fn unregister_helper_task() {
+    let _ = crate::platform::run("schtasks.exe", &["/Delete", "/TN", "NetSenseHelper", "/F"]);
 }
 
 /// 用同一个 exe、带着自己的 PID，提权拉起 helper。

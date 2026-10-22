@@ -329,6 +329,7 @@ fn main() {
             ipc::hide_update_mirror,
             ipc::restore_update_mirror_presets,
             ipc::mirror_speed_test,
+            ipc::update_path_speed_test,
             ipc::get_public_ip,
             ipc::probe_public_ip,
             ipc::set_dns_fallback,

@@ -49,7 +49,23 @@ pub fn apply_3a<P: NetworkPlatform>(
     let mut before = plat.get_status();
     before.target = cfg.target;
     before.routes = plat.get_routes();
-    
+
+    // 1b. 下发前比对当前快照与期望配置：系统已符合期望就**跳过下发**。
+    //     读取（get_status / get_routes）不需要提权，于是标准用户 / 无法提权的机器上，
+    //     「配置本就合规」的那一类开机不再弹 UAC、也不再等常驻 helper 的 15 秒轮询。
+    //     这条比对与下方下发后的回读校验是同一份逻辑（readback_match），因此「跳过」与
+    //     「下发成功且回读通过」结果完全等价 —— 只是省了一次（可能提权的）下发。
+    // 1b. Pre-apply diff: when the live system already matches the desired config, skip the
+    //     apply. Reads need no privilege, so on standard-user / non-elevatable machines a
+    //     "config already satisfied" boot no longer pops a UAC or waits on the 15s helper poll.
+    //     The diff is the same logic used for post-apply verification (readback_match), so
+    //     "skip" is identical in outcome to "applied and verified" — only a (possibly
+    //     elevated) apply is saved.
+    if readback_match(plat, cfg, &before.routes).is_ok() {
+        crate::log::debug(&i18n::t("net.skip_already_applied"));
+        return Stage3A::Applied { note: None };
+    }
+
     // 2. 下发网络配置
     if let Err(e) = plat.apply_network(cfg) {
         // 下发失败：尝试回滚
@@ -188,6 +204,83 @@ mod tests {
             ),
             Stage3A::Failed { reason } => panic!("有兜底且确实补上了就该通过: {reason}"),
         }
+    }
+
+    /// 下发前 diff：系统当前状态已等于期望配置时，必须跳过 `apply_network`，
+    /// 直接返回 `Applied` —— 这样标准用户 / 无法提权的机器在「配置本就合规」的开机上
+    /// 不会触发提权下发（无谓的 UAC + 15 秒 helper 轮询）。
+    /// 跳过与「下发成功且回读通过」结果等价，只是省了一次下发。
+    #[test]
+    fn already_satisfied_config_skips_the_elevated_apply() {
+        use crate::platform::{Call, InterfaceStatus, MockPlatform};
+        let mock = MockPlatform::new();
+        mock.clear_calls();
+        let cfg = NetworkConfig {
+            mode: crate::config::Mode::Manual,
+            ip: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1,8.8.8.8".into()),
+            ..Default::default()
+        };
+        // 系统当前状态已经等于期望配置
+        // The live system already equals the desired config.
+        mock.set_state(InterfaceStatus {
+            connected: true,
+            ipv4: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1 8.8.8.8".into()),
+            ..Default::default()
+        });
+        let res = apply_3a(&mock, &cfg, &[]);
+        assert!(
+            matches!(res, Stage3A::Applied { .. }),
+            "已符合期望应直接 Applied: {:?}",
+            res
+        );
+        let calls = mock.calls();
+        assert!(
+            !calls.iter().any(|c| matches!(c, Call::ApplyNetwork { .. })),
+            "已符合期望时不应调用 apply_network（避免无谓的提权下发）: {:?}",
+            calls
+        );
+    }
+
+    /// 下发前 diff 的反面：系统状态与期望不符时，仍必须走 `apply_network`。
+    /// 这条保证「真的有差异（如重启后非持久路由丢失）时该弹 UAC 还是弹」，不会误跳。
+    #[test]
+    fn mismatch_still_triggers_apply() {
+        use crate::platform::{Call, InterfaceStatus, MockPlatform};
+        let mock = MockPlatform::new();
+        mock.clear_calls();
+        let cfg = NetworkConfig {
+            mode: crate::config::Mode::Manual,
+            ip: Some("192.168.1.100".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1,8.8.8.8".into()),
+            ..Default::default()
+        };
+        // 系统停在旧 / 错误地址
+        // The system is stuck on a stale address.
+        mock.set_state(InterfaceStatus {
+            connected: true,
+            ipv4: Some("169.254.23.9".into()),
+            ..Default::default()
+        });
+        let res = apply_3a(&mock, &cfg, &[]);
+        assert!(
+            matches!(res, Stage3A::Applied { .. }),
+            "下发后应通过: {:?}",
+            res
+        );
+        let calls = mock.calls();
+        assert!(
+            calls.iter().any(|c| matches!(c, Call::ApplyNetwork { .. })),
+            "状态不符时必须仍然调用 apply_network: {:?}",
+            calls
+        );
     }
 
     /// 兜底没补上就是没补上：`apply_dns_only` 返回 Ok 只代表命令被接受，

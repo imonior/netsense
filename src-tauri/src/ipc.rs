@@ -555,7 +555,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
     let backup_dir = crate::backup::dir(&backup_sources(&state)).display().to_string();
     // 代理只报存下来的那一态，不在这里探测系统：这个命令每次窗口获得焦点都会跑一遍，
     // 而「读一次系统代理」在 Linux 上是好几条 `gsettings` 进程。实况走 `get_proxy_state`。
-    let (proxy_mode, proxy_url, mirror_presets, mirror_hidden_count) = {
+    let (proxy_mode, proxy_url, mirror_presets, mirror_hidden_count, mirror_presets_all) = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         let (mode, url) = match &s.proxy {
             crate::netproxy::ProxySetting::Direct => ("direct", None),
@@ -567,6 +567,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
             url,
             s.mirror_presets(),
             s.mirror_hidden.len(),
+            crate::appconfig::AppConfig::mirror_presets_all(),
         )
     };
     let payload = json!({
@@ -603,6 +604,9 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         // 下拉，而不是进页面时填一次。`mirror_hidden_count` 只为「恢复」链接的显隐。
         "mirror_presets": mirror_presets,
         "mirror_hidden_count": mirror_hidden_count,
+        // 完整的预置清单（不受删除影响）：界面据此区分「预置」与「用户自定义」，
+        // 非大陆时把预置行收起、自定义行仍显示。
+        "mirror_presets_all": mirror_presets_all,
         // DNS 兜底给界面的是「开关 + 逗号分隔的一串」：`DnsFallback` 自己的序列化形状
         // 带 `skip_serializing_if`，空列表会被整个省略，界面就得处理第三种状态。
         "dns_fallback_enabled": dns_fallback.enabled,
@@ -931,6 +935,60 @@ pub fn proxy_speed_test(urls: Vec<String>) -> Result<String, String> {
         let proxy = ["--proxy".to_string(), url.clone()];
         out.push(json!({ "url": url, "ms": timed_get(PROBE, &proxy) }));
     }
+    Ok(serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()))
+}
+
+/// 升级通路列表里一行的完整描述：出口选择 + 镜像前缀（空串 = 直连 GitHub）。
+///
+/// 与界面上那张「每行一条」的列表一一对应。出口与地址是**互斥的分类**（直连 / 跟随系统 /
+/// 某个代理 / 某个镜像），不是叠加 —— 选定一行时另一维一律退回直连。
+#[derive(serde::Deserialize)]
+pub struct PathSpec {
+    pub proxy_mode: String,
+    pub proxy_url: String,
+    pub mirror: String,
+}
+
+/// 给升级通路列表里的每一项各测一次**真实下载连接**的耗时。
+///
+/// 与 [`mirror_speed_test`] / [`proxy_speed_test`] 不同，这里每一项自带完整的「出口 + 地址」
+/// 组合，而不是把存着的代理硬套到镜像测试上。测的是更新时真会用的那条 URL
+/// （`releases/latest/download/SHA256SUMS`，经镜像时拼前缀），出口用该项自己的选择 ——
+/// 这样每一行显示的数字就是「选这条路去升级实际要多久」。各项并行探测，总时长取最慢的那个。
+#[tauri::command(async)]
+pub fn update_path_speed_test(paths: Vec<PathSpec>) -> Result<String, String> {
+    if paths.len() > 16 {
+        return Err(i18n::t("sett.mirror_too_many"));
+    }
+    const PROBE: &str =
+        "https://github.com/imonior/netsense/releases/latest/download/SHA256SUMS";
+    let out: Vec<serde_json::Value> = std::thread::scope(|s| {
+        let handles: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                s.spawn(|| {
+                    let choice =
+                        crate::netproxy::choice_from_ui(&p.proxy_mode, &p.proxy_url);
+                    let proxy = choice
+                        .as_ref()
+                        .map(crate::netproxy::curl_proxy_args)
+                        .unwrap_or_default();
+                    let url = if p.mirror.trim().is_empty() {
+                        PROBE.to_string()
+                    } else {
+                        crate::update::mirrored_url(
+                            PROBE,
+                            &crate::appconfig::UpdateMirror::Prefix(
+                                p.mirror.trim().to_string(),
+                            ),
+                        )
+                    };
+                    json!({ "ms": timed_get(&url, &proxy) })
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
     Ok(serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()))
 }
 
@@ -1711,6 +1769,19 @@ fn fetch_text(url: &str, proxy_args: &[String]) -> Result<String, String> {
 struct IpInfo {
     ip: String,
     location: Option<String>,
+    /// 归属地是否在中国大陆（HK / 澳门 / 台湾是独立国名，不算）。用于设置界面「仅在大陆摆出预置镜像」。
+    is_mainland: bool,
+}
+
+/// 由归属地推导是否中国大陆：location 以「中国」开头即算（api.ip.sb 等对中国返回「中国」，
+/// 对境外返回「美国 / 日本」等独立国名）。源码不出现中文字面量 —— 比较用转义写。
+fn mark_mainland(mut info: IpInfo) -> IpInfo {
+    info.is_mainland = info
+        .location
+        .as_deref()
+        .map(|l| l.starts_with("\u{4e2d}\u{56fd}"))
+        .unwrap_or(false);
+    info
 }
 
 /// 出口公网 IP 是否像样（架构上的 Egress / Public IP 层）。
@@ -1745,7 +1816,7 @@ fn probe_ip(choice: &crate::netproxy::ProxyChoice) -> Option<IpInfo> {
         for (url, parse) in IP_ENDPOINTS {
             if let Ok(bytes) = fetch_url_powershell(url) {
                 if let Some(info) = parse(&String::from_utf8_lossy(&bytes)) {
-                    return Some(info);
+                    return Some(mark_mainland(info));
                 }
             }
         }
@@ -1755,7 +1826,7 @@ fn probe_ip(choice: &crate::netproxy::ProxyChoice) -> Option<IpInfo> {
     for (url, parse) in IP_ENDPOINTS {
         if let Ok(body) = fetch_text(url, &proxy) {
             if let Some(info) = parse(&body) {
-                return Some(info);
+                return Some(mark_mainland(info));
             }
         }
     }
@@ -1782,6 +1853,7 @@ fn parse_ipip(text: &str) -> Option<IpInfo> {
     Some(IpInfo {
         ip: ip.to_string(),
         location,
+        is_mainland: false,
     })
 }
 
@@ -1802,6 +1874,7 @@ fn parse_ipsb(text: &str) -> Option<IpInfo> {
     Some(IpInfo {
         ip: ip.to_string(),
         location: (!parts.is_empty()).then(|| parts.join(", ")),
+        is_mainland: false,
     })
 }
 
@@ -1812,6 +1885,7 @@ fn parse_ipify(text: &str) -> Option<IpInfo> {
     is_plausible_ip(ip).then(|| IpInfo {
         ip: ip.to_string(),
         location: None,
+        is_mainland: false,
     })
 }
 

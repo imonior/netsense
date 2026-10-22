@@ -81,7 +81,10 @@
     /* 升级那两行是「当前版本 / 最新版本」这样按行堆叠的，不是拼不成句的一段散文 */
     #hint-update { white-space: pre-line; }
     .err { margin-top: 6px; color: var(--t-err); font-size: 11px; word-break: break-word; }
-    .err[hidden], .hint[hidden] { display: none; }
+    /* `hidden` 是 UA 样式表里的 `[hidden] { display: none }`，而上面 `.row` 的 `display: flex`
+       是作者样式表 —— 同优先级下作者胜出，于是一切 `class="row" hidden` 的元素**照常显示**
+       （升级按钮那一行就是这么漏出来的）。凡是自己设了 `display` 的类都要在这里补回来。 */
+    .err[hidden], .hint[hidden], .row[hidden] { display: none; }
     .val { color: var(--muted); }
     /* 合并后的「更新」卡里，代理是第一个子区块：用比卡片标题低一级的小标题把它和下面的
        镜像 / 检查区分开，又不另起一张卡（那样又回到「两处各一张」的散）。 */
@@ -224,62 +227,26 @@
       <h3 id="sec-update" data-i18n="sett.section_update">Updates</h3>
       <div class="hint" id="hint-update-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
 
-      <h4 class="sub" id="sub-proxy" data-i18n="sett.section_proxy">Update proxy</h4>
-      <div class="row">
-        <label class="chk"><input type="radio" name="proxy" value="system" id="rd-proxy-system" checked><span id="k-proxy-system" data-i18n="sett.proxy_system">Follow system</span></label>
-      </div>
-      <div class="row">
-        <label class="chk"><input type="radio" name="proxy" value="manual" id="rd-proxy-manual"><span id="k-proxy-manual" data-i18n="sett.proxy_manual">Manual address</span></label>
-      </div>
-      <div class="row">
-        <input type="text" id="in-proxy-url" disabled spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
-      </div>
-      <div class="row">
-        <span class="k" id="k-proxy-presets" data-i18n="sett.proxy_presets">Common local proxies</span>
-        <select id="sel-proxy-preset"></select>
-        <button id="btn-proxy-test" data-i18n="sett.speed_test">Test speed</button>
-      </div>
-      <div class="hint" id="hint-proxy-speed" data-i18n="sett.proxy_speed_hint">Times the real update request through each candidate, so you can pick whichever is actually fastest right now.</div>
-      <div class="hint" id="hint-proxy-result" hidden></div>
-      <div class="row">
-        <label class="chk"><input type="radio" name="proxy" value="direct" id="rd-proxy-direct"><span id="k-proxy-direct" data-i18n="sett.proxy_direct">Direct</span></label>
-      </div>
-      <div class="hint" id="hint-proxy-now" hidden></div>
-      <!-- 出口 IP 与归属地：探的是**界面上正选着的那个出口**（还没保存也算）——
-           选代理时看得见「选这个会从哪出去」，这一行才对选择有用。读不到也给一句话：
-           静悄悄的「—」看起来像功能没做。 -->
-      <div class="row">
+      <!-- 出口 IP 与归属地置顶：探的是**当前选中的那条升级通路**的出口，换路时跟着变，
+           让用户看到「选这个会从哪出去、归属地是哪」。读不到也给一句话：静悄悄的「—」
+           看起来像功能没做。 -->
+      <div class="row" style="margin-top:10px">
         <span class="k" id="k-proxy-ip" data-i18n="sett.proxy_ip">Current IP</span>
         <span id="v-proxy-ip" class="path">—</span>
         <button id="btn-proxy-ip" data-i18n="sett.refresh">Refresh</button>
       </div>
+      <div class="hint" id="hint-proxy-now" hidden></div>
+
+      <!-- 升级通路：互斥的分类，每行一条，后面跟真实测速结果。选哪一行同时决定出口与地址。 -->
+      <h4 class="sub" id="sub-path" data-i18n="sett.section_proxy">Update path</h4>
+      <div id="path-list"></div>
       <div class="row" style="margin-top:8px">
-        <span class="k"></span>
-        <button class="primary" id="btn-proxy" data-i18n="sett.save">Save</button>
+        <button id="btn-path-test" data-i18n="sett.speed_test">Test speed</button>
       </div>
-      <div class="err" id="err-proxy" hidden></div>
+      <div class="hint" id="hint-path-speed" data-i18n="sett.proxy_speed_hint">Times the real download through each path, so you can pick whichever is actually fastest right now.</div>
+      <div class="err" id="err-path" hidden></div>
 
-      <div class="row">
-        <span class="k" id="k-mirror" data-i18n="sett.mirror">Download mirror</span>
-        <select id="sel-mirror">
-          <option value="" id="opt-mirror-direct" data-i18n="sett.mirror_direct">Direct (GitHub)</option>
-          <option value="__custom" id="opt-mirror-custom" data-i18n="sett.mirror_custom">Custom prefix</option>
-        </select>
-        <button id="btn-mirror-test" data-i18n="sett.speed_test">Test speed</button>
-        <button id="btn-mirror-del" data-i18n="sett.mirror_delete">Delete</button>
-      </div>
-      <div class="row" id="row-mirror-restore" hidden>
-        <span class="k"></span>
-        <button id="btn-mirror-restore" data-i18n="sett.mirror_restore">Restore removed presets</button>
-      </div>
-      <div class="hint" id="hint-mirror-result" hidden></div>
-      <div class="row" id="row-mirror-custom" hidden>
-        <input type="text" id="in-mirror" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.mirror_placeholder" placeholder="https://gh-proxy.com/">
-      </div>
-      <div class="hint" id="hint-mirror" data-i18n="sett.mirror_hint">Both the installer and its checksum and signature travel through the mirror. The signature is checked against a key built into this app, so a mirror can slow or break a download, but it cannot make a fake installer pass.</div>
-      <div class="err" id="err-mirror" hidden></div>
-
-      <div class="row">
+      <div class="row" style="margin-top:12px">
         <span class="k" id="k-update-note" data-i18n="sett.update_note">The panel checks quietly once after start-up; this button asks again, right now.</span>
         <button id="btn-update-check" data-i18n="popup.check_update">Check for Updates</button>
       </div>
@@ -293,6 +260,25 @@
       </div>
       <div class="hint" id="hint-update-run" hidden></div>
       <div class="mv" id="up-pct" hidden></div>
+
+      <!-- 手动添加通路：代理或镜像，填了即持久化保存（写入 settings.json）。 -->
+      <div class="row" style="margin-top:12px">
+        <span class="k" id="k-add-proxy" data-i18n="sett.proxy_manual">Manual address</span>
+        <input type="text" id="in-custom-proxy" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
+        <button id="btn-add-proxy" data-i18n="sett.path_add">Add</button>
+      </div>
+      <div class="row">
+        <span class="k" id="k-add-mirror" data-i18n="sett.mirror_custom">Custom prefix</span>
+        <input type="text" id="in-custom-mirror" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.mirror_placeholder" placeholder="https://gh-proxy.com/">
+        <button id="btn-add-mirror" data-i18n="sett.path_add">Add</button>
+      </div>
+      <div class="hint" id="hint-path-proxy" data-i18n="sett.path_proxy_hint">Common local proxies: http://127.0.0.1:7890, http://127.0.0.1:10809, http://127.0.0.1:8889, socks5://127.0.0.1:10808 (ports vary by client).</div>
+      <div class="hint" id="hint-mirror" data-i18n="sett.mirror_hint">Both the installer and its checksum and signature travel through the mirror. The signature is checked against a key built into this app, so a mirror can slow or break a download, but it cannot make a fake installer pass.</div>
+      <div class="row" id="row-mirror-restore" hidden>
+        <span class="k"></span>
+        <button id="btn-mirror-restore" data-i18n="sett.mirror_restore">Restore removed presets</button>
+      </div>
+      <div class="err" id="err-mirror" hidden></div>
     </div>
 
     <div class="card">
@@ -398,25 +384,20 @@
       el("row-priv-remove").hidden = !(d.platform === "macos" && (d.priv === "direct" || d.priv === "outdated"));
       el("chk-silent").checked = !!d.silent_execution;
       el("chk-dnsfb").checked = !!d.dns_fallback_enabled;
-      // 用户正在手填服务器时不许被焦点刷新覆盖 —— 与 proxyDirty 同一条理由。
+      // 用户正在手填服务器时不许被焦点刷新覆盖（见 in-dnsfb 的 oninput 把 dnsfbDirty 置真）。
       if (!dnsfbDirty) el("in-dnsfb").value = d.dns_fallback_servers || "";
       el("v-version").textContent = d.version || "—";
-      // 预置镜像来自磁盘：代码常量减去用户删掉的。删过之后这份列表与常量不同，
-      // 而聚焦会再跑一次 render —— 所以每次重建，而不是进页面时填一次。
+      // 升级通路：预置镜像来自磁盘（常量减去用户删掉的），代理三态也一起回来。
+      // 列表在 render 末尾统一重建，所以这里只把磁盘真值收进变量，不必逐项操作控件。
       mirrorList = d.mirror_presets || [];
-      fillMirrors();
-      el("row-mirror-restore").hidden = !(d.mirror_hidden_count > 0);
+      presetAll = d.mirror_presets_all || [];
+      mirrorHidden = d.mirror_hidden_count || 0;
       mirrorOnDisk = d.update_mirror || "";
-      // 用户正在手填前缀时不许被焦点刷新覆盖 —— 与 proxyDirty 同一条理由。
-      if (!mirrorDirty) syncMirror(mirrorOnDisk);
-      // 三态与手填地址住在软件配置文件里，跟着这一趟一起回来。「跟随系统此刻会走哪条路」
-      // 不在此列 —— 那得现问操作系统，见 loadProxy。
-      if (!proxyDirty) {
-        for (const r of document.querySelectorAll("input[name=proxy]"))
-          r.checked = r.value === (d.proxy_mode || "system");
-        el("in-proxy-url").value = d.proxy_url || "";
-        syncProxyUrl();
-      }
+      // 手动代理要把 URL 也收进来（不只模式字串）：buildPaths 用它补「自定义代理」可删行，
+      // activePathId 用它拼出 "proxy:<url>" 选中态。模式为 direct/system 时照旧只存字串。
+      proxyOnDisk = d.proxy_mode === "manual" ? (d.proxy_url || "") : (d.proxy_mode || "system");
+      el("row-mirror-restore").hidden = !(mirrorHidden > 0);
+      renderPaths();
     }
 
     async function load() {
@@ -531,269 +512,228 @@
     };
     el("in-dnsfb").oninput = () => { dnsfbDirty = true; show("err-dnsfb", ""); };
 
-    // 升级代理。三态和手填地址是软件配置里的一个值（render 从 get_app_settings 回显）；
-    // 「跟随系统此刻会走哪条路」只能现问操作系统 —— 那由 get_proxy_state 负责，而且只在
-    // 打开窗口和保存之后各问一次，不跟着焦点刷新：Linux 上那是好几条 gsettings 子进程，
-    // macOS 上是一条 scutil，而这张卡片上的数字并不会因为切回窗口就变。
+    // 升级通路：互斥的分类列表（直连 / 跟随系统 / 各代理 / 各镜像），每行一条，后面跟真实测速。
+    // 选哪一行就同时决定「出口 + 地址」两样：镜像行 = 直连出口 + 该镜像；代理行 = 该代理 +
+    // 直连 GitHub。这本质上还是 settings.json 的 `proxy` 与 `update_mirror` 两个字段，只是把
+    // 旧界面里分开的两块控件并成一张单选项表，而不是让用户去两个控件里各设一半。
     //
-    // proxyDirty 是必需的：填地址最常见的动作是「切出去看一眼代理客户端监听哪个端口，回来
-    // 接着填」，而窗口每次获得焦点都会重问后端。没有这层保护，用户回来时选中的态和刚敲的
-    // 地址会被磁盘上那份覆盖掉。保存成功即清标记，此后一律以磁盘为准。
-    let proxyDirty = false;
-    const proxyMode = () => {
-      for (const r of document.querySelectorAll("input[name=proxy]"))
-        if (r.checked) return r.value;
+    // 当前选中项：镜像优先（设了镜像时选中镜像行、出口按直连显示），否则按代理三态回显。
+    // 选行时另一维一律退回直连 —— 它们是「分类」而非「叠加」，旧配置若曾同时设了代理和镜像，
+    // 这里以镜像为准、代理不再生效（符合「分类」语义）。
+    // 不再内置猜测的本地代理端口：下方「常用本地代理写法（含端口）」提示已覆盖，
+    // 用户用 Add 框填自己的那一个，重载后以可删行回显（见 buildPaths 末尾的自定义代理兜底）。
+    let mirrorList = [];       // 后端给的可见预置镜像
+    let mirrorHidden = 0;      // 被删掉的预置镜像数（>0 才显示恢复）
+    let mirrorOnDisk = "";     // 当前生效的镜像前缀（含自定义）
+    let proxyOnDisk = "";      // 当前生效的代理：direct / system / manual url
+    let presetAll = [];        // 完整的预置镜像清单（不受删除影响）：区分预置与自定义
+    let ipIsMainland = false;  // 当前公网 IP 归属地是否大陆：决定是否摆出预置镜像
+    let paths = [];            // 当前渲染的升级通路行
+    let pathSpeed = {};        // id -> ms（测速结果，不随聚焦刷新清空）
+
+    // 把磁盘上的设置翻成一行行的列表。镜像行用直连出口；代理行用直连 GitHub（无镜像）。
+    function buildPaths() {
+      const list = [];
+      list.push({ id: "direct", kind: "direct", proxy_mode: "direct", mirror: "",
+        label: t("sett.mirror_direct", "Direct (GitHub)") });
+      list.push({ id: "system", kind: "system", proxy_mode: "system", mirror: "",
+        label: t("sett.proxy_system", "Follow system") });
+      // 自定义手动代理（非内置预设）：从磁盘真值补一行、可删。和自定义镜像同一套兜底逻辑，
+      // 否则用户用 Add 框加的代理重载后会从列表消失（仍生效却看不见、选不了、删不掉）。
+      if (proxyOnDisk && proxyOnDisk !== "direct" && proxyOnDisk !== "system")
+        list.push({ id: "proxy:" + proxyOnDisk, kind: "proxy", proxy_mode: "manual",
+          proxy_url: proxyOnDisk, mirror: "", label: proxyOnDisk, deletable: true });
+      // 预置镜像：只在公网 IP 归属地为大陆时才摆出来（这类镜像主要解决大陆直连 GitHub
+      // 慢的问题；其余地区直连即可，摆出来只是噪音）。删过的由 mirrorList 已经排除。
+      if (ipIsMainland) {
+        for (const p of mirrorList)
+          list.push({ id: "mirror:" + p, kind: "mirror", proxy_mode: "direct", mirror: p,
+            label: p, deletable: true });
+      }
+      // 自定义镜像（非预置）：用户自己加的，任何地区都照常显示、可删。用 presetAll 判断
+      // 而非 mirrorList —— 否则漫游出大陆后、曾选中的预置镜像会被误当成自定义重新摆出。
+      if (mirrorOnDisk && mirrorOnDisk !== "" && !presetAll.includes(mirrorOnDisk))
+        list.push({ id: "mirror:" + mirrorOnDisk, kind: "mirror", proxy_mode: "direct",
+          mirror: mirrorOnDisk, label: mirrorOnDisk, deletable: true });
+      return list;
+    }
+
+    // 当前选中行：镜像优先，否则按代理三态。缺省回 system。
+    function activePathId() {
+      if (mirrorOnDisk && mirrorOnDisk !== "") return "mirror:" + mirrorOnDisk;
+      if (proxyOnDisk === "system") return "system";
+      if (proxyOnDisk === "direct") return "direct";
+      if (proxyOnDisk) return "proxy:" + proxyOnDisk;
       return "system";
-    };
-    const syncProxyUrl = () => { el("in-proxy-url").disabled = proxyMode() !== "manual"; };
+    }
 
-    function renderProxyNow(p) {
-      if (p.mode === "manual") {
-        show("hint-proxy-now", tf("sett.proxy_now", "Right now: {proxy}", { proxy: p.url }));
-      } else if (p.mode === "system") {
-        show("hint-proxy-now", p.system_proxy
-          ? tf("sett.proxy_now", "Right now: {proxy}", { proxy: p.system_proxy })
-          : t("sett.proxy_now_none", "No system proxy was found, so this request goes direct."));
-      } else {
-        show("hint-proxy-now", tf("sett.proxy_now", "Right now: {proxy}", { proxy: t("sett.proxy_direct", "Direct") }));
+    const speedText = (ms) => (ms == null ? "—" : ms + " ms");
+
+    function renderPaths() {
+      paths = buildPaths();
+      const active = activePathId();
+      const box = el("path-list");
+      box.innerHTML = "";
+      for (const p of paths) {
+        const row = document.createElement("label");
+        row.className = "row path-row";
+        row.style.marginTop = "6px";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "update-path";
+        radio.checked = p.id === active;
+        radio.onchange = () => selectPath(p);
+        const lab = document.createElement("span");
+        lab.className = "k";
+        lab.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, monospace";
+        lab.textContent = p.label;   // 地址/前缀是事实，不翻译
+        const sp = document.createElement("span");
+        sp.className = "mv";
+        sp.style.minWidth = "66px";
+        sp.textContent = (p.id in pathSpeed) ? speedText(pathSpeed[p.id]) : "";
+        row.appendChild(radio);
+        row.appendChild(lab);
+        row.appendChild(sp);
+        if (p.deletable) {
+          const del = document.createElement("button");
+          del.className = "tiny";
+          del.textContent = t("sett.mirror_delete", "Delete");
+          del.onclick = (e) => { e.preventDefault(); e.stopPropagation(); deletePath(p); };
+          row.appendChild(del);
+        }
+        box.appendChild(row);
       }
     }
 
-    async function loadProxy() {
-      if (!hasTauri()) return;   // 浏览器直接打开时静默：没有后端可问
+    async function selectPath(p) {
+      show("err-path", "");
       try {
-        const raw = await invoke("get_proxy_state");
-        renderProxyNow(typeof raw === "string" ? JSON.parse(raw) : raw);
-      } catch (e) { /* 问不到就不写这一行：它说的是「现在会怎么走」，猜不得 */ }
+        // 选哪一类就把另一维退回直连：互斥分类，不是叠加。
+        if (p.kind === "mirror") {
+          await invoke("set_update_mirror", { prefix: p.mirror });
+          await invoke("set_update_proxy", { mode: "direct", url: "" });
+        } else if (p.kind === "direct") {
+          await invoke("set_update_proxy", { mode: "direct", url: "" });
+          await invoke("set_update_mirror", { prefix: "" });
+        } else if (p.kind === "system") {
+          await invoke("set_update_proxy", { mode: "system", url: "" });
+          await invoke("set_update_mirror", { prefix: "" });
+        } else { // proxy
+          await invoke("set_update_proxy", { mode: "manual", url: p.proxy_url });
+          await invoke("set_update_mirror", { prefix: "" });
+        }
+        await afterPathChange();
+      } catch (e) { show("err-path", String(e)); }
     }
 
-    for (const r of document.querySelectorAll("input[name=proxy]")) {
-      r.onchange = () => {
-        proxyDirty = true;
-        syncProxyUrl();
-        show("err-proxy", "");
-        // 换出口选项 = 换一条可能完全不同的路：350ms 后探一次 IP（连续切换只探最后那个）。
-        probeIpSoon(350);
-      };
+    async function afterPathChange() {
+      await load();          // 重取 settings，重建列表与选中态
+      renderPaths();
+      loadPublicIp();        // 出口变了，IP 行跟着重探
     }
-    el("in-proxy-url").oninput = () => { proxyDirty = true; show("err-proxy", ""); probeIpSoon(700); };
 
-    // 常见代理客户端的默认本机端口。只列地址、不写客户端名字：端口与客户端的对应是社区
-    // 惯例而不是契约，把名字写死就是写死一句随时会过期的说明 —— 用户真正要对上的是地址。
-    const PROXY_PRESETS = [
-      "http://127.0.0.1:7890",
-      "http://127.0.0.1:10809",
-      "http://127.0.0.1:8889",
-      "socks5://127.0.0.1:10808",
-    ];
-    const fillPresets = () => {
-      el("sel-proxy-preset").innerHTML = PROXY_PRESETS
-        .map((u) => `<option value="${u}">${u}</option>`)
-        .join("");
-    };
-    fillPresets();
-    el("sel-proxy-preset").onchange = () => {
-      const u = el("sel-proxy-preset").value;
-      if (!u) return;
-      // 选一个预设同时替用户把「手动指定」那档勾上：只填地址却不动出口模式，保存出去的
-      // 还是上一次那个 mode，看起来就是「存了却没生效」。
-      for (const r of document.querySelectorAll("input[name=proxy]")) r.checked = r.value === "manual";
-      el("in-proxy-url").value = u;
-      proxyDirty = false;
-      syncProxyUrl();
-      show("err-proxy", "");
-    };
-    el("btn-proxy-test").onclick = async () => {
-      const btn = el("btn-proxy-test");
-      btn.disabled = true;
-      show("err-proxy", "");
-      show("hint-proxy-result", t("sett.speed_running", "Measuring..."));
+    async function deletePath(p) {
       try {
-        const raw = await invoke("proxy_speed_test", { urls: PROXY_PRESETS });
-        const rows = typeof raw === "string" ? JSON.parse(raw) : raw;
-        const lines = (rows || []).map((r) =>
-          `${r.url}  ${r.ms === null || r.ms === undefined ? "-" : r.ms + " ms"}`);
-        show("hint-proxy-result", lines.join("   |   "));
-      } catch (e) {
-        show("hint-proxy-result", "");
-        show("err-proxy", String(e));
-      } finally {
-        btn.disabled = false;
-      }
-    };
+        if (p.kind === "mirror") {
+          if (mirrorList.includes(p.mirror)) {
+            const raw = await invoke("hide_update_mirror", { prefix: p.mirror });
+            const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+            mirrorList = d.presets || [];
+            mirrorHidden = d.hidden_count || 0;
+            mirrorOnDisk = d.mirror || "";
+          } else {
+            await invoke("set_update_mirror", { prefix: "" });
+            mirrorOnDisk = "";
+          }
+        } else { // 自定义代理
+          await invoke("set_update_proxy", { mode: "direct", url: "" });
+          proxyOnDisk = "direct";
+        }
+        show("err-path", "");
+        renderPaths();
+        loadPublicIp();
+      } catch (e) { show("err-path", String(e)); }
+    }
 
-    // 出口 IP 与归属地。探的是**界面上正选着的那个出口**（还没保存也算）：选代理时
-    // 看得见「选这个会从哪出去」，这一行才对选择有用。判定与保存共用后端同一句
-    // （choice_from_ui）—— 探测走的必须是保存后将会走的那条路。
-    let ipTimer = 0;
-    const probeIpSoon = (ms) => { clearTimeout(ipTimer); ipTimer = setTimeout(loadPublicIp, ms); };
+    // 出口 IP 与归属地：探的是**当前选中的那条升级通路**的出口（还没保存也算）——
+    // 换路时这一行跟着变，让用户看到「选这个会从哪出去、归属地是哪」。判定与保存共用后端
+    // 同一句 choice_from_ui：探测走的必须是保存后将会走的那条路。读不到也给一句话。
     async function loadPublicIp() {
       if (!hasTauri()) return;
+      const ap = paths.find((p) => p.id === activePathId());
+      const mode = ap ? ap.proxy_mode : "system";
+      const url = ap ? (ap.proxy_url || "") : "";
       show("v-proxy-ip", t("sett.ip_probing", "Probing…"));
+      // 是否大陆由后端算好（is_mainland）：HK / 澳门 / 台湾的归属地是各自独立国名，
+      // 后端用「中国」开头判断已自然排除。预置镜像只在大陆摆出，归属地变了就重建列表让显隐跟上。
+      const applyRegion = (mainland) => {
+        if (mainland !== ipIsMainland) { ipIsMainland = mainland; renderPaths(); }
+      };
       try {
-        const raw = await invoke("probe_public_ip", {
-          mode: proxyMode(),
-          url: el("in-proxy-url").value.trim(),
-        });
+        const raw = await invoke("probe_public_ip", { mode, url });
         const d = typeof raw === "string" ? JSON.parse(raw) : raw;
         show("v-proxy-ip", d.location
           ? tf("sett.ip_line", "{ip} ({loc})", { ip: d.ip, loc: d.location })
           : tf("sett.ip_line_noloc", "{ip}", { ip: d.ip }));
+        applyRegion(!!d.is_mainland);
       } catch (e) {
-        // 读不到也给一句话：静悄悄的「—」看起来像功能没做，而这里要知道的是
-        // 「这个出口探不到自己的 IP」（代理没通、服务被墙都会这样）。
         show("v-proxy-ip", t("sett.ip_unreachable", "Could not read the egress IP"));
+        applyRegion(false);   // 探不到归属地：按非大陆处理，收起预置镜像
       }
     }
     el("btn-proxy-ip").onclick = () => loadPublicIp();
 
-    el("btn-proxy").onclick = async () => {
-      try {
-        // 后端返回的那句话就是日志里那条：界面不各写一份「已保存」。
-        toast(await invoke("set_update_proxy", {
-          mode: proxyMode(),
-          url: el("in-proxy-url").value.trim(),
-        }));
-        proxyDirty = false;
-        show("err-proxy", "");
-        await Promise.all([load(), loadProxy()]);
-        loadPublicIp();   // 刚落盘的那一个出口，它的 IP 才是这一行该显示的
-      } catch (e) { show("err-proxy", String(e)); }
-    };
-
-    // 下载镜像。和上面那张代理卡是两件事：代理换的是**出口**，镜像换的是**地址**，
-    // 两者可以同时生效，也可以各设一个。
-    //
-    // 预设列表由后端给（代码常量减去用户删掉的），前端不硬编码：删过一个之后这份列表
-    // 就与代码常量不同，而窗口聚焦会再跑一次 render —— 每次按磁盘真值重建。
-    //
-    // 预设只是把社区常用的那几个前缀摆出来 —— 这类服务会换地址、会关停，所以「自定义前缀」
-    // 那一档始终留着，填什么都不必等我们改版本。填进去的形状对不对由后端判：不合法的前缀
-    // 在保存时就退回直连，而 `set_update_mirror` 返回的是**落盘后的真值**，界面按它回显，
-    // 否则会显示成「填了个错的却已保存」。
-    //
-    // 删预设：记进软件配置的 `mirror_hidden`，而不是把自选列表整个存下来 —— 预设跟着版本走
-    // （新版本可能新增），存一份清单就多一个会说谎的来源。删掉的可以一键恢复。
-    let mirrorList = [];       // 后端给的可见预设，render 每次刷新
-    let mirrorDirty = false;
-    let mirrorOnDisk = "";
-    const fillMirrors = () => {
-      const sel = el("sel-mirror");
-      const custom = el("opt-mirror-custom");
-      // 预设选项每次重建：删过一份就与代码常量不同，聚焦又会再跑一次 render。
-      sel.querySelectorAll("option[data-preset]").forEach((o) => o.remove());
-      // 选项文字就是前缀本身：这是个地址，不是一句可以润色的描述，
-      // 用户认的是那一串，而且它要能被复制到别处去试。
-      for (const p of mirrorList) {
-        const o = document.createElement("option");
-        o.value = p;
-        o.textContent = p;
-        o.dataset.preset = "1";
-        sel.insertBefore(o, custom);
-      }
-      syncMirrorButtons();
-    };
-    const syncMirrorButtons = () => {
-      // 「删除」只对预设有效：直连没东西可删，自定义前缀是用户自己填的（清空即是删）。
-      el("btn-mirror-del").disabled = !mirrorList.includes(el("sel-mirror").value);
-    };
-    const syncMirror = (v) => {
-      const known = v === "" || mirrorList.includes(v);
-      el("row-mirror-custom").hidden = known;
-      if (known) {
-        el("sel-mirror").value = v;
-      } else {
-        el("sel-mirror").value = "__custom";
-        el("in-mirror").value = v;
-      }
-      syncMirrorButtons();
-    };
-    async function saveMirror(v) {
-      mirrorDirty = false;
-      try {
-        const saved = await invoke("set_update_mirror", { prefix: v });
-        syncMirror(saved || "");
-        // 填了却返回空串 = 后端没认下这个前缀、下载仍是直连。这句话必须说出来，
-        // 否则「已保存」会和「镜像已生效」混成一件事。
-        if (v && !saved) {
-          show("err-mirror", t("sett.mirror_rejected", "That address cannot be prefixed onto a download URL, so downloads stay direct."));
-        } else {
-          show("err-mirror", "");
-          toast(t("sett.saved", "Saved"));
-        }
-      } catch (e) {
-        show("err-mirror", String(e));
-        syncMirror(mirrorOnDisk);   // 没写进去，下拉就不许停在没写进去的那一档
-      }
-    }
-    el("sel-mirror").onchange = () => {
-      const v = el("sel-mirror").value;
-      show("err-mirror", "");
-      syncMirrorButtons();
-      if (v === "__custom") {
-        // 先把输入框露出来让用户填；地址填完由输入框自己触发保存。
-        el("row-mirror-custom").hidden = false;
-        el("in-mirror").focus();
-        return;
-      }
-      saveMirror(v);
-    };
-    el("in-mirror").oninput = () => { mirrorDirty = true; show("err-mirror", ""); };
-    el("in-mirror").onchange = () => saveMirror(el("in-mirror").value.trim());
-
-    // 测速：direct 与各预置镜像各发一次「取校验值」形状的真实请求 —— 更新时经镜像取的
-    // 正是这一类 URL，而 api.github.com 不在镜像覆盖范围内（那一批只代理 github.com）。
-    // 打开设置时跑一遍：这两行数字是给选择做参考的实时数据，不跟着窗口聚焦重跑
-    // （每次切窗口打五个请求没有意义），删除/恢复预设后列表变了才重测。
-    // 按钮文案与代理卡同源：同一句话在字典里写两遍，五种语言就会各漂一次。
-    async function mirrorTest() {
-      if (!hasTauri()) return;
-      const btn = el("btn-mirror-test");
+    // 测速：列表每一项各发一次更新时真会用的真实请求（经镜像时拼前缀、出口用该项自己的选择），
+    // 并行探测。显示的每一行数字就是「选这条路去升级实际要多久」。
+    el("btn-path-test").onclick = async () => {
+      if (!hasTauri())return;
+      const btn = el("btn-path-test");
       btn.disabled = true;
-      show("err-mirror", "");
-      show("hint-mirror-result", t("sett.speed_running", "Measuring..."));
+      show("err-path", "");
       try {
-        const raw = await invoke("mirror_speed_test", { prefixes: ["", ...mirrorList] });
+        const specs = paths.map((p) => ({
+          proxy_mode: p.proxy_mode, proxy_url: p.proxy_url || "", mirror: p.mirror || "",
+        }));
+        const raw = await invoke("update_path_speed_test", { paths: specs });
         const rows = typeof raw === "string" ? JSON.parse(raw) : raw;
-        const lines = (rows || []).map((r) => {
-          const name = r.prefix === "" ? t("sett.mirror_direct", "Direct (GitHub)") : r.prefix;
-          return `${name}  ${r.ms === null || r.ms === undefined ? "-" : r.ms + " ms"}`;
-        });
-        show("hint-mirror-result", lines.join("   |   "));
-      } catch (e) {
-        show("hint-mirror-result", "");
-        show("err-mirror", String(e));
-      } finally {
-        btn.disabled = false;
-      }
-    }
-    el("btn-mirror-test").onclick = mirrorTest;
-
-    // 删除 / 恢复预设。两者都按后端返回的**新状态**重建界面：删掉正在用的那个时选中值
-    // 已变成直连，前端不重取就会显示成「选着一个已经被删掉的镜像」。
-    const applyMirrorState = (d) => {
-      mirrorList = d.presets || [];
-      fillMirrors();
-      syncMirror(d.mirror || "");
-      el("row-mirror-restore").hidden = !(d.hidden_count > 0);
+        pathSpeed = {};
+        (rows || []).forEach((r, i) => { if (paths[i]) pathSpeed[paths[i].id] = r.ms; });
+        renderPaths();
+      } catch (e) { show("err-path", String(e)); }
+      finally { btn.disabled = false; }
     };
-    el("btn-mirror-del").onclick = async () => {
-      const p = el("sel-mirror").value;
-      if (!mirrorList.includes(p)) return;
+
+    // 手动添加：代理或镜像，填了即持久化保存（写进 settings.json）。
+    el("btn-add-proxy").onclick = async () => {
+      const u = el("in-custom-proxy").value.trim();
+      show("err-path", "");
       try {
-        const raw = await invoke("hide_update_mirror", { prefix: p });
-        applyMirrorState(typeof raw === "string" ? JSON.parse(raw) : raw);
-        toast(t("sett.mirror_removed", "Preset mirror removed"));
-        mirrorTest();   // 列表变了，重测一遍
-      } catch (e) { show("err-mirror", String(e)); }
+        await invoke("set_update_proxy", { mode: "manual", url: u });
+        await invoke("set_update_mirror", { prefix: "" });
+        el("in-custom-proxy").value = "";
+        await afterPathChange();
+      } catch (e) { show("err-path", String(e)); }
+    };
+    el("btn-add-mirror").onclick = async () => {
+      const m = el("in-custom-mirror").value.trim();
+      show("err-path", "");
+      try {
+        await invoke("set_update_mirror", { prefix: m });   // 不合法退回直连
+        await invoke("set_update_proxy", { mode: "direct", url: "" });
+        el("in-custom-mirror").value = "";
+        await afterPathChange();
+      } catch (e) { show("err-path", String(e)); }
     };
     el("btn-mirror-restore").onclick = async () => {
       try {
         const raw = await invoke("restore_update_mirror_presets");
-        applyMirrorState(typeof raw === "string" ? JSON.parse(raw) : raw);
+        const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+        mirrorList = d.presets || [];
+        mirrorHidden = d.hidden_count || 0;
+        mirrorOnDisk = d.mirror || "";
+        renderPaths();
         toast(t("sett.mirror_restored", "Preset mirrors restored"));
-        mirrorTest();
-      } catch (e) { show("err-mirror", String(e)); }
+      } catch (e) { show("err-path", String(e)); }
     };
 
     // 升级：用的就是面板那三条命令（check_update / run_update / open_url），文案也直接取
@@ -1035,9 +975,7 @@
         strings = await invoke("get_strings");
         applyI18n();
         scriptsDirty = false;
-        proxyDirty = false;   // 磁盘上刚换了一份软件配置，未保存的选择已经不属于这里了
-        mirrorDirty = false;  // 同上：镜像也住在同一份软件配置里
-        await Promise.all([load(), loadScripts(), loadBackups(), loadProxy()]);
+        await Promise.all([load(), loadScripts(), loadBackups()]);
       } catch (e) { show("err-backup", String(e)); }
     };
     // 撤销免密通道就是把那条 sudoers 规则和包装脚本删掉。这一步自己就要一次系统授权，
@@ -1067,15 +1005,13 @@
     (async () => {
       try { strings = await invoke("get_strings"); } catch (e) {}
       applyI18n();
-      // 先等这一趟：下面的两个探针要用 render 回显出来的 mode/url 与镜像列表，
+      // 先等这一趟：render 会按磁盘真值把升级通路列表与选中态画好，
       // 而 load() 是异步的（refresh 那一趟不等它）。
       await load();
-      await loadProxy();
       loadScripts(); loadBackups(); syncTheme();
-      // 打开时把「出口 IP」和「各镜像快慢」各问一次。两者都不跟着聚焦重跑 ——
-      // focus 那次 refresh 不带它们，切窗口不该再打六个请求。
+      // 打开时探一次出口 IP（含归属地）。测速不跟着聚焦重跑 —— 切窗口不该再打一堆请求，
+      // 用户想看实时快慢时按一下 Test speed 即可。
       loadPublicIp();
-      mirrorTest();
     })();
   </script>
 </body>

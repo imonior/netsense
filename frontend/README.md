@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 616 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 613 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -214,7 +214,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，56 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，57 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -249,6 +249,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `open_app_settings_folder` | — | 打开 `settings.json` 所在目录。**不**复用上一条：自动化配置可以来自可执行文件同级，那时两条路径不是一个目录 |
 | `proxy_speed_test` | `urls` | 逐个代理地址真的发一次升级检查请求（就是 `check_update` 那个 URL），返回 JSON 字符串数组 `[{url,ms}]`；`ms` 是 curl 的 `time_total` 换算成毫秒，连不通或地址认不出来时为 `null`。之所以非要发真请求：本机端口握手成功并不等于它真能把你代理出去 |
 | `mirror_speed_test` | `prefixes` | 逐个下载镜像候选测一次「取校验值」的真实请求，返回 `[{prefix,ms}]`；空串 = 直连 GitHub。探的是 `releases/latest/download/SHA256SUMS` —— 更新时经镜像取的正是这一类 URL，而 api.github.com 不在镜像覆盖范围内（那一批加速镜像只代理 github.com），拿 API 域名测镜像测到的其实是镜像方自己的反代站点。出口用**存着的那个代理设置**（镜像换地址、代理换出口，两个正交，测出来要同时算上两者）；候选并行探测，最慢的一个决定总时长 |
+| `update_path_speed_test` | `paths` | 把「选哪条升级通路」统一成一条命令：每项自带 `proxy_mode` + `proxy_url` + `mirror`（前缀式），并行对 `releases/latest/download/SHA256SUMS` 发真请求计时，返回 `[{proxy_mode,proxy_url,mirror,ms}]`；`ms` 为 `null` 表示这条路不通。它合并了原来分开的「代理测速」与「镜像测速」两条调用 —— 出口（代理）与地址（镜像）是正交的两维，必须合在一起测才有意义：单测代理会漏掉镜像那一维，单测镜像会漏掉代理那一维 |
 | `hide_update_mirror` | `prefix` | 删掉一个预置镜像（`appconfig::MIRROR_PRESETS` 之一）：记进软件配置的 `mirror_hidden`，而不是把自选列表整个存下来（预设跟着版本走，存一份清单就多一个会说谎的来源）。**正戴着它的那一个会同时退回直连**。返回新状态 `{presets,mirror,hidden_count}`，界面按它重建下拉 —— 否则会显示成「选着一个已经被删掉的镜像」 |
 | `restore_update_mirror_presets` | — | 恢复全部被删的预置镜像，不动当前选中的那个。返回同 `hide_update_mirror` 的新状态 |
 | `get_proxy_state` | — | 升级请求出口的现状，JSON 字符串 `{mode,url,system_proxy}`：`mode` 是磁盘上那三态之一，`system_proxy` 只在 mode 为 system 时**现问**操作系统（macOS 一条 `scutil --proxy`，Linux 几条 `gsettings`），问不到就是 `null`。这条命令只在设置窗口打开与保存之后各调一次 —— 不进 `get_app_settings`，那个每次窗口获得焦点都会被调，popup.html 也调它 |

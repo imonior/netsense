@@ -1412,7 +1412,17 @@ pub fn uninstall_priv_channel() -> Result<(), String> {
     macos::uninstall_priv_channel()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn uninstall_priv_channel() -> Result<(), String> {
+    // Windows 没有「一条 sudoers 规则」可删：这里的「免密通道」就是登录时以最高权限常驻的
+    // 计划任务。撤掉它即可 —— 下一次应用配置会像往常一样，在那个本来就要弹的授权框里顺手
+    // 重建（见 `install_priv_channel` 走 `win_helper::run_batch` 的那条路），所以撤掉不会
+    // 「再也装不上」。
+    win_helper::unregister_helper_task();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub fn uninstall_priv_channel() -> Result<(), String> {
     Err(crate::i18n::t("pal.priv_unsupported"))
 }

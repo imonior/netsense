@@ -79,7 +79,7 @@ netsense/
 │       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
 │       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
 │       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
-│       ├── ipc.rs             # 56 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── ipc.rs             # 57 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -103,7 +103,7 @@ netsense/
 │       ├── platform/
 │       │   ├── macos.rs       # macOS: networksetup / arp / airport / route / osascript + the one-time sudoers channel install
 │       │   ├── windows.rs     # Windows: PowerShell(CIM) read + netsh read/write + UAC elevation
-│       │   ├── win_helper.rs  # Windows 常驻提权 helper：同一 exe 的 `--netsense-helper` + 命名管道 RPC（一次授权/会话）
+│       │   ├── win_helper.rs  # Windows 常驻提权 helper：同一 exe 的 `--netsense-helper`(每会话) / `--netsense-helper-service`(计划任务常驻) + 命名管道 RPC
 │       │   ├── linux.rs       # Linux: nmcli read/write + ip route + sudo/pkexec（原生失败时的兜底实现）
 │       │   ├── linux_netlink.rs # Linux 读路径原生实现：rtnetlink 替 `ip link` / `ip neigh`（`ip` 兜底）
 │       │   ├── linux_nm.rs    # Linux NM 写/读路径原生实现：zbus 直连 NetworkManager D-Bus 替 `nmcli`（`nmcli` 兜底）
@@ -923,7 +923,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **616 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **613 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，
@@ -1151,6 +1151,8 @@ Linux `$XDG_CONFIG_HOME/netsense/config.json`，默认 `~/.config/netsense/`）�
 Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writable, otherwise `<temp>/NetSense/logs`. `scripts/` is resolved against the directory that actually holds the chosen `config.json`, so the README's "relative path = next to config.json" stays true wherever the config lives. The panel's **Logs** button opens the log window, and that window prints the directory it is really reading —— 目录可能被后端换过（用户目录不可写时退到临时目录），界面自己拼的那个路径会说谎。 A panic hook writes panics into that same file, so a silent exit is never silent any more.
 
 > **Windows asks UAC once per app session** (the first apply spawns the resident elevated helper, §9.6 "Four key Windows backend designs" rule 3; later batches ride the pipe). On a machine that cannot use that channel the count is back to one per batch, and the first such batch says why in the log. To remove the prompt too: launch once as administrator (after that the in-process privilege channel shows "no authorization needed"). Elevation for user scripts still asks every run by design.
+>
+> **Across reboots**: the first time the resident helper is launched it also registers a logon task (`schtasks /Create /TN NetSenseHelper /SC ONLOGON /RL HIGHEST`) that re-launches the helper in `--netsense-helper-service` mode at every logon — no UAC, and no 15-second spawn poll. So after the very first session, boot no longer adds a UAC prompt, and the first config apply after boot rides the already-running pipe. Uninstall / "remove password-free changes" deletes that task (`schtasks /Delete /TN NetSenseHelper /F`).
 
 ---
 
