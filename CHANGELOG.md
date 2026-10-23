@@ -4,6 +4,12 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.2] - 2026-10-24
+
+### Fixed
+
+- **32-bit x86 Windows no longer reports "no installable package for this platform" while matching installers exist.** The in-app update's architecture detection had no branch for 32-bit x86 and fell through to the literal token `"other"` — a string no release asset name contains — so 32-bit users were told their platform had no installer even though every release ships `_x86-setup.exe` and `_x86_en-US.msi`. The token is now `x86`, matched against that naming, while `x86_64` and `amd64` names are explicitly refused: a 64-bit installer cannot run on a 32-bit system, so it is better to find nothing than to find the wrong package. (`ipc.rs`)
+
 ## [1.8.1] - 2026-10-23
 
 ### Fixed

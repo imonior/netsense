@@ -1428,6 +1428,11 @@ fn pick_install_asset(
         "arm64"
     } else if cfg!(target_arch = "x86_64") {
         "x86_64"
+    } else if cfg!(target_arch = "x86") {
+        // 32 位 x86：CI 一直在发 `_x86-setup.exe` / `_x86_en-US.msi`，必须认得出这两个
+        // 名字。曾经这里没有分支，32 位落进 "other"，token_anchored(n, "other") 哪个
+        // 资产都不含 —— x86 用户于是永远收到「本平台没有可安装的包」，而包明明在发。
+        "x86"
     } else {
         "other"
     };
@@ -1460,9 +1465,14 @@ fn pick_install_asset(
 ///
 /// 它把一类发布事故从「每个用户的更新都卡在下载后的校验上」降级为「换个包照样更新」：
 /// Windows 上恒有两个装得上的候选（nsis 的 setup.exe 与 WiX 的 msi），任一个改名 /
-/// 清单漏一行都不再阻断升级；单候选平台（mac / linux）行为与原来一致。没拿到清单
-/// （`sums` 为 None）时完全退回原挑法。替代候选只认**装得上**的（installable_ext），
-/// 便携 zip 没有安装代码，任何时候都不拿它当安装包。
+/// 清单漏一行都不再阻断升级；没拿到清单（`sums` 为 None）时完全退回原挑法。
+///
+/// 替代候选只认**装得上**的（`installable_ext`），而「装得上」按平台而异：
+/// Windows 只认 .exe/.msi、Linux 只认 .deb/.rpm —— 便携 zip 在这两个平台上永远选不中；
+/// macOS 认 .dmg **和** .zip：`install_macos` 的 `extract_mac_app` 本来就会用 `ditto`
+/// 解 zip、找出 NetSense.app 再走安装脚本，所以 mac 上便携 zip 是合法备胎 —— dmg 万一
+/// 没进 SHA256SUMS，照样能更新成功（zip 与 dmg 是同一次构建的产物，SHA256SUMS 里各有
+/// 各自一行，验的仍是下载到手的那一份）。
 fn pick_verified_asset<'a>(
     assets: &'a [serde_json::Value],
     goos: &str,
@@ -1550,6 +1560,9 @@ fn arch_token_present(n: &str, goarch: &str) -> bool {
     match goarch {
         "arm64" => token_anchored(n, "arm64") || token_anchored(n, "aarch64"),
         "x86_64" => token_anchored(n, "x86_64") || token_anchored(n, "amd64") || token_anchored(n, "x64"),
+        // 32 位 x86：认 `_x86-setup.exe` / `_x86_en-US.msi` 这一套命名。`x86_64` 与
+        // `amd64` 显式排除 —— 64 位包装不进 32 位系统，宁可挑不到也不能挑错。
+        "x86" => token_anchored(n, "x86") && !n.contains("x86_64") && !n.contains("amd64"),
         _ => token_anchored(n, goarch),
     }
 }
@@ -2253,7 +2266,7 @@ mod tests {
         );
     }
 
-    /// 1.0.3 那次发布里真实存在的五个资产。名字里**没有** OS token：只按 token 认平台
+    /// 1.0.3 那次发布里真实存在的资产。名字里**没有** OS token：只按 token 认平台
     /// 的话，mac 与 linux 会一个都挑不出来。
     fn shipped_assets() -> Vec<serde_json::Value> {
         [
@@ -2262,6 +2275,8 @@ mod tests {
             "NetSense_1.0.3_x64.dmg",
             "NetSense_1.0.3_x64-setup.exe",
             "NetSense_1.0.3_x64_en-US.msi",
+            "NetSense_1.0.3_x86-setup.exe",
+            "NetSense_1.0.3_x86_en-US.msi",
         ]
         .into_iter()
         .map(|n| json!({ "name": n, "url": format!("https://example.invalid/{n}") }))
@@ -2300,6 +2315,26 @@ mod tests {
         assert_eq!(pick_asset_for(&assets, "windows", "arm64"), None);
         assert_eq!(pick_asset_for(&assets, "macos", "other"), None);
         assert!(!asset_matches("NetSense_1.0.3_x64.dmg", "macos", "arm64"));
+    }
+
+    /// 32 位 x86 Windows：CI 每个版本都发 `_x86-setup.exe` / `_x86_en-US.msi`，挑包必须
+    /// 认得出。这条曾经是坏的 —— goarch 判定没有 x86 分支，32 位落进 "other"，
+    /// token_anchored(n, "other") 哪个资产都不含，x86 用户于是永远收到
+    /// 「本平台没有可安装的包」（包一直在发）。两个方向都要钉：32 位不拿 64 位包，
+    /// 64 位也不拿 32 位包。
+    #[test]
+    fn a_32bit_x86_windows_installer_is_matched() {
+        let assets = shipped_assets();
+        assert_eq!(
+            pick_asset_for(&assets, "windows", "x86").unwrap()["name"],
+            "NetSense_1.0.3_x86-setup.exe"
+        );
+        assert!(asset_matches("NetSense_1.0.3_x86_en-US.msi", "windows", "x86"));
+        assert!(!asset_matches("NetSense_1.0.3_x86-setup.exe", "windows", "x86_64"));
+        assert!(!asset_matches("NetSense_1.0.3_x64-setup.exe", "windows", "x86"));
+        // 未来若出现 `x86_64` 式命名，32 位也不能把它当自己的包（64 位装不进 32 位）。
+        assert!(!asset_matches("NetSense_1.0.3_x86_64-setup.exe", "windows", "x86"));
+        assert!(!asset_matches("NetSense_1.0.3_amd64.deb", "linux", "x86"));
     }
 
     #[test]
