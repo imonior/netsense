@@ -527,6 +527,12 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         language_auto,
         theme,
         log_retention_days,
+        // Same defensive normalization as theme: the stored value is already clamped
+        // on load, but the read boundary guarantees the dropdown only ever sees one
+        // of the four legal values.
+        // 与 theme 同样的边界归一：落盘时已夹过，但读取边界再保证一次，
+        // 下拉永远只会拿到四个合法值之一。
+        log_level,
         silent_execution,
         update_mirror,
         dns_fallback,
@@ -537,6 +543,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
             s.language.is_none(),
             crate::appconfig::normalize_theme(&s.theme).to_string(),
             s.log_retention_days,
+            crate::appconfig::normalize_log_level(&s.log_level).to_string(),
             s.silent_execution,
             s.update_mirror.clone(),
             s.dns_fallback.clone(),
@@ -590,6 +597,12 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "settings_path": state.settings_path.display().to_string(),
         "log_dir": crate::log::log_dir().display().to_string(),
         "log_retention_days": log_retention_days,
+        // The stored level, so the dropdown returns to where the user left it:
+        // without this field the window would always open on "info" even after a
+        // debug session was saved.
+        // 存下来的那一档：设置窗口每次获得焦点都会重跑这个命令，下拉按它回显 ——
+        // 少了这个字段，存过 debug 之后再开窗口也会永远停在「标准」。
+        "log_level": log_level,
         "min_retention_days": crate::appconfig::MIN_LOG_RETENTION_DAYS,
         "max_retention_days": crate::appconfig::MAX_LOG_RETENTION_DAYS,
         "priv": priv_channel().code(),
@@ -886,6 +899,29 @@ pub fn set_log_retention(
     crate::log::set_retention_days(days);
     log::info(&i18n::tf("notify.retention_set", &[("days", &days.to_string())]));
     Ok(days)
+}
+
+/// 日志级别（`sett.log_level_*` 四档）。与保留天数分成两条命令，但这一条**当场生效**：
+/// 闸门只是个原子（见 `log::set_min_level`），没有「下次启动才清理」那种时机问题 ——
+/// 用户在设置里调到 Debug，下一条采样就落盘。
+///
+/// 认不出的值按 Info（默认档）收：见 [`crate::appconfig::normalize_log_level`]。
+#[tauri::command(async)]
+pub fn set_log_level(
+    state: State<'_, std::sync::Arc<AppState>>,
+    level: String,
+) -> Result<String, String> {
+    let normalized = crate::appconfig::normalize_log_level(&level).to_string();
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = s.clone();
+        next.log_level = normalized.clone();
+        next.save(&state.settings_path)?;
+        *s = next;
+    }
+    crate::log::set_min_level(crate::log::Level::from_setting(&normalized));
+    log::info(&i18n::tf("notify.log_level_set", &[("level", &normalized)]));
+    Ok(normalized)
 }
 
 /// 代理这一栏的实况：存下来的选择，加上「跟随系统」此刻**实际**会用到的地址。

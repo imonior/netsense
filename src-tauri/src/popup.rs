@@ -42,6 +42,20 @@ pub fn mark_hidden() {
     *last_hide().lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
 }
 
+/// 最近一次开合面板时用的锚点（托盘图标中心下方）。
+///
+/// 自动化触发的「把面板叫出来」不在托盘事件里，拿不到当次图标矩形，用上一次的那个 ——
+/// 面板出现的位置与用户手点托盘时一致。从没点过托盘（`None`）时退化为左上角。
+fn last_anchor() -> &'static Mutex<Option<(f64, f64)>> {
+    static LAST: OnceLock<Mutex<Option<(f64, f64)>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+/// 记下本次开合面板的锚点，供 [`show`] 复用。
+pub fn note_anchor(anchor: Option<(f64, f64)>) {
+    *last_anchor().lock().unwrap_or_else(|e| e.into_inner()) = anchor;
+}
+
 /// 由托盘图标的矩形（物理像素：x, y, w, h）算出「面板锚点」——
 /// 图标水平中心、垂直底边。矩形无效（宽高都为 0）时返回 None，调用方退化为兜底位置。
 pub fn anchor_center_bottom(x: f64, y: f64, w: f64, h: f64) -> Option<(f64, f64)> {
@@ -53,6 +67,7 @@ pub fn anchor_center_bottom(x: f64, y: f64, w: f64, h: f64) -> Option<(f64, f64)
 
 /// 切换面板显隐。
 pub fn toggle(app: &AppHandle, anchor: Option<(f64, f64)>) {
+    note_anchor(anchor);
     let Some(win) = app.get_webview_window(POPUP_LABEL) else {
         crate::log::warn(&crate::i18n::tf(
             "app.window_missing",
@@ -77,6 +92,28 @@ pub fn toggle(app: &AppHandle, anchor: Option<(f64, f64)>) {
     position(&win, anchor);
     let _ = win.show();
     let _ = win.set_focus();
+}
+
+/// 把面板叫出来（不切换）：自动化刚应用了一个配置时，让用户看见弹窗。
+///
+/// 与 [`toggle`] 的分工：toggle 是用户的显式开合，这个只负责「该被看见的时候它在」。
+/// 已可见时什么都不做 —— 不重摆位置：用户可能刚把它拖到别处，拖到一半被拽回去比不摆更烦。
+/// 也不抢焦点：面板本身置顶，露出来就够了；从用户手里抢焦点是托盘常驻进程最惹人烦的那件事。
+/// 锚点用上一次点托盘时记下的那个（见 [`note_anchor`]），从没点过就退化为左上角。
+pub fn show(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(POPUP_LABEL) else {
+        crate::log::warn(&crate::i18n::tf(
+            "app.window_missing",
+            &[("label", POPUP_LABEL)],
+        ));
+        return;
+    };
+    if win.is_visible().unwrap_or(false) {
+        return;
+    }
+    let anchor = *last_anchor().lock().unwrap_or_else(|e| e.into_inner());
+    position(&win, anchor);
+    let _ = win.show();
 }
 
 /// 展示主编辑器窗口（自动化配置）。

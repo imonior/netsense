@@ -205,6 +205,9 @@
   <div class="modal-mask" id="update-mask" hidden>
     <div class="modal" id="update-modal"></div>
   </div>
+  <div class="modal-mask" id="applied-mask" hidden>
+    <div class="modal" id="applied-modal"></div>
+  </div>
 
   <script>
     const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
@@ -265,14 +268,20 @@
         ? label : `${n.name} (${label})`;
     };
 
-    /// 一行明细：值为空就整行不给看（面板窄，`—` 排成一片等于没有信息）
-    const setRow = (id, v, alwaysShow = false) => {
+    /// One detail row: the row stays even when the value is missing — "—" marks "no value".
+    ///
+    /// The old rule hid empty rows ("a wall of dashes carries no information"), but that made
+    /// troubleshooting impossible: "is DNS empty, or did reading it fail?" is exactly the
+    /// question an empty row answers. Every field of the current-network card is therefore
+    /// always visible; only whole sections that do not apply (see renderNics) collapse.
+    ///
+    /// 一行明细：值为空也保留整行，用「—」表示「没有值」。旧规矩是空值整行不给看（面板窄，
+    /// 「—」排成一片等于没有信息），但它让排障失去依据 —— 「DNS 是空的，还是没读到？」
+    /// 正是空行要回答的问题。当前网络信息卡的每个字段因此始终可见，只有整段不适用的
+    /// 部分（见 renderNics）才收起。
+    const setRow = (id, v) => {
       const el = document.getElementById("v-" + id);
       el.textContent = v || "—";
-      const row = el.closest(".row");
-      // 公网 IP 那一行永远留着：取不到时显示「—」而不是整行消失，免得看起来像功能没做。
-      // The public-IP row stays visible (shows "—" on miss) so the feature reads as present.
-      if (row) row.hidden = !v && !alwaysShow;
       return el;
     };
 
@@ -295,7 +304,8 @@
     };
 
     /// 当前出口公网 IP（架构上的 Egress / Public IP 层，独立于任何网卡）：后端现探现回，
-    /// 本端只做 2 分钟缓存，避免每条状态广播都去打一次外部服务。取不到时整行收起。
+    /// 本端只做 2 分钟缓存，避免每条状态广播都去打一次外部服务。取不到时该行显示「—」
+    /// （与信息卡其余字段同一口径）。
     /// The current egress public IP (the architecture's Egress / Public IP layer, independent of any NIC):
     /// fetched on demand from the backend, throttled to once per 2 minutes on this side.
     let publicIpFetched = 0;
@@ -311,9 +321,9 @@
             const d = typeof raw === "string" ? JSON.parse(raw) : raw;
             ip = (d && d.ip) || "";
           } catch (e) { /* 读不懂就当没有，与拿不到同一待遇 */ }
-          setRow("public", ip, true);
+          setRow("public", ip);
         })
-        .catch(() => setRow("public", "", true));
+        .catch(() => setRow("public", ""));
     }
 
     /// 一张网卡的卡片：名称 + 类型标签 + 连接状态（状态在标题行右侧）+ 关键字段
@@ -455,8 +465,10 @@
       }
 
       // 「在用的那张网卡」的明细：主网卡由 Rust 侧选定（`automation::primary_nic`）并放在
-      // `get_interfaces` 首位，这里只把它的字段与状态快照合并展示，取不到的整行收起。
-      // SSID 只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络。
+      // `get_interfaces` 首位，这里只把它的字段与状态快照合并展示，取不到的字段留「—」
+      // （每个字段都在场，排障时才看得出「是空的」和「没读到」）。
+      // SSID 只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络 —— 那一行
+      // 因此给「—」，而不是把上一次无线环境的旧名字留在上面。
       const primary = primaryNic();
       const wireless = !primary || primary.kind === "wireless";
       setRow("iface", primary ? nicTitle(primary) : st.iface);
@@ -537,6 +549,39 @@
         ? t("popup.verify_unreachable", "SHA256SUMS could not be downloaded")
         : t("popup.verify_no_sums", "the release publishes no SHA256SUMS, or that file does not list this installer");
       return t("popup.cannot_verify", "This update cannot be verified: {reason}").replace("{reason}", reason);
+    }
+
+    /// 「自动化刚应用了一个配置」弹窗：当前配置 + 网络身份。
+    ///
+    /// 不做去重：后端只在引擎**真的动手了**（首评 / 网络指纹变 / 配置内容变，且 3A 成功）
+    /// 时才发这个事件，轮询中什么都没变时根本收不到 —— 每条都是又一次真正的应用。
+    /// 空值行整行不给看（面板窄，一排「—」等于没有信息）。与信息卡刻意不同：这里是
+    /// 「刚发生了什么」的快照，排障看顶部当前网络信息卡 —— 那一卡的每个字段始终可见。
+    function renderApplied(d) {
+      const box = document.getElementById("applied-modal");
+      const rows = [];
+      const row = (label, v) => { if (v) rows.push(`<div class="mv">${esc(label)} <b>${esc(v)}</b></div>`); };
+      row(t("popup.profile", "Applied profile"),
+          d.fallback ? t("popup.applied_fallback", "Fallback (no profile matched)") : d.profile);
+      row(t("popup.applied_mode", "Addressing"),
+          d.mode === "manual" ? t("popup.applied_manual", "Manual")
+          : d.mode === "dhcp" ? t("popup.applied_dhcp", "Automatic (DHCP)") : "");
+      row(t("popup.ip", "IPv4"), d.ip);
+      row(t("popup.netmask", "Netmask"), d.netmask);
+      row(t("popup.gateway", "Gateway"), d.gateway);
+      row(t("popup.dns", "DNS"), d.dns);
+      row(t("popup.routes", "Routes"), d.routes ? String(d.routes) : "");
+      row(t("status.ssid", "SSID"), d.ssid);
+      row(t("popup.interface", "Interface"), d.iface);
+      box.innerHTML = `<h3>${esc(t("popup.applied_title", "Configuration applied"))}</h3>
+        ${rows.join("")}
+        <div class="row-btns"><button id="ap-close">${esc(t("popup.close", "Close"))}</button></div>`;
+      document.getElementById("applied-mask").hidden = false;
+      document.getElementById("ap-close").onclick = closeAppliedModal;
+    }
+
+    function closeAppliedModal() {
+      document.getElementById("applied-mask").hidden = true;
     }
 
     // 弹窗渲染：发现新版本 / 已是最新 / 检查失败 三种态
@@ -759,6 +804,11 @@
       window.__TAURI__.event.listen("netsense://action", (e) => {
         const p = e.payload || {};
         toast(p.message || (p.ok ? t("editor.action_ok", "OK") : t("editor.action_failed", "Failed")));
+      });
+      // 自动化应用了某个配置（首次连上 / 网络变化 / 配置变更，且 3A 成功）：
+      // 弹窗展示当前应用的配置与网络信息。轮询中若无规则触发改变，后端不发此事件。
+      window.__TAURI__.event.listen("netsense://applied", (e) => {
+        renderApplied(e.payload || {});
       });
       // 在线升级进度（下载 / 刷新 / 安装阶段 + 百分比）
       window.__TAURI__.event.listen("netsense://update_progress", (e) => {

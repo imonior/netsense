@@ -196,6 +196,17 @@
         <span id="k-retention" data-i18n="sett.retention">Keep logs (days)</span>
         <input type="number" id="in-retention" min="1" max="365" step="1">
       </div>
+      <div class="row" style="margin-top:8px">
+        <span class="k"></span>
+        <span id="k-loglevel" data-i18n="sett.log_level">Log level</span>
+        <select id="sel-loglevel">
+          <option value="error" data-i18n="sett.log_level_error">Errors only</option>
+          <option value="warn" data-i18n="sett.log_level_warn">Warnings and errors</option>
+          <option value="info" data-i18n="sett.log_level_info">Standard</option>
+          <option value="debug" data-i18n="sett.log_level_debug">Debug (every detection and action)</option>
+        </select>
+      </div>
+      <div class="hint" id="hint-loglevel" data-i18n="sett.log_level_hint">Applies immediately. Standard records every network change, every evaluation and every applied action; Debug adds per-step apply detail and the reason behind each skip.</div>
     </div>
 
     <div class="card">
@@ -371,6 +382,9 @@
       inRet.min = d.min_retention_days || 1;
       inRet.max = d.max_retention_days || 365;
       inRet.value = d.log_retention_days || "";
+      // 级别是启动时读进闸门的（见 main.rs 的 set_min_level），但设置窗口每次打开都按
+      // 落盘的值回填 —— 用户在别处改过（或手改过 settings.json）时这里要说实话。
+      el("sel-loglevel").value = d.log_level || "info";
       el("v-platform").textContent = d.platform || "—";
       el("v-priv").textContent = d.priv === "direct"
         ? t("sett.priv_direct", "Elevated access configured: changes apply without a system prompt")
@@ -868,6 +882,15 @@
       try {
         const days = await invoke("set_log_retention", { days: Number(ev.target.value) });
         ev.target.value = days;
+        toast(t("sett.saved", "Saved"));
+      } catch (e) { toast(String(e)); await load(); }
+    };
+
+    // 级别当场生效（后端只翻一个原子），所以这里不等重启：选完下一行日志就按新档落盘。
+    el("sel-loglevel").onchange = async (ev) => {
+      try {
+        const level = await invoke("set_log_level", { level: ev.target.value });
+        ev.target.value = level;
         toast(t("sett.saved", "Saved"));
       } catch (e) { toast(String(e)); await load(); }
     };

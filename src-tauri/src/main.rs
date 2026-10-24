@@ -98,6 +98,9 @@ fn main() {
         true,
         settings.log_retention_days,
     );
+    // 级别闸门紧跟着 init：初始化之前那几行（含 settings_error）按默认档 Info 落盘，
+    // 而这之后的一切都听软件配置里那一格的（见 `log::set_min_level`）。
+    log::set_min_level(crate::log::Level::from_setting(&settings.log_level));
     if let Some(e) = &settings_error {
         log::error(&i18n::tf(
             "app.settings_failed",
@@ -318,6 +321,7 @@ fn main() {
             ipc::get_app_settings,
             ipc::set_autostart,
             ipc::set_log_retention,
+            ipc::set_log_level,
             ipc::uninstall_priv_channel,
             ipc::set_silent_execution,
             ipc::open_config_folder,

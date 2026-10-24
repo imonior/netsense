@@ -13,6 +13,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{Datelike, Duration, Local, NaiveDate, Timelike};
@@ -34,6 +35,40 @@ impl Level {
             Level::Debug => "DEBUG",
         }
     }
+
+    /// 数值越大越啰嗦（Error=0 … Debug=3）：闸门比较的就是这个序。
+    const fn verbosity(self) -> u8 {
+        self as u8
+    }
+
+    /// 软件配置里那一格的取值（`sett.log_level_*`）→ 级别。认不出的值按 Info：
+    /// 那是默认档，猜成 Debug 会让每秒级的采样行把日志刷爆，比少记更糟。
+    pub fn from_setting(s: &str) -> Level {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "error" => Level::Error,
+            "warn" => Level::Warn,
+            "debug" => Level::Debug,
+            _ => Level::Info,
+        }
+    }
+}
+
+/// 最低落盘级别：比它更啰嗦的调用点在格式化之前就返回。
+///
+/// 为什么需要这道闸门：「每一次检测都记录」意味着每秒级的采样行也进日志 —— 没有闸门，
+/// 一天就是四万行，保留期一满连排查都被淹掉。默认 Info：状态迁移与执行动作全部在场，
+/// 逐条采样 / 逐步下发这类细节要在软件设置里把级别调到 Debug 才落盘。
+static MIN_LEVEL: AtomicU8 = AtomicU8::new(Level::Info.verbosity());
+
+/// 这一级别过不过闸门（测试与 `log` 共用一句判据，不各写一遍）。
+fn passes(level: Level) -> bool {
+    level.verbosity() <= MIN_LEVEL.load(Ordering::Relaxed)
+}
+
+/// 设置最低落盘级别。启动时按软件配置调一次，之后不随运行期改动（改设置要重启才生效，
+/// 与保留天数同一规矩 —— 见 `main.rs` 的调用点）。
+pub fn set_min_level(level: Level) {
+    MIN_LEVEL.store(level.verbosity(), Ordering::Relaxed);
 }
 
 struct Logger {
@@ -386,6 +421,9 @@ fn one_line(msg: &str) -> std::borrow::Cow<'_, str> {
 
 /// 核心写日志。任何地方调用，未初始化则降级到 stderr。
 pub fn log(level: Level, msg: &str) {
+    if !passes(level) {
+        return;
+    }
     if let Some(g) = GLOBAL.get() {
         let mut l = g.lock().unwrap_or_else(|e| e.into_inner());
         let today = today_str();
@@ -533,5 +571,29 @@ mod tests {
         assert_eq!(&*one_line("a\rb"), "a\\rb");
         // 绝大多数日志不含换行，那条路返回借用而不是另起一个 String。
         assert!(matches!(one_line("plain text"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    /// 级别闸门：默认 Info 放行 Error/Warn/Info、挡下 Debug；`from_setting` 认不出的值
+    /// 落回 Info（默认档），绝不猜成 Debug —— 猜错的后果是每秒级的采样行把日志刷爆，
+    /// 那比少记几行糟得多。同进程里没有别的测试动这个全局，所以放在一个用例里串着改。
+    #[test]
+    fn the_level_gate_defaults_to_info_and_follows_set_min_level() {
+        assert!(passes(Level::Error));
+        assert!(passes(Level::Warn));
+        assert!(passes(Level::Info));
+        assert!(!passes(Level::Debug), "默认档不放行 DEBUG：采样行是每秒级的");
+
+        set_min_level(Level::Debug);
+        assert!(passes(Level::Debug), "调到 Debug 后，逐条采样 / 逐步下发才落盘");
+
+        set_min_level(Level::Error);
+        assert!(!passes(Level::Warn), "调到 Error 之后只剩 Error");
+        assert!(passes(Level::Error));
+
+        set_min_level(Level::Info); // 还原默认档，别影响同进程里的其他测试
+        assert_eq!(Level::from_setting("debug"), Level::Debug);
+        assert_eq!(Level::from_setting(" ERROR "), Level::Error);
+        assert_eq!(Level::from_setting("garbage"), Level::Info);
+        assert_eq!(Level::from_setting(""), Level::Info);
     }
 }

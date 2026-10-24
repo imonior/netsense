@@ -79,7 +79,7 @@ netsense/
 │       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
 │       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
 │       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
-│       ├── ipc.rs             # 57 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── ipc.rs             # 58 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -786,6 +786,12 @@ On each focus (when opened) it auto-refreshes via `get_status`, and also passive
   勾选框说谎。写失败时把勾选框回滚到原值，而不是让它显示一个系统没答应的状态。
 - **保留天数**由 `set_log_retention` 落盘并立刻按新窗口清一次；命令回的是**夹紧后**的值，输入框按回显走，
   所以「填 9999」不会在界面上留下一个系统其实没有的值。
+- **日志级别**由 `set_log_level` 当场生效：写进 `settings.json` 之外还立刻调 `log::set_min_level` 翻动内存里的
+  级别闸门（一个 `AtomicU8`），不用等重启。认不出的值按 `info` 收 —— 默认档放行状态迁移与执行动作；
+  猜成 `debug` 的后果是日志被刷爆，比少记几行糟得多。分级含义见 `log::passes` 与
+  `sett.log_level_hint`：标准 = 每一次网络变化 / 每一轮评估 / 每一个已下发动作，调试 = 再追加每一步
+  下发细节与每条跳过原因。采样本身（2s 一节）与空转轮（1s 一跳）刻意不记：内容重复，变化时刻已由
+  `net.changed`（默认档）记下，沉默本身就是「什么都没到期」的正确表达。
 
 ### Points needing real-device verification (cannot verify locally)
 
@@ -923,7 +929,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **613 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **643 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，

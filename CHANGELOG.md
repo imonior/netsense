@@ -4,6 +4,23 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.3] - 2026-10-24
+
+### Added
+
+- **A popup now shows what automation just applied.** On first connecting to a network or after the network changes, a successful automated apply pops up the panel with the applied profile (or the fallback) and the current network information — SSID, interface, gateway, IP and DNS. Polling that changes nothing pops nothing: the notice follows only an automation-triggered apply, never a no-op round. (`engine.rs`, `popup.rs`, `popup.html`, `i18n`)
+- **The log level is now configurable.** The Logs card in Settings gained a four-way selector — errors only / warnings and errors / standard / debug — that takes effect immediately, no restart. Standard records every network change, every evaluation round and every applied action; debug adds the per-profile evaluation results, every apply step and the reason behind each skip. (`log.rs`, `appconfig.rs`, `ipc.rs`, `settings.html`)
+
+### Changed
+
+- **The tray panel's network card no longer hides missing fields.** Every row is always rendered; a field that could not be read shows an em dash instead of the row disappearing, so "not read" is distinguishable from "genuinely empty" while troubleshooting. (`popup.html`)
+- **Switching profiles with unsaved edits now asks first.** Picking another profile (or creating a new one) used to discard the draft silently; a confirmation now guards the switch. (`editor.html`)
+- **Logging now covers every detection and every execution action.** Standard records every network change (including which network it changed from and to), every due evaluation round and every applied action; debug adds the per-profile match results, each route and read-back step, and every skip reason. Sampling and idle rounds are deliberately silent — repeating them would only drown the log, and silence is the correct expression of "nothing was due". (`engine.rs`, `network/mod.rs`)
+
+### Fixed
+
+- **A failed rollback is no longer swallowed silently.** When `apply_3a` fails at any step, restoring the pre-apply snapshot used to end in `.ok()`; a restore that itself failed left the system half-changed with nothing in the log. Success is now recorded as a warning and failure as an error. (`network/mod.rs`)
+
 ## [1.8.2] - 2026-10-24
 
 ### Fixed

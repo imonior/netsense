@@ -1428,7 +1428,13 @@
   }
 
   /* —————————————————————— 选中与新建 —————————————————————— */
-  function pick(kind, id) {
+  /// Switching away rebuilds the draft from the on-disk copy, so unsaved edits would
+  /// silently vanish on the next click and read like the profiles are linked together.
+  /// 切走会从磁盘副本重建草稿，未保存的改动就此静默消失 —— 那种「改完 A 去看 B、回来
+  /// A 的改动没了」的观感，正是配置之间像串了台的来源。所以切走前先问一声。
+  async function pick(kind, id) {
+    if (dirty && !(sel && sel.kind === kind && sel.id === id) &&
+        !(await askDiscard(t("editor.confirm_switch_dirty")))) return;
     dirty = false;
     sel = { kind, id };
     draft = kind === "profile" ? clone((cfg.profiles || []).find(p => p.id === id)) : null;
@@ -1436,7 +1442,12 @@
     renderAll();
   }
 
-  function newProfile(name, ssid) {
+  /// Creating a profile discards whatever is being edited, exactly like switching does.
+  /// 新建与切走一样会丢掉手上没保存的编辑，过同一道确认；确认必须发生在 push 之前，
+  /// 否则取消之后 cfg.profiles 里已经多了一条幽灵配置。
+  /// The gate must run before the push below, or cancelling leaves a phantom profile behind.
+  async function newProfile(name, ssid) {
+    if (dirty && !(await askDiscard(t("editor.confirm_switch_dirty")))) return;
     const base = String(name || "").trim() || t("editor.untitled");
     let id = base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     if (!id || cfg.profiles.some(p => p.id === id)) id = (id || "profile") + "-" + uid("").slice(-3);
@@ -2192,6 +2203,29 @@
         `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">` +
         `<button id="del-no">${esc(t("editor.confirm_cancel"))}</button>` +
         `<button class="danger" id="del-yes">${esc(t("editor.delete"))}</button>` +
+        `</div>`;
+      $("del-mask").hidden = false;
+      $("del-no").onclick = () => close(false);
+      $("del-yes").onclick = () => close(true);
+    });
+  }
+
+  /// Confirmation for switching away / creating a profile with unsaved edits. Shares the
+  /// mask with askDelete — that one confirms deleting a whole profile, this one confirms
+  /// dropping unsaved edits; same "are you sure" shape, different button labels. The main
+  /// window has no native dialog host (confirm() is always false there), so it must go
+  /// through the app's own mask.
+  /// 切走 / 新建前的「未保存更改」确认。与 askDelete 共用同一块遮罩：删除那一问确认的是
+  /// 删掉一整条配置，这一问确认的是丢掉手上没保存的编辑 —— 同一个「想清楚了」的形态，
+  /// 只是按钮文案不同。主窗口没有原生对话框宿主，必须走应用自己的遮罩。
+  function askDiscard(msg) {
+    return new Promise((resolve) => {
+      const close = (r) => { $("del-mask").hidden = true; resolve(r); };
+      $("del-modal").innerHTML = `<h3>${esc(t("editor.confirm_switch_title"))}</h3>` +
+        `<div class="mv">${esc(msg)}</div>` +
+        `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">` +
+        `<button id="del-no">${esc(t("editor.confirm_cancel"))}</button>` +
+        `<button class="danger" id="del-yes">${esc(t("editor.confirm_switch_ok"))}</button>` +
         `</div>`;
       $("del-mask").hidden = false;
       $("del-no").onclick = () => close(false);

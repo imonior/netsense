@@ -9,9 +9,9 @@
 pub mod health;
 pub mod readback;
 
-use crate::config::NetworkConfig;
+use crate::config::{Mode, NetworkConfig};
 use crate::i18n;
-use crate::platform::NetworkPlatform;
+use crate::platform::{InterfaceStatus, NetworkPlatform};
 use std::time::Duration;
 
 pub use health::HealthMonitor;
@@ -29,6 +29,36 @@ pub enum Stage3A {
 /// 回读校验的采样节律：下发后网卡要重新关联、DHCP 还要拿地址，立刻读会误判失败。
 const READBACK_ATTEMPTS: usize = 4;
 const READBACK_SETTLE: Duration = Duration::from_millis(800);
+
+/// The mode's name inside a log line: spelled exactly as in the config file (serde
+/// lowercase), so a user comparing the log against the editor sees the same word.
+///
+/// 配置模式在日志里的名字：与配置文件里的写法一致（serde 小写），
+/// 用户拿着日志对照编辑器时看到的是同一个词。
+fn mode_name(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Dhcp => "dhcp",
+        Mode::Manual => "manual",
+    }
+}
+
+/// Roll back and record what actually happened: a successful restore is a warn
+/// (the network was changed back, visible at the default level), a failed one is
+/// an error — the live system may then sit half-old-half-new, the shape that most
+/// needs troubleshooting. The previous three `restore_from_snapshot(&before).ok()`
+/// calls silently swallowed restore failures; "claims a rollback that never
+/// happened" is worse than no rollback at all.
+///
+/// 回滚并按实记一行：恢复成功记 warn（网络被改回去了，默认档也该看见），
+/// 恢复失败记 error —— 现场可能停在半新半旧之间，那是最需要排查的形状。
+/// 原先三处 `restore_from_snapshot(&before).ok()` 把恢复失败静默吞掉，
+/// 「说回滚了其实没有」比不回滚更糟。
+fn rollback_and_log<P: NetworkPlatform>(plat: &P, before: &InterfaceStatus) {
+    match plat.restore_from_snapshot(before) {
+        Ok(()) => crate::log::warn(&i18n::t("net.rollback")),
+        Err(e) => crate::log::error(&i18n::tf("net.rollback_failed", &[("error", &e)])),
+    }
+}
 
 /// 执行 3A：快照当前状态 → 下发 → 路由 → 回读校验（必要时补 DNS 兜底）。
 ///
@@ -66,10 +96,15 @@ pub fn apply_3a<P: NetworkPlatform>(
         return Stage3A::Applied { note: None };
     }
 
-    // 2. 下发网络配置
+    // 2. Apply the network configuration. Log "apply begins" first: it is the start
+    //    marker of every execution action, pairing with the apply's success
+    //    (engine.pass_3a) / failure (engine.error) into one complete timeline.
+    // 2. 下发网络配置。先记一行「开始下发」：它是每一次执行动作的起点标记，
+    //    与下发的成功（engine.pass_3a）/ 失败（engine.error）配成一条完整时间线。
+    crate::log::info(&i18n::tf("net.apply_start", &[("mode", mode_name(&cfg.mode))]));
     if let Err(e) = plat.apply_network(cfg) {
         // 下发失败：尝试回滚
-        plat.restore_from_snapshot(&before).ok();
+        rollback_and_log(plat, &before);
         return Stage3A::Failed {
             reason: i18n::tf("net.apply_failed", &[("error", &e)]),
         };
@@ -91,10 +126,23 @@ pub fn apply_3a<P: NetworkPlatform>(
             for (dest, _gw) in added_routes {
                 plat.delete_route(&dest).ok();
             }
-            plat.restore_from_snapshot(&before).ok();
+            rollback_and_log(plat, &before);
             return Stage3A::Failed {
                 reason: i18n::tf("net.route_failed", &[("dest", &r.dest), ("error", &e)]),
             };
+        }
+        // One line per route step (debug level): when troubleshooting "the route was
+        // added, why is it not in effect", the log must show which route and from
+        // which step onward it went missing.
+        // 每一步路由都留一行（debug 档）：排查「路由明明加了怎么没生效」时，
+        // 要能看出是哪一条、从哪一步开始不见的。
+        if r.delete {
+            crate::log::debug(&i18n::tf("net.route_deleted", &[("dest", &r.dest)]));
+        } else if let Some(g) = r.gateway.as_deref() {
+            crate::log::debug(&i18n::tf(
+                "net.route_added",
+                &[("dest", &r.dest), ("gw", g)],
+            ));
         }
         if !r.delete {
             if let Some(g) = r.gateway.as_deref() {
@@ -112,10 +160,22 @@ pub fn apply_3a<P: NetworkPlatform>(
         match readback_match(plat, cfg, &before.routes) {
             Ok(()) => return Stage3A::Applied { note: None },
             Err(f) => {
-                last = Some(f);
+                // One line per mismatching read-back (debug level): inside the
+                // 4×800ms settle window, "which attempt and what differed" is
+                // exactly what troubleshooting a non-effective apply needs.
+                // 每一次没对上的回读都留一行（debug 档）：4×800ms 的沉降期内
+                // 「第几次、差在哪」正是排查下发不生效时要看的东西。
                 if attempt + 1 < READBACK_ATTEMPTS {
+                    crate::log::debug(&i18n::tf(
+                        "net.readback_retry",
+                        &[
+                            ("n", &(attempt + 1).to_string()),
+                            ("detail", &f.to_string()),
+                        ],
+                    ));
                     std::thread::sleep(READBACK_SETTLE);
                 }
+                last = Some(f);
             }
         }
     }
@@ -143,7 +203,7 @@ pub fn apply_3a<P: NetworkPlatform>(
     }
 
     // 校验失败：回滚到快照状态
-    plat.restore_from_snapshot(&before).ok();
+    rollback_and_log(plat, &before);
     Stage3A::Failed {
         reason: i18n::tf(
             "net.verify_failed",
@@ -302,5 +362,19 @@ mod tests {
             "兜底没补上就必须判失败: {:?}",
             res
         );
+    }
+
+    /// The mode name in the log must match the config-file spelling (serde
+    /// lowercase): a user comparing the log against the editor has to see the same
+    /// word. When `Mode` gains a variant, this test forces the log name to be
+    /// added along with it.
+    ///
+    /// 日志里的模式名必须与配置文件里的写法一致（serde 小写）：
+    /// 用户拿着日志对照编辑器时，看到的得是同一个词。
+    /// `Mode` 加新变体时这条测试会逼着把日志名字一起补上。
+    #[test]
+    fn mode_name_matches_the_config_file_spelling() {
+        assert_eq!(mode_name(&crate::config::Mode::Dhcp), "dhcp");
+        assert_eq!(mode_name(&crate::config::Mode::Manual), "manual");
     }
 }

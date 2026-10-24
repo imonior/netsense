@@ -294,6 +294,34 @@ pub(crate) fn epoch_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+/// "No value" in a log line: a single dash, not `None` and not an empty string —
+/// when troubleshooting, "this field was not read" must be distinguishable at a
+/// glance from "this field is genuinely empty".
+///
+/// 日志里的「没有值」：一个短横，而不是 `None` 或空串 ——
+/// 排查时一眼看得出「这一项没读到」，而不是「这一项就是空的」。
+fn or_dash(v: Option<&str>) -> String {
+    v.unwrap_or("-").to_string()
+}
+
+/// Identity summary of one snapshot: SSID / gateway MAC / primary interface.
+/// The fingerprint-change log line renders its `{from}` / `{to}` with this — those
+/// three fields are exactly the answer to "which network did we move to", while the
+/// raw fingerprint additionally carries BSSID, the interface set and the tunnel set,
+/// which would only get in the way inside a log line.
+///
+/// 一份快照的身份摘要：SSID / 网关 MAC / 主网卡。
+/// 指纹变化日志的 `{from}` / `{to}` 用它渲染 —— 这三项正是「换到了哪张网」的答案，
+/// 而原始指纹还额外缠着 BSSID、网卡集合与隧道集合，进了日志只会碍事。
+fn ident_of(s: &NetworkSnapshot) -> String {
+    format!(
+        "{} / {} / {}",
+        or_dash(s.ssid.as_deref()),
+        or_dash(s.gateway_mac.as_deref()),
+        or_dash(s.primary_interface.as_deref()),
+    )
+}
+
 /// 零命中要落成处置之前，允许「连续读不到身份」被当成既成事实的轮数。
 ///
 /// 为什么是 2：一节采样约 2 s，而误判的代价是「把用户的静态 IP 与指定 DNS 拆成
@@ -410,6 +438,12 @@ impl Engine {
     }
 
     pub fn note_sampled(&mut self, snap: NetworkSnapshot, now: Instant) {
+        // Identity summary taken before the snapshot is replaced: the fingerprint-change
+        // log line has to say "from which network to which network", and the raw
+        // six-field pipe-joined fingerprint (NetworkSnapshot::fingerprint) is unreadable.
+        // 覆盖前的身份摘要：指纹变化日志要能说出「从哪张网到哪张网」，
+        // 而六段管道分隔的原始指纹（`NetworkSnapshot::fingerprint`）人读不了。
+        let previous_ident = ident_of(&self.snapshot);
         self.last_sample = Some(now);
         self.undecidable_rounds = if snap.can_decide(self.decision_inputs) {
             0
@@ -417,7 +451,24 @@ impl Engine {
             self.undecidable_rounds + 1
         };
         self.snapshot = snap;
-        if self.scheduler.observe(&self.snapshot, now) && self.hold {
+        // Sampling itself is not logged: a line every 2s repeats the same identity
+        // fields until something changes, and the moment it changes is already
+        // covered by the fingerprint-change line below (default level).
+        // 采样本身不记日志：每 2 秒重复同一份身份字段，而变化时刻已由下面的
+        // 指纹变化行（默认档）记下。
+        let changed = self.scheduler.observe(&self.snapshot, now);
+        if changed {
+            // A fingerprint change is the authoritative "the network connection
+            // changed" signal: recorded at the default level too — it is the one
+            // line in the whole automation chain most worth checking timestamps against.
+            // 指纹变化是「网络连接改变」的权威信号：默认档也记，
+            // 它是整条自动化链路里最值得对时间戳的那一行。
+            log::info(&i18n::tf("net.changed", &[
+                ("from", &previous_ident),
+                ("to", &ident_of(&self.snapshot)),
+            ]));
+        }
+        if changed && self.hold {
             // 网络真的变了：DHCP 后的手动暂停到此结束，自动化恢复正常节律。
             // （判定仍走各 Profile 自己的 change_delay —— 变化刚发生，暂不「稳定」。）
             self.hold = false;
@@ -509,6 +560,37 @@ impl Engine {
         self.decision = decide(&self.evaluation.matched_ids);
         let fingerprint = self.scheduler.fingerprint().to_string();
         self.prune_errors(&fingerprint);
+        // Instrumentation: which schedules fired this round (default level), and the
+        // per-profile results (debug level). The ask was "record every detection":
+        // the default level gives "which cadences triggered this round", while the
+        // per-profile hit/miss goes to Debug — under a polling config that is N lines
+        // every 30 seconds, too much for the default level; when actually asking
+        // "why is this profile not taking effect", switch the level to Debug.
+        // —— 埋点：这一轮评估了谁（默认档），逐 Profile 结果如何（debug 档）——
+        // 用户要的是「每一次检测都有记录」。默认档给「哪几条节律触发了本轮」，
+        // 逐条命中与否放 Debug：轮询配置下它每 30 秒就是 N 行，默认档放不下 ——
+        // 而真的排查「某条 Profile 怎么不生效」时，把级别调到 Debug 就看得到。
+        if !due.is_empty() {
+            let names: Vec<String> = due
+                .iter()
+                .map(|id| {
+                    cfg.profile_by_id(id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| id.clone())
+                })
+                .collect();
+            log::info(&i18n::tf("engine.eval_due", &[("names", &names.join(", "))]));
+        }
+        for ev in &self.evaluation.profiles {
+            if !ev.enabled {
+                continue; // 禁用的 Profile 不参与检测，记它「未命中」是误导
+            }
+            if ev.matched {
+                log::debug(&i18n::tf("engine.eval_matched", &[("name", &ev.name)]));
+            } else {
+                log::debug(&i18n::tf("engine.eval_unmatched", &[("name", &ev.name)]));
+            }
+        }
     }
 
     /// 只保留还说得过去的错误：命中的 Profile 才有资格是 ERROR；网络指纹变了说明
@@ -1167,7 +1249,12 @@ fn apply_steps(state: &Arc<AppState>, steps: &[(u64, one_shot::ActionOutcome)]) 
                     "engine.action_failed",
                     &[("label", &outcome.label), ("error", e)],
                 )),
-                None => log::debug(&i18n::tf("engine.action_done", &[("label", &outcome.label)])),
+                // Every completed 3B1 action is recorded (default level): this is
+                // the line the ask "record every execution action" refers to;
+                // failures have their own error-level line.
+                // 每一条 3B1 动作的完成都记（默认档）：用户要的「每一个执行动作
+                // 都有记录」指的就是这一行，失败那条另有 error 档。
+                None => log::info(&i18n::tf("engine.action_done", &[("label", &outcome.label)])),
             }
         }
     }
@@ -1366,9 +1453,22 @@ fn pass(state: &Arc<AppState>, manual: Option<String>) {
         // 「设为 DHCP」自己触发的强制轮若放行，暂停会被当场推翻（评估 → 重新命中 → 下回去）。
         // 用户显式点的「立即应用」不走这条捷径，不受这里约束。
         if manual.is_none() && eng.automation_held() {
+            // Held rounds stay silent too: the pause is already bracketed by the
+            // user's own action line at the start and engine.hold_released at the
+            // end; a line per second inside the bracket would only be filler.
+            // 暂停轮同样沉默：暂停区间已由用户自己的动作行开头、engine.hold_released
+            // 收尾，区间内每秒一行只是填充物。
             return;
         }
         if manual.is_none() && !forced && eng.due(&cfg, now).is_empty() {
+            // An idle round stays silent on purpose: the loop ticks once a second,
+            // so a line here would be eighty thousand identical lines a day. "The
+            // engine is alive" is already answered by the startup line, every
+            // net.changed and every engine.eval_due; silence is the correct
+            // expression of "nothing due".
+            // 空转轮刻意沉默：主循环每秒一跳，在这里记一行就是一天八万行复读。
+            // 「引擎活着」已由启动行、每条 net.changed 与每条 engine.eval_due 回答，
+            // 沉默本身就是「什么都没到期」的正确表达。
             return;
         }
         eng.evaluate(&cfg, now);
@@ -1406,6 +1506,66 @@ fn emit_evaluation(state: &Arc<AppState>) {
 fn publish_view(state: &Arc<AppState>) {
     emit_evaluation(state);
     publish_status_now(state);
+}
+
+/// 「自动化成功应用了一个配置」时发给面板的弹窗内容（事件 `netsense://applied`）。
+///
+/// 只在**计划真正跑起来且 3A 成功**的 commit 里构造：轮询中没有任何规则触发改变时，
+/// [`decide_plan`] 直接返回 `None`（staying 且内容指纹没变），根本到不了 commit ——
+/// 「弹窗」与「引擎真的动了手」因此是同一件事，不需要另设防骚扰状态。
+///
+/// `name = None` 表示零命中兜底。网络身份取引擎本轮采到的快照（`eng.snapshot`）：
+/// 字段最多落后一个采样周期（2s），对「此刻在哪张网上」这个判断没有影响。
+fn applied_notice(
+    name: Option<&str>,
+    net: Option<&NetworkConfig>,
+    snap: &NetworkSnapshot,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "profile": name,
+        "fallback": name.is_none(),
+        "ssid": snap.ssid,
+        "iface": snap.primary_interface,
+    });
+    match net {
+        Some(net) => {
+            v["mode"] = serde_json::json!(net.mode);
+            v["ip"] = serde_json::json!(net.ip);
+            v["netmask"] = serde_json::json!(net.netmask);
+            v["gateway"] = serde_json::json!(net.gateway);
+            // DNS 三态：缺省 = 不动、"" = 交回自动、非空 = 指定。只有「指定」值得占一行，
+            // 另两种想知道实际生效的解析器，看面板信息卡里的实时值。
+            v["dns"] = serde_json::json!(net.dns.as_deref().filter(|s| !s.is_empty()));
+            v["routes"] = serde_json::json!(net.routes.len());
+        }
+        // 这一支不带网络配置（THEN 缺省）：地址相关的行整行不给看。
+        None => v["mode"] = serde_json::Value::Null,
+    }
+    v
+}
+
+/// 发「配置已应用」弹窗，并把面板叫出来（窗口操作回主线程，与托盘点击同一条路）。
+///
+/// 闸门「有网络才弹」：冷启动时一张网卡都没亮，兜底也会走到 commit，那样的弹窗只是开机
+/// 噪音 —— 需求说的是「首次连上网络或网络连接改变后」。SSID 与主网卡任一可读即算有网
+/// （纯有线没有 SSID，只有网卡名）。
+fn emit_applied(
+    state: &Arc<AppState>,
+    eng: &Engine,
+    name: Option<&str>,
+    net: Option<&NetworkConfig>,
+) {
+    let snap = &eng.snapshot;
+    if snap.ssid.is_none() && snap.primary_interface.is_none() {
+        return;
+    }
+    crate::state::emit(state, "netsense://applied", applied_notice(name, net, snap));
+    if let Some(app) = state.app.get().cloned() {
+        // 两个 handle：一个借给 `run_on_main_thread` 当 `&self`，一个 move 进闭包 ——
+        // 同一个 `app` 不能既被 `&self` 借用又被内层 `move` 捕获（同 tray.rs 的单击路径）。
+        let app_cl = app.clone();
+        let _ = app.run_on_main_thread(move || crate::popup::show(&app_cl));
+    }
 }
 
 /// 「这一轮要下发什么」的锁内产物。
@@ -1544,11 +1704,20 @@ fn decide_plan(state: &Arc<AppState>, eng: &mut Engine, cfg: &Config) -> Option<
             let fp = fingerprint_of(&profile);
             let fingerprint = eng.scheduler_fingerprint();
             if eng.is_blocked(&id, &fp, &fingerprint) {
-                return None; // 这个「配置 + 网络」组合已经失败过一次，别反复弹授权框
+                // This settings + network combination already failed once; do not
+                // pop the authorization dialog again. The skip is logged because
+                // without this line the log stays silent while the user sees
+                // "it matched, yet nothing happens".
+                // 这个「配置 + 网络」组合已经失败过一次，别反复弹授权框。
+                // 为什么跳过要说出来：没有这一行，日志里只剩沉默，
+                // 而用户看到的是「明明命中了却什么都不做」。
+                log::debug(&i18n::tf("engine.skip_blocked", &[("name", &profile.name)]));
+                return None;
             }
             let staying = eng.active_id.as_deref() == Some(id.as_str());
             if staying && eng.applied_fp.as_deref() == Some(fp.as_str()) {
                 // 方案第 36 条：保持 Active 不重复下发、不重复跑一次性动作
+                log::debug(&i18n::tf("engine.skip_unchanged", &[("name", &profile.name)]));
                 return None;
             }
             // THEN 缺省等于「这一支什么都不做」：它照样算 Active（条件命中了），
@@ -1590,6 +1759,7 @@ fn decide_fallback(eng: &mut Engine, cfg: &Config) -> Option<Plan> {
         // 兜底被禁用/清空：之前那一组 worker 不该继续维持 —— 它守的是一个
         // 用户已经撤销的期望。记档一并作废：重新启用时要重新下发，而不是被
         // 「内容没变」挡住。
+        log::debug(&i18n::t("engine.skip_fb_empty"));
         eng.stop_fallback_workers();
         eng.fallback_fp = None;
         return None;
@@ -1599,18 +1769,21 @@ fn decide_fallback(eng: &mut Engine, cfg: &Config) -> Option<Plan> {
     if fb.network.is_none() && !has_actions {
         // 全空的兜底 = 什么都不做（保持现状）。空配置的语义是「不干预」，
         // 不是「把之前干预过的东西撤掉」。
+        log::debug(&i18n::t("engine.skip_fb_empty"));
         eng.stop_fallback_workers();
         eng.fallback_fp = None;
         return None;
     }
     let fp = format!("fallback|{}", serde_json::to_string(fb).unwrap_or_default());
     if eng.fallback_fp.as_deref() == Some(fp.as_str()) {
+        log::debug(&i18n::t("engine.skip_fb_unchanged"));
         return None;
     }
     // 兜底 3A 失败记档：同一份配置 + 同一张网络指纹下不再重跑 3A，
     // 否则用户持续缺席时每轮都会被要求授权（与 Profile 的 `blocked` 同机制）。
     let fingerprint = eng.scheduler.fingerprint().to_string();
     if eng.is_fallback_blocked(&fp, &fingerprint) {
+        log::debug(&i18n::t("engine.skip_fb_blocked"));
         return None;
     }
     // 新的一组起来之前先把旧的叫停 —— 与 `branch_prepare` 同一条顺序规则：
@@ -1644,6 +1817,7 @@ fn commit_plan(
     match plan {
         Plan::Profile {
             profile,
+            net,
             opts,
             staying,
             from,
@@ -1669,7 +1843,12 @@ fn commit_plan(
                 }
                 None => {
                     if let Some(Stage3A::Applied { note }) = &three_a {
-                        log::debug(&i18n::tf(
+                        // The 3A result is the closing marker of every "execution
+                        // action": recorded at the default level, it pairs with
+                        // net.apply_start (apply begins) into one complete timeline.
+                        // 3A 的结果是每一次「执行动作」的收尾标记：默认档也记，
+                        // 与 net.apply_start（开始下发）配成一条完整时间线。
+                        log::info(&i18n::tf(
                             "engine.pass_3a",
                             &[("name", &profile.name), ("branch", Which::Then.name())],
                         ));
@@ -1687,6 +1866,10 @@ fn commit_plan(
                     }
                     eng.errors.remove(&profile.id);
                     eng.mark_applied(fp);
+                    // 弹窗：自动化刚把一个配置落到当前网络上。走到这里只有三种来路 ——
+                    // 首评、网络指纹变了、配置内容变了；轮询中什么都没变时 decide_plan
+                    // 直接返回 None，到不了这里（「轮询不弹」由此成立，无需另设状态）。
+                    emit_applied(state, eng, Some(profile.name.as_str()), net.as_ref());
                     if !staying {
                         log::info(&i18n::tf("engine.switch", &[
                             ("from", from.as_deref().unwrap_or("-")),
@@ -1717,6 +1900,9 @@ fn commit_plan(
             eng.applied_fp = None;
             eng.active_id = None;
             log::info(&i18n::t("engine.fallback_applied"));
+            // 兜底也是一次「成功应用的配置」：弹窗里标成兜底，用户看得出此刻没有
+            // Profile 命中。与 Profile 分支同一个闸门（有网络才弹）。
+            emit_applied(state, eng, None, fb.network.as_ref());
             // —— 3B：合成一个说得清归属的身份 ——
             // 兜底不接管健康监测：它没有「当前环境」可探测，也没有 Profile 可归属。
             // holder 必然挂着一支 THEN（见 fallback_holder），branch_3b 由此取到那一支。
@@ -1853,7 +2039,7 @@ fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) 
         }
         _ => {
             if let Some(Stage3A::Applied { note }) = &three_a {
-                log::debug(&i18n::tf(
+                log::info(&i18n::tf(
                     "engine.pass_3a",
                     &[("name", &profile.name), ("branch", which.name())],
                 ));
@@ -2020,7 +2206,7 @@ fn publish_status_now(state: &Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Condition, ConditionType, Rule};
+    use crate::config::{Condition, ConditionType, Mode, Rule};
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -2342,17 +2528,13 @@ mod tests {
             ..Default::default()
         };
         let t0 = Instant::now();
-        let snap = |ssid: &str| NetworkSnapshot {
-            ssid: Some(ssid.to_string()),
-            ..Default::default()
-        };
-        eng.note_sampled(snap("A"), t0);
+        eng.note_sampled(snap(Some("A"), None), t0);
         eng.evaluate(&cfg, t0);
         assert!(eng.due(&cfg, t0).is_empty(), "刚评估过，没到下一个轮询点");
 
         // set_dhcp 的收尾顺序：先把这份快照记成新基线、再武装暂停 ——
         // 切 DHCP 自己引起的现场变动不算「网络变化」。
-        eng.note_sampled(snap("A"), t0);
+        eng.note_sampled(snap(Some("A"), None), t0);
         eng.hold_automation();
         let later = t0 + std::time::Duration::from_secs(3600);
         assert!(
@@ -2364,7 +2546,7 @@ mod tests {
         // 解除的同一瞬间不许评估：变化刚发生，正处在 change_delay 的稳定窗口里，
         // 而这一窗口对轮询同样生效（见 `Scheduler::is_due`）—— 暂停结束后多等 5 s
         // 再判，换来的是「判的时候网络已经停了」。
-        eng.note_sampled(snap("B"), later);
+        eng.note_sampled(snap(Some("B"), None), later);
         assert!(!eng.automation_held(), "观察到变化就要解除暂停");
         assert!(
             eng.due(&cfg, later).is_empty(),
@@ -2550,6 +2732,130 @@ mod tests {
         assert!(then.network.is_none(), "3A 不能挂在合成分支上（见函数文档）");
         assert_eq!(then.one_shot.len(), 1, "动作按原样带过去");
         assert_eq!(then.persistent.len(), 1);
+    }
+
+    fn snap(ssid: Option<&str>, iface: Option<&str>) -> NetworkSnapshot {
+        NetworkSnapshot {
+            ssid: ssid.map(|s| s.to_string()),
+            primary_interface: iface.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// 弹窗载荷：手动配置的每个字段都要带到，路由给条数（明细在面板信息卡里）。
+    #[test]
+    fn applied_notice_carries_the_manual_config_and_the_network() {
+        let net = NetworkConfig {
+            mode: Mode::Manual,
+            ip: Some("192.168.1.5".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("192.168.1.1".into()),
+            dns: Some("192.168.1.1, 8.8.8.8".into()),
+            routes: vec![
+                crate::config::model::RouteConfig {
+                    dest: "10.0.0.0/8".into(),
+                    gateway: Some("192.168.1.1".into()),
+                    metric: 1,
+                    delete: false,
+                },
+                crate::config::model::RouteConfig {
+                    dest: "172.16.0.0/12".into(),
+                    gateway: None,
+                    metric: 0,
+                    delete: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let v = applied_notice(Some("home"), Some(&net), &snap(Some("Home"), Some("wi-fi")));
+        assert_eq!(v["profile"], "home");
+        assert_eq!(v["fallback"], false);
+        assert_eq!(v["mode"], "manual");
+        assert_eq!(v["ip"], "192.168.1.5");
+        assert_eq!(v["netmask"], "255.255.255.0");
+        assert_eq!(v["gateway"], "192.168.1.1");
+        assert_eq!(v["dns"], "192.168.1.1, 8.8.8.8");
+        assert_eq!(v["routes"], 2);
+        assert_eq!(v["ssid"], "Home");
+        assert_eq!(v["iface"], "wi-fi");
+    }
+
+    /// DHCP 与「不动 DNS」都不该在弹窗里留空行。
+    #[test]
+    fn applied_notice_for_dhcp_leaves_the_addressing_rows_empty() {
+        let net = NetworkConfig {
+            mode: Mode::Dhcp,
+            ..Default::default()
+        };
+        let v = applied_notice(Some("office"), Some(&net), &snap(None, Some("eth0")));
+        assert_eq!(v["mode"], "dhcp");
+        assert!(v["ip"].is_null(), "DHCP 没有静态地址可显示");
+        assert!(v["dns"].is_null(), "DNS 缺省 = 不动，不占行");
+        assert_eq!(v["routes"], 0);
+    }
+
+    /// DNS 三态里只有「指定」进弹窗："" = 交回自动，与缺省一样不占行。
+    #[test]
+    fn applied_notice_only_shows_a_specified_dns() {
+        let net = NetworkConfig {
+            dns: Some(String::new()),
+            ..Default::default()
+        };
+        let v = applied_notice(Some("cafe"), Some(&net), &snap(Some("Cafe"), None));
+        assert!(v["dns"].is_null());
+    }
+
+    /// 不带网络配置的分支（THEN 缺省）：地址模式整行不给看，但配置名照弹。
+    #[test]
+    fn applied_notice_without_a_network_config_has_no_mode() {
+        let v = applied_notice(Some("label-only"), None, &snap(Some("Home"), None));
+        assert!(v["mode"].is_null());
+        assert_eq!(v["profile"], "label-only");
+        assert_eq!(v["fallback"], false);
+    }
+
+    /// 兜底：标 fallback、profile 为空，网络配置照常带。
+    #[test]
+    fn applied_notice_marks_the_fallback() {
+        let net = NetworkConfig {
+            mode: Mode::Dhcp,
+            ..Default::default()
+        };
+        let v = applied_notice(None, Some(&net), &snap(Some("Starbucks"), None));
+        assert_eq!(v["fallback"], true);
+        assert!(v["profile"].is_null());
+        assert_eq!(v["mode"], "dhcp");
+        assert_eq!(v["ssid"], "Starbucks");
+    }
+
+    /// The identity summary in the fingerprint-change log line: a missing field is a
+    /// dash, not `None` and not an empty string — when troubleshooting, "this field
+    /// was not read" must be distinguishable at a glance from "this field is
+    /// genuinely empty". The order is always SSID / gateway MAC / primary interface,
+    /// the identity part rendered by the `net.changed` line.
+    ///
+    /// 指纹变化日志的身份摘要：缺项是一个短横，不是 `None` 也不是空串 ——
+    /// 排查时要能一眼看出「这一项没读到」与「这一项就是空的」的区别。
+    /// 顺序恒为 SSID / 网关 MAC / 主网卡，即 `net.changed` 行渲染的身份段。
+    #[test]
+    fn ident_of_renders_the_three_identity_fields_with_a_dash_for_missing() {
+        assert_eq!(
+            ident_of(&snap(Some("Home"), Some("en0"))),
+            "Home / - / en0",
+            "没读到网关 MAC（纯有线常见）时是短横"
+        );
+        assert_eq!(
+            ident_of(&NetworkSnapshot::default()),
+            "- / - / -",
+            "一张网卡都没亮时三个都是短横，而不是 None"
+        );
+        assert_eq!(
+            ident_of(&snap(None, Some("en5"))),
+            "- / - / en5",
+            "SSID 读不到（Wi-Fi 打盹）但网卡在：摘要把这件事说清楚"
+        );
+        assert_eq!(or_dash(None), "-");
+        assert_eq!(or_dash(Some("x")), "x");
     }
 }
 

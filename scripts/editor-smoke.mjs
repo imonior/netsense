@@ -505,6 +505,9 @@ function answerValue(cmd, args) {
       const rec = { cmd, payload: JSON.parse(args.payload), at: (saveSeq += 1) };
       saves.push(rec);
       emitted.push(rec);
+      // 刻意不做合并：这份替身的契约是「记录编辑器发给后端的 payload」，后端那一侧的
+      // upsert / 合并由 Rust 测试守（payloads_the_editor_actually_sends…）。这里若替身
+      // 自己合并，后面几组重选配置时看到的就是被早前保存改过的 fixture，反而绑死了顺序。
       return Promise.resolve();
     }
     case "preview_match":
@@ -1542,6 +1545,36 @@ eq("改回一个对不上的名字，那一行的徽标跟着退回未命中",
   findById("pbadge-home").textContent, strings["editor.status_not_matched"]);
 check("规则卡的绿边也一起退掉", !findById("rbox-r1").className.includes("r-match"));
 
+// —————————————————————— 切走未保存的更改 ——————————————————————
+
+group("切走未保存的更改：先问一句，答取消原样不动，答放弃才切走");
+// 上一个组往条件里打过字还没保存：此刻草稿是脏的，选中的是 home。
+// 现场背景：切走会从磁盘副本重建草稿，不问一声的话，「改完 A 去看 B、回来 A 的改动
+// 没了」看起来就像配置之间串了台 —— 这一组就是把那声询问钉住。
+check("起点：home 选中且带着未保存的改动", h.sel.id === "home" && h.dirty === true,
+  `sel=${JSON.stringify(h.sel)} dirty=${h.dirty}`);
+const officeRow2 = findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "office")[0];
+click(officeRow2);
+check("未保存就切走：先弹确认遮罩，问的是「放弃未保存的更改」",
+  findById("del-mask").hidden === false &&
+  findById("del-modal").textContent.includes(strings["editor.confirm_switch_dirty"]) &&
+  findById("del-modal").textContent.includes(strings["editor.confirm_switch_ok"]),
+  `mask.hidden=${findById("del-mask").hidden} modal=${JSON.stringify(findById("del-modal").textContent).slice(0, 90)}`);
+findById("del-no").onclick();
+await settle();
+check("答「取消」：选择没动、草稿还在、仍是未保存",
+  h.sel.id === "home" && h.dirty === true && findById("del-mask").hidden === true,
+  `sel=${JSON.stringify(h.sel)} dirty=${h.dirty}`);
+check("取消之后表单里那几个字还在（草稿没被重建）",
+  byBind("rules.0.conditions.0.value")?.value === "NotThisNetwork",
+  byBind("rules.0.conditions.0.value")?.value);
+click(officeRow2);
+findById("del-yes").onclick();
+await settle();
+check("答「放弃并切换」：切到 office，草稿是 office 自己的值，未保存标记清掉",
+  h.sel.id === "office" && h.dirty === false && byBind("name")?.value === "Office_5G",
+  `sel=${JSON.stringify(h.sel)} dirty=${h.dirty} name=${byBind("name")?.value}`);
+
 // —————————————————————— 兜底的「删除」——————————————————————
 
 group("兜底的「删除」：先问一句，清完算作未保存的改动");
@@ -1569,6 +1602,55 @@ check("答「删除」：网络与两份动作一起清掉，兜底那一行亮�
   byBind("one_shot.0.action.app") === null &&
   byBind("persistent.0.action.path") === null &&
   byAct("sel-fallback").className.includes("dirty"));
+
+// —————————————————————— detection 属于每个配置 ——————————————————————
+
+group("detection：方式与周期每个配置各自独立，改一个不碰其他");
+// 上一组删掉兜底的动作还没保存：先答一句「放弃并切换」回到 office
+click(findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "office")[0]);
+check("带着未保存的删除切走：先问一句", findById("del-mask").hidden === false);
+findById("del-yes").onclick();
+await settle();
+const detMode = () => byBind("detection.mode")?.children.filter((c) => c.selected).map((c) => c.value).join(",");
+const detOf = (id) => h.cfg.profiles.find((p) => p.id === id).detection;
+eq("office 的检测方式回填自己的值（网络事件 + 轮询）", detMode(), "network_events_and_polling");
+eq("office 的轮询周期回填 30", byBind("detection.poll_interval_secs")?.value, "30");
+eq("office 的变化延迟回填 5", byBind("detection.change_delay_secs")?.value, "5");
+
+click(findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "home")[0]);
+await settle();
+eq("home 的检测方式回填自己的值（仅网络事件）", detMode(), "network_events");
+eq("home 的变化延迟回填 5", byBind("detection.change_delay_secs")?.value, "5");
+eq("home 没配轮询周期：那一格留空（占位符才是默认 30）",
+  [byBind("detection.poll_interval_secs")?.value, byBind("detection.poll_interval_secs")?.placeholder], ["", "30"]);
+
+click(findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "router_only")[0]);
+await settle();
+eq("router_only 的检测方式回填自己的值（仅轮询）", detMode(), "polling_only");
+eq("router_only 的轮询周期回填 60", byBind("detection.poll_interval_secs")?.value, "60");
+
+// 改 office 的检测方式：草稿变，内存配置里其他配置一个字都不动
+click(findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "office")[0]);
+await settle();
+choose(byBind("detection.mode"), "polling_only");
+await settle();
+eq("草稿里 office 的 detection 已改", h.draft.detection.mode, "polling_only");
+eq("内存配置里 home 的 detection 没被带偏", detOf("home"), { mode: "network_events", change_delay_secs: 5 });
+eq("内存配置里 router_only 的 detection 没被带偏", detOf("router_only"), { mode: "polling_only", poll_interval_secs: 60 });
+
+// 保存：payload 只带当前这一条的 detection，且不夹带其他配置。
+// 替身不合并（契约是 payload），后端按 id upsert 的那一半由 Rust 测试守。
+resetSaves();
+await h.$("btn-save").onclick();
+await settle();
+await wait(50);
+eq("保存发出的是 office", lastSave()?.payload?.id, "office");
+eq("payload.detection 是 office 改过的那一份", lastSave()?.payload?.detection,
+  { mode: "polling_only", change_delay_secs: 5, poll_interval_secs: 30 });
+check("payload 只描述当前这一条配置：没有夹带 profiles 数组",
+  lastSave()?.payload && !("profiles" in lastSave().payload));
+eq("保存后内存里 home 仍是仅网络事件", detOf("home"), { mode: "network_events", change_delay_secs: 5 });
+eq("保存后内存里 router_only 仍是仅轮询 60 秒", detOf("router_only"), { mode: "polling_only", poll_interval_secs: 60 });
 
 // —————————————————————— 交给 Rust 那半边的材料 ——————————————————————
 

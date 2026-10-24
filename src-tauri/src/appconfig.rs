@@ -235,6 +235,13 @@ pub struct AppConfig {
     /// 日志保留天数，按文件名的日期判断（见 `log::cleanup_old`）。
     #[serde(default = "default_retention")]
     pub log_retention_days: u32,
+    /// 日志级别：`error` / `warn` / `info`（默认）/ `debug`（见 `log::set_min_level`）。
+    ///
+    /// 默认 Info：状态迁移与执行动作全部在场；逐条采样、逐步下发这类细节要调到
+    /// Debug 才落盘。没有这道闸门的话，「每一次检测都记录」会把日志刷成每天四万行，
+    /// 保留期一满连排查都被淹掉 —— 所以记录密度与保留天数一样，是用户可调的。
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     /// 「检查更新 / 下载安装包」这两次对外请求走哪条路。缺省 = 跟随系统的代理设置。
     ///
     /// 它是唯一一个会影响对外字节流的字段，判据仍然成立：它改变的是本应用怎么上网，
@@ -330,6 +337,21 @@ fn default_retention() -> u32 {
     DEFAULT_LOG_RETENTION_DAYS
 }
 
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+/// 认不出的级别落回 `info`（默认档）：猜成 debug 会让每秒级的采样行把日志刷爆，
+/// 猜成 error 又会把该记的执行动作全吞了 —— 两者都比「用默认档」糟。
+pub(crate) fn normalize_log_level(s: &str) -> &'static str {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "error" => "error",
+        "warn" => "warn",
+        "debug" => "debug",
+        _ => "info",
+    }
+}
+
 fn default_theme() -> String {
     DEFAULT_THEME.to_string()
 }
@@ -340,6 +362,7 @@ impl Default for AppConfig {
             language: None,
             theme: DEFAULT_THEME.to_string(),
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
+            log_level: default_log_level(),
             proxy: crate::netproxy::ProxySetting::default(),
             window_sizes: WindowSizes::default(),
             window_spots: WindowSpots::default(),
@@ -387,6 +410,7 @@ impl AppConfig {
         use crate::netproxy::ProxySetting;
         self.theme = normalize_theme(&self.theme).to_string();
         self.log_retention_days = clamp_retention(self.log_retention_days);
+        self.log_level = normalize_log_level(&self.log_level).to_string();
         self.proxy = match &self.proxy {
             ProxySetting::Manual { url } => match crate::netproxy::normalize_proxy_url(url) {
                 Some(u) => ProxySetting::Manual { url: u },
@@ -860,6 +884,7 @@ mod tests {
             language: Some("ja".into()),
             theme: "light".into(),
             log_retention_days: 30,
+            log_level: "info".into(),
             proxy: ProxySetting::Manual {
                 url: "http://127.0.0.1:7890".into(),
             },
@@ -895,6 +920,7 @@ mod tests {
             language: None,
             theme: DEFAULT_THEME.into(),
             log_retention_days: 7,
+            log_level: "info".into(),
             proxy: ProxySetting::Manual {
                 url: "file:///etc/passwd".into(),
             },
@@ -911,6 +937,7 @@ mod tests {
             language: None,
             theme: DEFAULT_THEME.into(),
             log_retention_days: 7,
+            log_level: "info".into(),
             proxy: ProxySetting::Manual {
                 url: "SOCKS5://10.0.0.1:1080".into(),
             },
@@ -1184,6 +1211,7 @@ mod tests {
                 language: None,
                 theme: DEFAULT_THEME.into(),
                 log_retention_days: 0,
+                log_level: "info".into(),
                 proxy: ProxySetting::default(),
                 window_sizes: WindowSizes::default(),
                 window_spots: WindowSpots::default(),
