@@ -525,6 +525,7 @@
   "pal.iface_missing_none": "Windows에 이름이 {name}인 네트워크 어댑터가 없습니다 (이 컴퓨터에는 터널이 전혀 없습니다)",
   "upd.no_sums": "이 Release에 SHA256SUMS가 없어 검증되지 않은 에셋 설치를 거부합니다",
   "upd.sums_fetch": "SHA256SUMS 가져오기 실패: {error}",
+  "upd.sums_via_mirror": "SHA256SUMS 사전 확인이 미러로 대체되었습니다: {url}",
   "upd.mirror_used": "설치 프로그램을 미러를 통해 내려받고 있습니다: {mirror}",
   "upd.fetch_retry": "{url} 가져오기 실패({attempt}번째 시도), 재시도합니다: {error}",
   "upd.not_in_sums": "SHA256SUMS에 {asset} 항목이 없습니다",

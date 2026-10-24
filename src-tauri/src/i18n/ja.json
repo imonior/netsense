@@ -525,6 +525,7 @@
   "pal.iface_missing_none": "Windows に {name} というネットワークアダプターがありません（このマシンにはトンネルが一つもありません）",
   "upd.no_sums": "この Release には SHA256SUMS が付いていないため、未検証のアセットのインストールを拒否します",
   "upd.sums_fetch": "SHA256SUMS の取得に失敗しました: {error}",
+  "upd.sums_via_mirror": "SHA256SUMS の事前確認がミラーにフォールバックしました: {url}",
   "upd.mirror_used": "インストーラーをミラー経由でダウンロードしています：{mirror}",
   "upd.fetch_retry": "{url} の取得に失敗しました（{attempt} 回目）、再試行します: {error}",
   "upd.not_in_sums": "SHA256SUMS に {asset} が含まれていません",

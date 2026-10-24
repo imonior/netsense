@@ -4,6 +4,12 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.4] - 2026-10-24
+
+### Fixed
+
+- **In-app update no longer reports "no installable package for this platform" when `SHA256SUMS` is temporarily unreachable.** On a restricted network the pre-check fetched `SHA256SUMS` over a direct connection; after all retries failed, the picker discarded the already-selected installer, so `install_verdict` reported "no installable package" even though the correct installer existed. The picker now keeps the preferred installer whenever the manifest is absent or does not list it, and the accurate `no_sums` / `sums_unreachable` states are reported instead. `fetch_sums` also retries through the update mirror after the direct attempt fails, matching the real install path. The security boundary is unchanged: the real gate is `Ed25519` verification after download, so a mirrored fake manifest cannot pass. (`ipc.rs`)
+
 ## [1.8.3] - 2026-10-24
 
 ### Added

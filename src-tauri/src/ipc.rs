@@ -1270,13 +1270,11 @@ pub fn open_url(url: String) -> Result<(), String> {
 pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_json::Value, String> {
     let url = "https://api.github.com/repos/imonior/netsense/releases/latest";
     let choice = proxy_choice_of(&state);
+    let mirror = mirror_of(&state);
     // 镜像对这次请求同样生效（版本清单与安装包字节是大件，也是最常取不动的两样）。
-    // `install_verdict` 取 SHA256SUMS 仅做「列没列我们这个资产」的预检，仍走直连；
-    // 真正带签名的校验在 `run_update` 下载阶段完成（验签锚在内置公钥，镜像换不掉）。
-    let body = fetch_url(
-        &crate::update::mirrored_url(url, &mirror_of(&state)),
-        &choice,
-    )?;
+    // SHA256SUMS 预检先直连、失败再走镜像（见 `fetch_sums`）：它只回答「列没列我们这个
+    // 资产」，真正带签名的校验在 `run_update` 下载阶段完成（验签锚在内置公钥，镜像换不掉）。
+    let body = fetch_url(&crate::update::mirrored_url(url, &mirror), &choice)?;
     let v: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| i18n::tf("upd.bad_json", &[("error", &e.to_string())]))?;
     let latest = v["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
@@ -1308,7 +1306,7 @@ pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_
     // SHA256SUMS 只取一次：既喂「校验感知」挑包（见 pick_verified_asset），也喂随后的
     // 可安装性判定（install_verdict）。已是最新时一次都不发 —— 没人会点安装。
     let sums = if update_available {
-        fetch_sums(&v, &choice)
+        fetch_sums(&v, &choice, &mirror)
     } else {
         Sums::Absent
     };
@@ -1376,7 +1374,11 @@ impl Sums {
 /// 取这次发布的 SHA256SUMS 正文（带重试）。链接缺失 / 形状不对 / 取不到都归成非
 /// `Text` 状态，**不**在这里返回 Err：调用方（检查更新）按状态决定提示，而一次
 /// `check_update` 不该因为取不到校验清单就整体失败 —— 「已是最新」这个答案仍然有效。
-fn fetch_sums(release: &serde_json::Value, choice: &crate::netproxy::ProxyChoice) -> Sums {
+fn fetch_sums(
+    release: &serde_json::Value,
+    choice: &crate::netproxy::ProxyChoice,
+    mirror: &crate::appconfig::UpdateMirror,
+) -> Sums {
     let cu = release["assets"].as_array().and_then(|arr| {
         arr.iter()
             .find(|a| {
@@ -1398,6 +1400,23 @@ fn fetch_sums(release: &serde_json::Value, choice: &crate::netproxy::ProxyChoice
             // 重试的 warn 只覆盖中间的尝试（见 [`fetch_url`]），最后一次的失败原因要在
             // 这里落一条 —— 否则用户报「SHA256SUMS 无法下载」时，日志里只有前两次的。
             log::warn(&i18n::tf("upd.sums_fetch", &[("error", &e)]));
+            // 直连失败后走一趟镜像。正式路径（`update::native_update`）取 SHA256SUMS 本来
+            // 就镜像化（见那里的 `mirrored_url` 调用），预检却只走直连 —— 国内网络下这几乎
+            // 必然失败，而失败曾被 `pick_verified_asset` 误报成「本平台没有可安装的包」。
+            // 安全性不受影响：预检这一份只决定「给不给装」，真正的闸门是下载后的 Ed25519
+            // 验签（锚在内置 root 公钥），镜像喂一份假清单过不了那一关。
+            let via_mirror = crate::update::mirrored_url(cu, mirror);
+            if via_mirror != cu {
+                match fetch_url(&via_mirror, choice) {
+                    Ok(body) => {
+                        log::info(&i18n::tf("upd.sums_via_mirror", &[("url", &via_mirror)]));
+                        return Sums::Text(body);
+                    }
+                    Err(e2) => {
+                        log::warn(&i18n::tf("upd.sums_fetch", &[("error", &e2)]));
+                    }
+                }
+            }
             Sums::Unreachable
         }
     }
@@ -1501,7 +1520,7 @@ fn pick_install_asset(
 ///
 /// 它把一类发布事故从「每个用户的更新都卡在下载后的校验上」降级为「换个包照样更新」：
 /// Windows 上恒有两个装得上的候选（nsis 的 setup.exe 与 WiX 的 msi），任一个改名 /
-/// 清单漏一行都不再阻断升级；没拿到清单（`sums` 为 None）时完全退回原挑法。
+/// 清单漏一行都不再阻断升级。
 ///
 /// 替代候选只认**装得上**的（`installable_ext`），而「装得上」按平台而异：
 /// Windows 只认 .exe/.msi、Linux 只认 .deb/.rpm —— 便携 zip 在这两个平台上永远选不中；
@@ -1509,6 +1528,11 @@ fn pick_install_asset(
 /// 解 zip、找出 NetSense.app 再走安装脚本，所以 mac 上便携 zip 是合法备胎 —— dmg 万一
 /// 没进 SHA256SUMS，照样能更新成功（zip 与 dmg 是同一次构建的产物，SHA256SUMS 里各有
 /// 各自一行，验的仍是下载到手的那一份）。
+///
+/// 清单的**存亡**只影响偏好，不影响「有没有找到包」：拿不到（`sums` 为 `None`）或一个都没
+/// 列上，都返回偏好项，「能不能装」交给 [`install_verdict`] 据实判。v1.8.4 之前这里拿不到
+/// 清单就返回 `None`，于是「SHA256SUMS 下载失败」被界面说成「本平台没有可安装的安装包」
+/// —— 而包就在发布页上，64 位机器 + x64 构建的用户全中（与架构无关）。
 fn pick_verified_asset<'a>(
     assets: &'a [serde_json::Value],
     goos: &str,
@@ -1516,7 +1540,12 @@ fn pick_verified_asset<'a>(
     sums: Option<&str>,
 ) -> Option<&'a serde_json::Value> {
     let preferred = pick_asset_for(assets, goos, goarch)?;
-    let sums = sums?;
+    // 拿不到清单：原样返回偏好项。这里曾经是 `let sums = sums?` —— 把「取不到校验清单」
+    // 误报成「本平台没有可安装的包」，而 `install_verdict` 为此准备的
+    // `sums_unreachable`（「SHA256SUMS 无法下载」）反倒从未被走到。
+    let Some(sums) = sums else {
+        return Some(preferred);
+    };
     if crate::update::parse_hash(sums, asset_name(preferred)).is_some() {
         return Some(preferred);
     }
@@ -1526,6 +1555,9 @@ fn pick_verified_asset<'a>(
             asset_matches(asset_name(a), goos, goarch) && installable_ext(asset_name(a), goos)
         })
         .find(|a| crate::update::parse_hash(sums, asset_name(a)).is_some())
+        // 一个都没列上：仍然返回偏好项。「清单里没有这个包」与「没有这个包」是两件事，
+        // 前者由 `install_verdict` 报 `no_sums`，界面说「无法校验这个更新」。
+        .or(Some(preferred))
 }
 
 /// 在 `assets` 里为 `goos`+`goarch` 挑一个装得上的包：先要架构与平台都对得上，在同为
@@ -2113,8 +2145,8 @@ fn is_newer(latest: &str, current: &str) -> bool {
 mod tests {
     use super::{
         asset_matches, install_verdict, installable_ext, is_plausible_ip, mark_mainland, parse_ipapi,
-        parse_ipify, parse_ipip, parse_ipsb, parse_ipwho, pick_asset_for, platform_of,
-        token_anchored, Sums,
+        parse_ipify, parse_ipip, parse_ipsb, parse_ipwho, pick_asset_for, pick_install_asset,
+        pick_verified_asset, platform_of, token_anchored, Sums,
     };
     use serde_json::json;
 
@@ -2300,6 +2332,75 @@ mod tests {
             ),
             Some("no_sums")
         );
+    }
+
+    /// 用户现场回归（v1.7.1，64 位 Windows + x64 构建）：直连取 SHA256SUMS 失败曾被界面
+    /// 说成「当前平台没有可安装的安装包」—— x64 安装包其实已经挑中，坏的只是校验清单那一跳。
+    /// Field report (v1.7.1, 64-bit Windows, x64 build): an unreachable SHA256SUMS used to
+    /// surface as "no installable package for this platform" although the installer itself
+    /// had been picked all along.
+    #[test]
+    fn an_unreachable_checksum_manifest_does_not_hide_the_installer() {
+        let assets = shipped_assets();
+        let release = json!({
+            "assets": [{ "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }]
+        });
+        // 预检没拿到正文（线上：直连与镜像都失败 → `Sums::Unreachable` → `text()` 为 None）。
+        let (dl, name, cu, _size) = pick_install_asset(&release, &assets, None);
+        // 不管跑在哪个平台（本测试在任何 CI 腿上都执行），资产都必须挑得到。
+        assert!(name.is_some(), "取不到校验清单不该让安装包消失: {name:?}");
+        assert!(dl.is_some() && cu.is_some(), "链接该在: {:?}", (dl, cu));
+        // 资产在、清单下不到：判定必须说「校验清单下不到」，而不是「没有可安装的包」。
+        assert_eq!(
+            install_verdict(false, dl.as_ref(), name.as_ref(), cu.as_ref(), &Sums::Unreachable),
+            Some("sums_unreachable")
+        );
+    }
+
+    /// 用户现场的精确形状：windows + x86_64。`pick_asset_for` 是纯函数，所以这条在
+    /// macOS / Linux 的 runner 上跑的也是 windows+x86_64 这一支。
+    #[test]
+    fn the_x64_windows_installer_survives_an_unreachable_manifest() {
+        let assets = shipped_assets();
+        let picked = pick_asset_for(&assets, "windows", "x86_64").unwrap();
+        assert_eq!(picked["name"], "NetSense_1.0.3_x64-setup.exe");
+        let name = picked["name"].as_str().unwrap().to_string();
+        let dl = picked["url"].as_str().unwrap().to_string();
+        let cu = "https://example.invalid/SHA256SUMS".to_string();
+        assert_eq!(
+            install_verdict(false, Some(&dl), Some(&name), Some(&cu), &Sums::Unreachable),
+            Some("sums_unreachable")
+        );
+    }
+
+    /// 清单只影响「挑哪个」，不影响「有没有」。v1.8.4 之前拿不到清单就返回 `None`，
+    /// 把「SHA256SUMS 下载失败」误报成「本平台没有可安装的包」。
+    /// The manifest only steers which installer is picked; it must never make the
+    /// installer disappear.
+    #[test]
+    fn the_manifest_only_steers_the_choice_it_never_erases_the_installer() {
+        let assets = shipped_assets();
+        let hash = "0af7f0e1c2b3a4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9";
+        // 清单只列了 msi：偏好项（setup.exe）没列上 → 改挑列上了的 msi（既有行为不变）。
+        let sums = format!("{hash}  NetSense_1.0.3_x64_en-US.msi\n");
+        assert_eq!(
+            pick_verified_asset(&assets, "windows", "x86_64", Some(&sums)).unwrap()["name"],
+            "NetSense_1.0.3_x64_en-US.msi"
+        );
+        // 一个都没列上：返回偏好项而不是 None —— 「清单里没有这个包」由 `install_verdict`
+        // 报 `no_sums`（界面说「无法校验」），不该被说成「没有可安装的包」。
+        let unrelated = format!("{hash}  some-other-file.bin\n");
+        assert_eq!(
+            pick_verified_asset(&assets, "windows", "x86_64", Some(&unrelated)).unwrap()["name"],
+            "NetSense_1.0.3_x64-setup.exe"
+        );
+        // 压根没拿到清单：同样返回偏好项（线上：SHA256SUMS 直连与镜像都取不到）。
+        assert_eq!(
+            pick_verified_asset(&assets, "windows", "x86_64", None).unwrap()["name"],
+            "NetSense_1.0.3_x64-setup.exe"
+        );
+        // 真正没有候选时仍然是 None —— 上面几条放宽的不是这一条。
+        assert_eq!(pick_verified_asset(&assets, "windows", "arm64", None), None);
     }
 
     /// 1.0.3 那次发布里真实存在的资产。名字里**没有** OS token：只按 token 认平台

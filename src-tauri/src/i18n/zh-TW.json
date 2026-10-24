@@ -525,6 +525,7 @@
   "pal.iface_missing_none": "Windows 上沒有名為 {name} 的網卡（這台機器上一個隧道都沒有）",
   "upd.no_sums": "該 Release 沒有附帶 SHA256SUMS，拒絕安裝未經校驗的資產",
   "upd.sums_fetch": "取得 SHA256SUMS 失敗: {error}",
+  "upd.sums_via_mirror": "SHA256SUMS 預檢改走鏡像：{url}",
   "upd.mirror_used": "安裝套件正在經鏡像下載：{mirror}",
   "upd.fetch_retry": "拉取 {url} 失敗（第 {attempt} 次），將重試: {error}",
   "upd.not_in_sums": "SHA256SUMS 裡沒有 {asset} 這一項",
