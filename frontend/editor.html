@@ -268,7 +268,7 @@
 
     <div class="panel">
       <div class="panel-header">
-        <span id="hdr-net" data-i18n="editor.network_title">3A · Network configuration</span>
+        <span id="hdr-net" data-i18n="editor.network_title">Network configuration</span>
         <button class="mini-btn" id="btn-verify" data-act="open-verify" data-i18n="editor.verify_button">Verify</button>
       </div>
       <div class="panel-content" id="col-net"></div>
@@ -958,9 +958,14 @@
     if (!net) return html + chk(pre_(pre, "network__new"), false, "editor.network_enable");
     const p = pre_(pre, "network");
     const manual = net.mode === "manual";
+    // DNS 现在只有两态：auto（清空并交回 DHCP 获取）/ set（指定服务器）。
+    // 不再有「保持」选项，所以 undefined 与空串都按 auto 处理；非空才是指定。
+    // DNS now has exactly two states — auto (clear and let DHCP hand one out) and set
+    // (explicit servers). There is no "keep" option any more, so both undefined and an
+    // empty string mean auto; a non-empty string means the user specified servers.
     const dnsState = dnsOverride[pre] === "set" ? "set"
-      : net.dns === undefined ? "keep"
-      : (String(net.dns).trim() === "" ? "auto" : "set");
+      : (net.dns === undefined || String(net.dns).trim() === "") ? "auto"
+      : "set";
     html += `<div class="group-title"><span>${esc(t("editor.network_title"))}</span>` +
       `<button class="mini-btn" data-act="drop-network" data-pre="${pre}">${esc(t("editor.action_delete"))}</button></div>`;
     // 配置应用到哪张网卡：`NetworkTarget` 挂在 `network.target`，模型里是 `Option<NetworkTarget>`
@@ -976,29 +981,38 @@
         row("editor.subnet_mask", txt(p + ".netmask", net.netmask, "255.255.255.0")) +
         row("editor.router", txt(p + ".gateway", net.gateway, "192.168.1.1"));
     }
+    // IPv6 不再有「保持」选项：缺省 automatic（SLAAC + DHCPv6）。四个有效值是
+    // automatic / manual / linklocal / off，与三平台后端一一对应。
+    // IPv6 has no "keep" option any more: the default is automatic (SLAAC + DHCPv6).
+    // The four valid values — automatic / manual / linklocal / off — map 1:1 onto the
+    // three-platform backend.
     html += `<div class="group-title">${esc(t("editor.ipv6_config"))}</div>` +
-      row("editor.config_type", sel_(p + ".v6mode", net.v6mode ?? "", [
-        ["", t("editor.keep_unchanged")], ["automatic", t("editor.automatic")],
-        ["manual", t("editor.manual_v6")], ["off", t("editor.off")]]));
+      row("editor.config_type", sel_(p + ".v6mode", net.v6mode ?? "automatic", [
+        ["automatic", t("editor.automatic")],
+        ["manual", t("editor.manual_v6")],
+        ["linklocal", t("editor.linklocal")],
+        ["off", t("editor.off")]]));
     if (net.v6mode === "manual") {
       html += row("editor.ip_address", txt(p + ".ipv6", net.ipv6, "2001:db8::10")) +
         row("editor.prefix_length", txt(p + ".v6prefix", net.v6prefix, "64")) +
         row("editor.router", txt(p + ".v6gateway", net.v6gateway, "fe80::1"));
     }
     html += `<div class="group-title">${esc(t("editor.dns_config"))}</div>` +
-      /* 三态在 dhcp 与 manual 两种模式下**都给全**：「手工 IP + DNS 交给系统自动获取」是
-         真实世界里最常见的一组（静态地址配 DHCP 的 DNS）。后端三个平台也都不看 IPv4 的
-         模式，一律按同一套渲染。以前 manual 分支只画「保持 + 指定」，等于把这组组合
-         从界面上抹掉了。 */
+      /* DNS 与 IPv4 是两块**独立**的设置：DHCP 只管 IPv4 的 IP / 掩码 / 网关，
+         DNS 单独决定「用 DHCP 来的」还是「手动指定的」。两态下拉，无「保持」选项。
+         DNS is a setting block **independent** of IPv4: DHCP only governs the IPv4
+         address / mask / gateway, while DNS is chosen separately — obtained from DHCP
+         or set manually. Two-state dropdown, no "keep" option. */
       row("editor.config_type", `<select data-act="dns-tri" data-pre="${pre}">` +
-        [["keep", t("editor.keep_unchanged")], ["auto", t("editor.dhcp_provided")], ["set", t("editor.dns_servers")]]
+        [["auto", t("editor.dhcp_provided")], ["set", t("editor.dns_servers")]]
           .map(([v, l]) => `<option value="${v}" ${dnsState === v ? "selected" : ""}>${esc(l)}</option>`).join("") +
         `</select>`) +
-      /* 输入框在 auto/set 两态都画出来：数据上「指定但还没填」就是 `""`，
-         与 auto 无法区分（配置里 `dns:""` 的含义就是「交回系统自动获取」），
-         所以这里不造第三种状态，只是保证选了「指定」后看得见可编辑的框。 */
-      (dnsState === "keep" ? `<div class="hint">${esc(t("editor.dns_placeholder"))}</div>`
-        : row("editor.dns_servers", txt(p + ".dns", net.dns, "192.168.1.1,8.8.8.8"))) +
+      /* auto 态：清空现有 DNS（不论谁设的）后由 DHCP 重新获取，所以没有可编辑的框，
+         只给一句说明；set 态才画出输入框。
+         auto state: clear whatever DNS is present (whoever set it) and let DHCP hand one
+         out, so there is nothing to edit here — just the hint; set state draws the box. */
+      (dnsState === "set" ? row("editor.dns_servers", txt(p + ".dns", net.dns, "192.168.1.1,8.8.8.8"))
+        : `<div class="hint">${esc(t("editor.dns_placeholder"))}</div>`) +
       renderRoutes(p, pre, net.routes || []);
     return html;
   }
@@ -1700,8 +1714,7 @@
   function setDnsMode(pre, mode) {
     const net = scope(pre).network;
     if (!net) return;
-    if (mode === "keep") { delete net.dns; delete dnsOverride[pre]; }
-    else if (mode === "auto") { net.dns = ""; delete dnsOverride[pre]; }
+    if (mode === "auto") { net.dns = ""; delete dnsOverride[pre]; }
     else { net.dns = typeof net.dns === "string" ? net.dns : ""; dnsOverride[pre] = "set"; }
     dirty = true;
     renderNetColumn();
@@ -1924,14 +1937,22 @@
       out.netmask = (n.netmask || "").trim();
       out.gateway = (n.gateway || "").trim();
     }
-    if (n.dns !== undefined && n.dns !== null) out.dns = String(n.dns).trim();
-    if (n.v6mode) {
-      out.v6mode = n.v6mode;
-      if (n.v6mode === "manual") {
-        out.ipv6 = (n.ipv6 || "").trim();
-        if ((n.v6prefix || "").trim()) out.v6prefix = String(n.v6prefix).trim();
-        if ((n.v6gateway || "").trim()) out.v6gateway = String(n.v6gateway).trim();
-      }
+    // `dns` 现在只有两态：auto（`""` = 清空并交回 DHCP 获取）与 set（具体服务器）。
+    // 不再有「不动 DNS」这一 UI 选项，所以配了 network 块的分支必然显式带 `dns` 字段；
+    // `""` 与「未配置」在 3A 里含义不同（`dns:""` 是「明确清空」，缺失是「别碰」），
+    // 后者现在只能由「根本没配 network 块」的分支表达。
+    // `dns` now has two states: auto (`""` = clear and let DHCP hand one out) and set
+    // (explicit servers). With no "keep" option, a branch that carries a network block
+    // always carries an explicit `dns` field; "don't touch DNS" is now expressed only by
+    // branches that have no network block at all.
+    out.dns = (n.dns === undefined || n.dns === null) ? "" : String(n.dns).trim();
+    // IPv6 不再有「保持」选项：缺省即 automatic（SLAAC + DHCPv6），与界面默认一致。
+    // IPv6 has no "keep" option: the default is automatic (SLAAC + DHCPv6), matching the UI.
+    out.v6mode = n.v6mode || "automatic";
+    if (n.v6mode === "manual") {
+      out.ipv6 = (n.ipv6 || "").trim();
+      if ((n.v6prefix || "").trim()) out.v6prefix = String(n.v6prefix).trim();
+      if ((n.v6gateway || "").trim()) out.v6gateway = String(n.v6gateway).trim();
     }
     const routes = (n.routes || []).filter(r => (r.dest || "").trim()).map(r => {
       const o = { dest: r.dest.trim(), metric: num(r.metric, 0) };

@@ -1070,8 +1070,25 @@ impl Engine {
             if !still_active {
                 return;
             }
-            if let Err(e) = fb_state.plat.set_dhcp() {
-                log::error(&i18n::tf("notify.dhcp_failed", &[("error", &e)]));
+            let dhcp_ok = match fb_state.plat.set_dhcp() {
+                Ok(()) => true,
+                Err(e) => {
+                    log::error(&i18n::tf("notify.dhcp_failed", &[("error", &e)]));
+                    false
+                }
+            };
+            if dhcp_ok {
+                // 回落 DHCP 是一次真实的网络变更（macOS 上顺带把 DNS 交回自动获取），
+                // 用户必须看见它 —— 否则「我填的静态 IP 怎么没了」只能靠猜。
+                announce_change(
+                    &fb_state,
+                    &network::NetworkChange {
+                        mode: Some("dhcp".into()),
+                        dns_cleared: true,
+                        ..Default::default()
+                    },
+                    true,
+                );
             }
             {
                 let mut eng = fb_state.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -1395,20 +1412,143 @@ fn run_3a_lockfree(
         .map(|g| g.dns_fallback.servers.clone())
         .unwrap_or_default();
     Some(match network::apply_3a(&state.plat, net, &fallback) {
-        Stage3A::Failed { reason } => {
+        Stage3A::Failed {
+            reason,
+            change,
+            rolled_back,
+        } => {
             // 保底：探测里开了 fallback 就回落 DHCP（3A 失败处置的一部分）
             if degrade {
                 match state.plat.set_dhcp() {
-                    Ok(()) => log::warn(&i18n::t("notify.fallback")),
+                    Ok(()) => {
+                        log::warn(&i18n::t("notify.fallback"));
+                        // 回落 DHCP 是一次**真实的网络变更**（macOS 上还会顺带把 DNS
+                        // 交回自动获取），必须让用户看见 —— 否则界面上写着的配置和
+                        // 现场实际生效的配置就此对不上，而用户毫不知情。
+                        //
+                        // 这里传 `true`：走得到这个分支就说明 `set_dhcp()` **成功**了，
+                        // 回落确实落地了（DNS 也真的被交回自动获取）。传 `false` 会让
+                        // 弹窗说「未生效」，而现场恰恰是生效的 —— 那比不说更糟。
+                        // 3A 本身失败这件事由 `engine.error` / `engine.fallback_failed`
+                        // 那几条消息负责说，两件事不必挤进同一句话。
+                        announce_change(
+                            state,
+                            &network::NetworkChange {
+                                mode: Some("dhcp".into()),
+                                dns_cleared: true,
+                                ..Default::default()
+                            },
+                            true,
+                        );
+                    }
                     Err(e) => {
                         log::error(&i18n::tf("notify.dhcp_failed", &[("error", &e)]));
                     }
                 }
             }
-            Stage3A::Failed { reason }
+            Stage3A::Failed {
+                reason,
+                change,
+                rolled_back,
+            }
         }
         ok => ok,
     })
+}
+
+/// 一次变更播报要用的两句话：日志那一条与弹窗那一条。
+///
+/// 抽成纯函数是为了能被单测直接盯住 —— 这个契约（「失败路径不得说成
+/// 「已变更」）正是 v1.8.5 修掉的一个真缺陷：改动被回滚了，弹窗却报
+/// 「网络配置已变更」，用户据此以为自己的静态 IP 还在生效。
+///
+/// The two sentences a change announcement needs: the log line and the toast.
+/// Pure so a test can pin the contract — the failure path must never claim
+/// the settings *changed*, because those writes were rolled back.
+/// Returns `None` when nothing changed (no announcement at all).
+fn change_lines(change: &network::NetworkChange, ok: bool) -> Option<(String, String)> {
+    let summary = change.summary()?;
+    let (log_line, notice) = if ok {
+        (
+            i18n::tf("net.change", &[("detail", &summary)]),
+            i18n::tf("net.change_notice", &[("detail", &summary)]),
+        )
+    } else {
+        (
+            i18n::tf("net.change_undone", &[("detail", &summary)]),
+            i18n::tf("net.change_undone_notice", &[("detail", &summary)]),
+        )
+    };
+    Some((log_line, notice))
+}
+
+/// 把一次「动了系统哪些参数」既记进日志、又弹窗给用户。
+///
+/// 为什么日志与弹窗要合到一个函数里：这两处必须说的是**同一句话**。
+/// 分头写的话，迟早会出现「日志里写的是 DNS 被清空、界面弹的是另一回事」，
+/// 用户对照两边时会以为日志和界面在说两场不同的网络变更 —— 而实际只有一次。
+///
+/// `ok` 决定弹窗的语气：成功是一次**已落地**的变更（用户要看见「我改了什么」），
+/// 失败是「改动没能落地 / 已被回滚」（同样要看见，否则用户以为改动生效了）。
+///
+/// 两句话必须**不同**：失败路径上的那几项已经被回滚改回去了，若也说成
+/// 「网络配置已变更」，用户会以为自己的静态 IP 还在生效 —— 而现场恰恰不是那样。
+/// 报「未生效」既不隐瞒「动过」（明细照旧列出），也不谎报「改成了」。
+///
+/// 空的变更明细（什么都没改，例如系统本就合规而跳过了下发）**不发任何提示**：
+/// 「网络被改了」这句话必须是假的反面 —— 没改就不能说改了。
+fn announce_change(state: &Arc<AppState>, change: &network::NetworkChange, ok: bool) {
+    let Some((log_line, notice)) = change_lines(change, ok) else {
+        return;
+    };
+    // 日志永远记一条：它是「这台机器的网络被谁改了」这件事的权威留痕。
+    // 失败那条记 warn 而不是 info —— 「动过又撤回」比「改成了」更需要被看见。
+    if ok {
+        log::info(&log_line);
+    } else {
+        log::warn(&log_line);
+    }
+    crate::state::emit_action(state, "network", ok, notice);
+}
+
+/// 一次「下发失败 + 已回滚」的播报：两条日志、一条弹窗。
+///
+/// 为什么弹窗只有一条：前端的 toast 是**单条覆盖**的（`clearTimeout` 后覆盖内容），
+/// 连发两条用户只看得见最后一条 —— 于是「动过什么没生效」会被「已回滚到什么」盖掉。
+/// 两句话必须挤进同一条，而日志不怕多，两条各记一行才说得清谁改了什么。
+///
+/// 回滚那一项为空（快照什么都没带 ⇒ 回滚什么都没写）时退化成普通失败播报：
+/// 没写就不能说写了。
+fn announce_rollback(
+    state: &Arc<AppState>,
+    change: &network::NetworkChange,
+    rolled_back: Option<&network::NetworkChange>,
+) {
+    // 恢复失败（None）= 回滚写没写成不知道：那半句就整个不说，不谎报。
+    let rolled_detail = rolled_back.and_then(|rb| rb.summary());
+    let Some((log_line, notice)) = change_lines(change, false) else {
+        // 「动过什么」是空的 ⇒ 这次连下发都没真正写下去，只有回滚值得一提。
+        if let Some(detail) = &rolled_detail {
+            let line = i18n::tf("net.rolled_back", &[("detail", detail)]);
+            log::warn(&line);
+            crate::state::emit_action(
+                state,
+                "network",
+                false,
+                i18n::tf("net.rolled_back_notice", &[("detail", detail)]),
+            );
+        }
+        return;
+    };
+    log::warn(&log_line);
+    let Some(detail) = &rolled_detail else {
+        crate::state::emit_action(state, "network", false, notice);
+        return;
+    };
+    // 回滚写回去的那几项（日志那条已在 `rollback_and_report` 里记过，这里只补弹窗）。
+    let rolled = i18n::tf("net.rolled_back_notice", &[("detail", detail)]);
+    let sep = i18n::t("net.change_sep");
+    crate::state::emit_action(state, "network", false, format!("{notice}{sep}{rolled}"));
 }
 
 /// 「开启了健康探测 + 探测失败回落 DHCP」时，3A 失败要顺带回落。
@@ -1508,40 +1648,173 @@ fn publish_view(state: &Arc<AppState>) {
     publish_status_now(state);
 }
 
-/// 「自动化成功应用了一个配置」时发给面板的弹窗内容（事件 `netsense://applied`）。
+/// 「自动化应用了一个配置」时发给面板的弹窗内容（事件 `netsense://applied`）。
 ///
-/// 只在**计划真正跑起来且 3A 成功**的 commit 里构造：轮询中没有任何规则触发改变时，
-/// [`decide_plan`] 直接返回 `None`（staying 且内容指纹没变），根本到不了 commit ——
-/// 「弹窗」与「引擎真的动了手」因此是同一件事，不需要另设防骚扰状态。
+/// 只报**最终结果**：这一轮到底往系统里写了哪几项（`change`，来自 3A 下发后的回读记账），
+/// 而不是下发前的计划态、也不是配置文件原文。版式是一份**分组清单**
+/// （IPv4 / IPv6 / DNS / 系统）：每行 = 标签 + 值 + ✅/❌，失败行另带红色明细，
+/// 底部是错误行 —— 对照用户给的参考图（hammerspoon 版的「网络配置仅部分生效」弹窗）。
 ///
-/// `name = None` 表示零命中兜底。网络身份取引擎本轮采到的快照（`eng.snapshot`）：
-/// 字段最多落后一个采样周期（2s），对「此刻在哪张网上」这个判断没有影响。
+/// 「弹窗」与「引擎真的动了手」是同一件事：轮询中没有任何规则触发改变时 [`decide_plan`]
+/// 直接返回 `None`，根本到不了 commit，所以不会出现「什么都没改却弹窗」的噪音。
+///
+/// `name = None` 表示零命中兜底。网络身份取引擎本轮采到的快照（`eng.snapshot`）。
 fn applied_notice(
     name: Option<&str>,
-    net: Option<&NetworkConfig>,
     snap: &NetworkSnapshot,
+    change: Option<&network::NetworkChange>,
+    ok: bool,
+    restored: bool,
+    note: Option<&str>,
 ) -> serde_json::Value {
     let mut v = serde_json::json!({
         "profile": name,
         "fallback": name.is_none(),
         "ssid": snap.ssid,
         "iface": snap.primary_interface,
+        "success": ok,
+        "restored": restored,
+        // 「跳过下发」（系统本就合规）时 change 为空：前端据此显示「未更改任何参数」，
+        // 而不是一张只有系统身份的空清单。
+        "nochange": change.map(|c| c.is_empty()).unwrap_or(true),
     });
-    match net {
-        Some(net) => {
-            v["mode"] = serde_json::json!(net.mode);
-            v["ip"] = serde_json::json!(net.ip);
-            v["netmask"] = serde_json::json!(net.netmask);
-            v["gateway"] = serde_json::json!(net.gateway);
-            // DNS 三态：缺省 = 不动、"" = 交回自动、非空 = 指定。只有「指定」值得占一行，
-            // 另两种想知道实际生效的解析器，看面板信息卡里的实时值。
-            v["dns"] = serde_json::json!(net.dns.as_deref().filter(|s| !s.is_empty()));
-            v["routes"] = serde_json::json!(net.routes.len());
-        }
-        // 这一支不带网络配置（THEN 缺省）：地址相关的行整行不给看。
-        None => v["mode"] = serde_json::Value::Null,
+    v["groups"] = serde_json::json!(match change {
+        // 一分写入都没有（跳过下发 / THEN 缺省）：整份清单留空，前端据此显示
+        // 「未更改任何参数」—— 一张只有系统身份的空清单只会让人误读。
+        Some(c) if !c.is_empty() => applied_groups(c, snap, ok, restored, name),
+        _ => Vec::new(),
+    });
+    // 降级附注（DNS 兜底等）或失败原因：成功但没走预期路径时也要说出来。
+    // 前端按成败分流渲染：失败 = 红色 ❌ 错误行，成功 = 琥珀色附注行。
+    if let Some(n) = note {
+        v["note"] = serde_json::json!(n);
     }
     v
+}
+
+/// 弹窗清单的一行：标签 + 值 + ✅/❌（`ok = None` 表示该行没有标记 —— 系统身份行）。
+fn applied_row(
+    label: &str,
+    value: String,
+    ok: Option<bool>,
+    detail: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({ "label": label, "value": value, "ok": ok, "detail": detail })
+}
+
+/// 把 [`NetworkChange`] 摊成分组清单。
+///
+/// 失败路径上**每一行都是 ❌**：那些写入已被回滚、等同于没生效，逐行明细写
+/// 「已回滚，未生效」。**恢复失败（`restored = false`）时明细留空** —— 那一刻
+/// 写入可能还留在系统里，说「已回滚」才是谎报；整体状态交给标题与底部红色错误行。
+///
+/// 模式值翻译成编辑器里同一个词（`editor.dhcp` / `editor.manual` / `editor.automatic` …），
+/// 用户拿着弹窗对照编辑器看到的是同一批字。
+fn applied_groups(
+    c: &network::NetworkChange,
+    snap: &NetworkSnapshot,
+    ok: bool,
+    restored: bool,
+    name: Option<&str>,
+) -> Vec<serde_json::Value> {
+    // 失败行的逐行明细：恢复成功 = 「已回滚，未生效」；恢复失败 = 不写
+    // （写入状态未知，不谎报）。成功行永远没有明细。
+    let detail = if !ok && restored {
+        Some(i18n::t("popup.rolled_back"))
+    } else {
+        None
+    };
+    let row = |label: &str, value: String, ok: Option<bool>| {
+        applied_row(label, value, ok, detail.clone())
+    };
+    let mut groups: Vec<serde_json::Value> = Vec::new();
+    // 空组不入列：没写的项不给占位行。
+    let mut group = |title: &str, rows: Vec<serde_json::Value>| {
+        if !rows.is_empty() {
+            groups.push(serde_json::json!({ "title": title, "rows": rows }));
+        }
+    };
+
+    // —— IPv4：模式 / 地址 / 掩码 / 网关 / 路由增删 ——
+    let mut v4 = Vec::new();
+    if let Some(m) = &c.mode {
+        let disp = match m.as_str() {
+            "manual" => i18n::t("editor.manual"),
+            _ => i18n::t("editor.dhcp"),
+        };
+        v4.push(row("popup.row_mode", disp, Some(ok)));
+    }
+    if let Some(v) = &c.ip {
+        v4.push(row("popup.ip", v.clone(), Some(ok)));
+    }
+    if let Some(v) = &c.netmask {
+        v4.push(row("popup.netmask", v.clone(), Some(ok)));
+    }
+    if let Some(v) = &c.gateway {
+        v4.push(row("popup.gateway", v.clone(), Some(ok)));
+    }
+    if c.routes_added > 0 {
+        v4.push(row("popup.routes_added", c.routes_added.to_string(), Some(ok)));
+    }
+    if c.routes_deleted > 0 {
+        v4.push(row(
+            "popup.routes_removed",
+            c.routes_deleted.to_string(),
+            Some(ok),
+        ));
+    }
+    group(&i18n::t("popup.group_ipv4"), v4);
+
+    // —— IPv6：模式 / 地址 / 前缀 / 网关 ——
+    let mut v6 = Vec::new();
+    if let Some(m) = &c.v6mode {
+        let disp = match m.as_str() {
+            "manual" => i18n::t("editor.manual_v6"),
+            "linklocal" => i18n::t("editor.linklocal"),
+            "off" => i18n::t("editor.off"),
+            _ => i18n::t("editor.automatic"),
+        };
+        v6.push(row("popup.row_mode", disp, Some(ok)));
+    }
+    if let Some(v) = &c.ipv6 {
+        v6.push(row("popup.v6_address", v.clone(), Some(ok)));
+    }
+    if let Some(v) = &c.v6prefix {
+        v6.push(row("popup.prefix6", v.clone(), Some(ok)));
+    }
+    if let Some(v) = &c.v6gateway {
+        v6.push(row("popup.gateway6", v.clone(), Some(ok)));
+    }
+    group(&i18n::t("popup.group_ipv6"), v6);
+
+    // —— DNS：指定 = 那几台；清空 = 交回自动获取 ——
+    if c.dns_cleared {
+        group(
+            &i18n::t("popup.group_dns"),
+            vec![row("popup.dns", i18n::t("editor.dhcp_provided"), Some(ok))],
+        );
+    } else if let Some(v) = &c.dns {
+        group(
+            &i18n::t("popup.group_dns"),
+            vec![row("popup.dns", v.clone(), Some(ok))],
+        );
+    }
+
+    // —— 系统：配置名 / SSID / 接口。身份行没有成败可言，不带标记。 ——
+    let mut sys = Vec::new();
+    let profile_disp = match name {
+        Some(n) => n.to_string(),
+        None => i18n::t("popup.applied_fallback"),
+    };
+    sys.push(applied_row("popup.profile", profile_disp, None, None));
+    if let Some(s) = &snap.ssid {
+        sys.push(applied_row("status.ssid", s.clone(), None, None));
+    }
+    if let Some(i) = &snap.primary_interface {
+        sys.push(applied_row("popup.interface", i.clone(), None, None));
+    }
+    group(&i18n::t("popup.group_system"), sys);
+    groups
 }
 
 /// 发「配置已应用」弹窗，并把面板叫出来（窗口操作回主线程，与托盘点击同一条路）。
@@ -1549,17 +1822,28 @@ fn applied_notice(
 /// 闸门「有网络才弹」：冷启动时一张网卡都没亮，兜底也会走到 commit，那样的弹窗只是开机
 /// 噪音 —— 需求说的是「首次连上网络或网络连接改变后」。SSID 与主网卡任一可读即算有网
 /// （纯有线没有 SSID，只有网卡名）。
+///
+/// `change` 是这一轮**实际写下的几项**（3A 回读记账），`ok` 标记整体成败，
+/// `note` 携带降级附注或失败原因。`restored` 只在失败路径上有意义：
+/// 它决定逐行明细能不能说「已回滚，未生效」—— 快照恢复本身失败时明细必须留空。
 fn emit_applied(
     state: &Arc<AppState>,
     eng: &Engine,
     name: Option<&str>,
-    net: Option<&NetworkConfig>,
+    change: Option<&network::NetworkChange>,
+    ok: bool,
+    restored: bool,
+    note: Option<&str>,
 ) {
     let snap = &eng.snapshot;
     if snap.ssid.is_none() && snap.primary_interface.is_none() {
         return;
     }
-    crate::state::emit(state, "netsense://applied", applied_notice(name, net, snap));
+    crate::state::emit(
+        state,
+        "netsense://applied",
+        applied_notice(name, snap, change, ok, restored, note),
+    );
     if let Some(app) = state.app.get().cloned() {
         // 两个 handle：一个借给 `run_on_main_thread` 当 `&self`，一个 move 进闭包 ——
         // 同一个 `app` 不能既被 `&self` 借用又被内层 `move` 捕获（同 tray.rs 的单击路径）。
@@ -1817,7 +2101,7 @@ fn commit_plan(
     match plan {
         Plan::Profile {
             profile,
-            net,
+            net: _,
             opts,
             staying,
             from,
@@ -1826,7 +2110,7 @@ fn commit_plan(
         } => {
             let profile = *profile; // 拆箱：下面只用 &profile 与它的字段
             let failure = match &three_a {
-                Some(Stage3A::Failed { reason }) => Some(reason.clone()),
+                Some(Stage3A::Failed { reason, .. }) => Some(reason.clone()),
                 _ => None,
             };
             match failure {
@@ -1834,15 +2118,61 @@ fn commit_plan(
                     let msg =
                         i18n::tf("engine.error", &[("name", &profile.name), ("error", &reason)]);
                     log::error(&msg);
-                    eng.record_failure(&profile.id, fp, reason);
-                    // 重下失败不弹「应用失败」气泡：多半是用户改完配置就等着生效，
-                    // 报错已经在日志和该 Profile 的红叉上。真正的切换才通知。
+                    eng.record_failure(&profile.id, fp, reason.clone());
+                    // 失败之前动过的那几项也要报出来：回滚会把它们改回去，但
+                    // 「动过」这件事发生过 —— 用户需要知道自己的网络被写过。
+                    // 回滚本身也是一次写入，一并报出来（`announce_rollback`）。
+                    if let Some(Stage3A::Failed {
+                        change,
+                        rolled_back,
+                        ..
+                    }) = &three_a
+                    {
+                        announce_rollback(state, change, rolled_back.as_deref());
+                    }
+                    // 失败也弹「最终结果」弹窗：列出这一轮**试图写下**的几项（全部 ❌，
+                    // 已被回滚、等同于没生效），让用户看见「我动了什么、为什么没成」——
+                    // 与成功弹窗共用同一套分组 UI。
+                    //
+                    // 这里**不受 `staying` 约束**：需求要的是「任何一项应用不成功都要弹」，
+                    // 而改完配置等着生效却失败（RECONFIGURE）恰恰是最需要被看见的那一类 ——
+                    // 界面上写着「已应用」，现场却是旧的。它也不会刷屏：失败已记档
+                    // （`record_failure`），下一轮指纹没变时 `decide_plan` 直接返回 None。
+                    if let Some(Stage3A::Failed {
+                        change,
+                        rolled_back,
+                        ..
+                    }) = &three_a
+                    {
+                        emit_applied(
+                            state,
+                            eng,
+                            Some(profile.name.as_str()),
+                            Some(change),
+                            false,
+                            // `rolled_back = None` ⇒ 快照恢复本身失败：那一刻写入可能
+                            // 还留在系统里，弹窗不能说「已回滚，未生效」。
+                            rolled_back.is_some(),
+                            Some(&reason),
+                        );
+                    }
+                    // 重下失败不弹「应用失败」**气泡**（与上面那个弹窗是两件事）：多半是
+                    // 用户改完配置就等着生效，报错已经在日志、弹窗和该 Profile 的红叉上。
+                    // 真正的切换才额外走气泡通知。
                     if !staying {
                         crate::state::emit_action(state, "apply", false, msg);
                     }
                 }
                 None => {
-                    if let Some(Stage3A::Applied { note }) = &three_a {
+                    // 这一支 3A 成功：把「实际写下的几项」抽出来供日志与弹窗共用，
+                    // 两处说的是同一批动作（见 `change_lines`）。
+                    let (applied_change, applied_note) = match &three_a {
+                        Some(Stage3A::Applied { note, change }) => {
+                            (Some(change), note.as_deref())
+                        }
+                        _ => (None, None),
+                    };
+                    if let Some(change) = applied_change {
                         // The 3A result is the closing marker of every "execution
                         // action": recorded at the default level, it pairs with
                         // net.apply_start (apply begins) into one complete timeline.
@@ -1854,22 +2184,35 @@ fn commit_plan(
                         ));
                         // 降级成功（DNS 兜底）必须出声：用户现在用的不是他填的解析器，
                         // 而界面上写的是「已应用」，不说就没人知道这件事发生过。
-                        if let Some(n) = note {
+                        if let Some(n) = applied_note {
                             log::warn(&i18n::tf(
                                 "engine.applied_degraded",
                                 &[("name", &profile.name), ("note", n)],
                             ));
                         }
+                        // 「这一轮到底改了系统的哪几项」—— 记日志 + 弹窗。
+                        // 「应用了 Profile X」说的是引擎决定做什么；用户要看见的是
+                        // 「地址/DNS/路由这几项里哪几项真的被写了」。
+                        announce_change(state, change, true);
                     }
                     if !staying {
                         eng.active_id = Some(profile.id.clone());
                     }
                     eng.errors.remove(&profile.id);
                     eng.mark_applied(fp);
-                    // 弹窗：自动化刚把一个配置落到当前网络上。走到这里只有三种来路 ——
+                    // 弹窗：自动化刚把一个配置落到当前网络上，只报**最终落地的设置**
+                    // （来自 `change`，不是计划态/配置原文）。走到这里只有三种来路 ——
                     // 首评、网络指纹变了、配置内容变了；轮询中什么都没变时 decide_plan
                     // 直接返回 None，到不了这里（「轮询不弹」由此成立，无需另设状态）。
-                    emit_applied(state, eng, Some(profile.name.as_str()), net.as_ref());
+                    emit_applied(
+                        state,
+                        eng,
+                        Some(profile.name.as_str()),
+                        applied_change,
+                        true,
+                        true,
+                        applied_note,
+                    );
                     if !staying {
                         log::info(&i18n::tf("engine.switch", &[
                             ("from", from.as_deref().unwrap_or("-")),
@@ -1883,9 +2226,29 @@ fn commit_plan(
             eng.branch_3b(state, &profile, Which::Then, opts, allowed, three_a);
         }
         Plan::Fallback { fb, fp, fingerprint, .. } => {
-            if let Some(Stage3A::Failed { reason }) = &three_a {
+            if let Some(Stage3A::Failed {
+                reason,
+                change,
+                rolled_back,
+                ..
+            }) = &three_a
+            {
                 let msg = i18n::tf("engine.fallback_failed", &[("error", reason)]);
                 log::error(&msg);
+                // 失败之前动过的那几项要报出来（回滚会改回去，但「动过」发生过），
+                // 回滚写回去的那几项同样要报 —— 它是一次真实的系统写入。
+                announce_rollback(state, change, rolled_back.as_deref());
+                // 兜底失败也弹「最终结果」弹窗：试图下写的几项全部 ❌，让用户看见
+                // 「这一轮打算改什么、为什么没成」。与成功弹窗共用同一套分组 UI。
+                emit_applied(
+                    state,
+                    eng,
+                    None,
+                    Some(change),
+                    false,
+                    rolled_back.is_some(),
+                    Some(reason),
+                );
                 // 兜底也要出声：这一支没有 Profile 的红叉可挂，而「零命中 + 兜底没落地」
                 // 意味着现场仍是上一个网络的配置 —— 用户看不出任何名堂，只觉得网络莫名能用。
                 // Profile 那一支的「重下失败不弹」在这里不成立：兜底没有 staying 的概念，
@@ -1900,9 +2263,18 @@ fn commit_plan(
             eng.applied_fp = None;
             eng.active_id = None;
             log::info(&i18n::t("engine.fallback_applied"));
+            // 兜底同样报出「改了哪几项」：兜底这一支最容易被忽略（界面上它不带
+            // Profile 名字，只有一句「兜底」），而它一样会改地址与 DNS。
+            let fb_change = match &three_a {
+                Some(Stage3A::Applied { change, .. }) => Some(change),
+                _ => None,
+            };
+            if let Some(change) = fb_change {
+                announce_change(state, change, true);
+            }
             // 兜底也是一次「成功应用的配置」：弹窗里标成兜底，用户看得出此刻没有
-            // Profile 命中。与 Profile 分支同一个闸门（有网络才弹）。
-            emit_applied(state, eng, None, fb.network.as_ref());
+            // Profile 命中。与 Profile 分支同一个闸门（有网络才弹）。只报**最终落地的设置**。
+            emit_applied(state, eng, None, fb_change, true, true, None);
             // —— 3B：合成一个说得清归属的身份 ——
             // 兜底不接管健康监测：它没有「当前环境」可探测，也没有 Profile 可归属。
             // holder 必然挂着一支 THEN（见 fallback_holder），branch_3b 由此取到那一支。
@@ -2029,16 +2401,24 @@ fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) 
         ..
     } = plan;
     match &three_a {
-        Some(Stage3A::Failed { reason }) => {
+        Some(Stage3A::Failed {
+            reason,
+            change,
+            rolled_back,
+            ..
+        }) => {
             let msg = i18n::tf("engine.error", &[("name", &profile.name), ("error", reason)]);
             log::error(&msg);
             if matched {
                 eng.record_failure(&profile.id, fp, reason.clone());
             }
+            // 失败之前动过的那几项要报出来（回滚会改回去，但「动过」发生过），
+            // 回滚写回去的那几项同样要报 —— 它是一次真实的系统写入。
+            announce_rollback(state, change, rolled_back.as_deref());
             crate::state::emit_action(state, "apply", false, msg);
         }
         _ => {
-            if let Some(Stage3A::Applied { note }) = &three_a {
+            if let Some(Stage3A::Applied { note, change }) = &three_a {
                 log::info(&i18n::tf(
                     "engine.pass_3a",
                     &[("name", &profile.name), ("branch", which.name())],
@@ -2050,6 +2430,9 @@ fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) 
                         &[("name", &profile.name), ("note", n)],
                     ));
                 }
+                // 手动应用同样报出「改了哪几项」：用户点了按钮在等结果，
+                // 只告诉他「应用成功」而不说清改了哪些参数，等于让他自己猜。
+                announce_change(state, change, true);
             }
             let msg = i18n::tf("engine.manual_ok", &[
                 ("name", &profile.name),
@@ -2135,6 +2518,18 @@ fn set_dhcp(state: &Arc<AppState>) {
             let msg = i18n::t("notify.dhcp_done");
             log::info(&msg);
             crate::state::emit_action(state, "dhcp", true, msg);
+            // 切 DHCP 顺带把 DNS 交回自动获取（macOS 上是 `-setdnsservers … Empty`），
+            // 那是**一次真的清空**：用户填过的解析器此刻已经不在生效状态里，
+            // 必须报出来，否则「我明明填了 DNS」和「系统里没有 DNS」会同时成立。
+            announce_change(
+                state,
+                &network::NetworkChange {
+                    mode: Some("dhcp".into()),
+                    dns_cleared: true,
+                    ..Default::default()
+                },
+                true,
+            );
         }
         Err(e) => {
             let msg = i18n::tf("notify.dhcp_failed", &[("error", &e)]);
@@ -2206,7 +2601,7 @@ fn publish_status_now(state: &Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Condition, ConditionType, Mode, Rule};
+    use crate::config::{Condition, ConditionType, Rule};
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -2742,90 +3137,242 @@ mod tests {
         }
     }
 
-    /// 弹窗载荷：手动配置的每个字段都要带到，路由给条数（明细在面板信息卡里）。
+    /// 组与行都按**位置**取（组按 IPv4 → IPv6 → DNS → 系统 的顺序生成），
+    /// 断言只落在原始值与 ok 标志上 —— i18n 在单跑与全量跑之间状态不同
+    /// （全量套件里有用例会初始化 DICTS），标题/标签可能是 key 也可能是
+    /// 本地化文本，按文案匹配必然时灵时不灵。
+    fn grp(v: &serde_json::Value, n: usize) -> &serde_json::Value {
+        &v["groups"].as_array().unwrap()[n]
+    }
+    /// 取一组的第 n 行。
+    fn row(g: &serde_json::Value, n: usize) -> &serde_json::Value {
+        &g["rows"].as_array().unwrap()[n]
+    }
+    /// 每一行都要有非空的标签与值（无论 i18n 初始化与否）。
+    fn assert_rows_shaped(g: &serde_json::Value, ok: Option<bool>) {
+        for r in g["rows"].as_array().unwrap() {
+            assert!(!r["label"].as_str().unwrap().is_empty());
+            assert!(!r["value"].as_str().unwrap().is_empty());
+            match ok {
+                Some(want) => assert_eq!(r["ok"], want),
+                None => assert!(r["ok"].is_null()),
+            }
+        }
+    }
+
+    /// 弹窗载荷：分组清单列出这一轮**实际写下的几项**（来自 `NetworkChange`），
+    /// 成功路径每行 ✅；IPv4 / IPv6 / DNS / 系统四组，没写的组不出现。
     #[test]
-    fn applied_notice_carries_the_manual_config_and_the_network() {
-        let net = NetworkConfig {
-            mode: Mode::Manual,
+    fn applied_notice_lists_the_actual_changes_and_the_network() {
+        let change = crate::network::NetworkChange {
+            mode: Some("manual".into()),
             ip: Some("192.168.1.5".into()),
             netmask: Some("255.255.255.0".into()),
             gateway: Some("192.168.1.1".into()),
             dns: Some("192.168.1.1, 8.8.8.8".into()),
-            routes: vec![
-                crate::config::model::RouteConfig {
-                    dest: "10.0.0.0/8".into(),
-                    gateway: Some("192.168.1.1".into()),
-                    metric: 1,
-                    delete: false,
-                },
-                crate::config::model::RouteConfig {
-                    dest: "172.16.0.0/12".into(),
-                    gateway: None,
-                    metric: 0,
-                    delete: true,
-                },
-            ],
+            v6mode: Some("manual".into()),
+            ipv6: Some("2001:db8::1".into()),
+            v6prefix: Some("64".into()),
+            v6gateway: Some("fe80::1".into()),
+            routes_added: 2,
             ..Default::default()
         };
-        let v = applied_notice(Some("home"), Some(&net), &snap(Some("Home"), Some("wi-fi")));
+        let v = applied_notice(
+            Some("home"),
+            &snap(Some("Home"), Some("wi-fi")),
+            Some(&change),
+            true,
+            true,
+            None,
+        );
         assert_eq!(v["profile"], "home");
         assert_eq!(v["fallback"], false);
-        assert_eq!(v["mode"], "manual");
-        assert_eq!(v["ip"], "192.168.1.5");
-        assert_eq!(v["netmask"], "255.255.255.0");
-        assert_eq!(v["gateway"], "192.168.1.1");
-        assert_eq!(v["dns"], "192.168.1.1, 8.8.8.8");
-        assert_eq!(v["routes"], 2);
+        assert_eq!(v["success"], true);
         assert_eq!(v["ssid"], "Home");
         assert_eq!(v["iface"], "wi-fi");
+        assert_eq!(v["nochange"], false);
+        // 四组都在：IPv4 / IPv6 / DNS / 系统，顺序固定。
+        assert_eq!(v["groups"].as_array().unwrap().len(), 4);
+        // IPv4 组：模式 / 地址 / 掩码 / 网关 / 新增路由 = 5 行，原始值逐行核对。
+        let g4 = grp(&v, 0);
+        assert_eq!(g4["rows"].as_array().unwrap().len(), 5);
+        assert_eq!(row(g4, 1)["value"], "192.168.1.5");
+        assert_eq!(row(g4, 2)["value"], "255.255.255.0");
+        assert_eq!(row(g4, 3)["value"], "192.168.1.1");
+        assert_eq!(row(g4, 4)["value"], "2");
+        // IPv6 组：manual 的地址三件套随模式一起进清单。
+        let g6 = grp(&v, 1);
+        assert_eq!(g6["rows"].as_array().unwrap().len(), 4);
+        assert_eq!(row(g6, 1)["value"], "2001:db8::1");
+        assert_eq!(row(g6, 2)["value"], "64");
+        assert_eq!(row(g6, 3)["value"], "fe80::1");
+        // DNS 组：写成了那几台。
+        assert_eq!(row(grp(&v, 2), 0)["value"], "192.168.1.1, 8.8.8.8");
+        // 系统组：配置名 / SSID / 接口，身份行不带标记（ok = null）。
+        let gs = grp(&v, 3);
+        assert_eq!(gs["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(row(gs, 0)["value"], "home");
+        assert_eq!(row(gs, 1)["value"], "Home");
+        assert_eq!(row(gs, 2)["value"], "wi-fi");
+        // 网络组每行 ✅ 且无明细；系统组每行无标记。
+        for n in 0..3 {
+            assert_rows_shaped(grp(&v, n), Some(true));
+        }
+        assert_rows_shaped(gs, None);
     }
 
-    /// DHCP 与「不动 DNS」都不该在弹窗里留空行。
+    /// DHCP 只产生「寻址模式」一行，没有地址/DNS 行；DNS 组整组不出现。
     #[test]
-    fn applied_notice_for_dhcp_leaves_the_addressing_rows_empty() {
-        let net = NetworkConfig {
-            mode: Mode::Dhcp,
+    fn applied_notice_for_dhcp_lists_only_the_mode_action() {
+        let change = crate::network::NetworkChange {
+            mode: Some("dhcp".into()),
             ..Default::default()
         };
-        let v = applied_notice(Some("office"), Some(&net), &snap(None, Some("eth0")));
-        assert_eq!(v["mode"], "dhcp");
-        assert!(v["ip"].is_null(), "DHCP 没有静态地址可显示");
-        assert!(v["dns"].is_null(), "DNS 缺省 = 不动，不占行");
-        assert_eq!(v["routes"], 0);
+        let v = applied_notice(
+            Some("office"),
+            &snap(None, Some("eth0")),
+            Some(&change),
+            true,
+            true,
+            None,
+        );
+        assert_eq!(v["success"], true);
+        // 两组：IPv4（1 行）+ 系统（SSID 读不到 ⇒ 配置名 + 接口两行）。
+        assert_eq!(v["groups"].as_array().unwrap().len(), 2);
+        let g4 = grp(&v, 0);
+        assert_eq!(g4["rows"].as_array().unwrap().len(), 1, "只有寻址模式一行");
+        assert_rows_shaped(g4, Some(true));
+        assert_rows_shaped(grp(&v, 1), None);
     }
 
-    /// DNS 三态里只有「指定」进弹窗："" = 交回自动，与缺省一样不占行。
+    /// DNS 两态：指定服务器与清空（交回自动）各占一行，二者互斥。
     #[test]
-    fn applied_notice_only_shows_a_specified_dns() {
-        let net = NetworkConfig {
-            dns: Some(String::new()),
+    fn applied_notice_shows_dns_set_or_cleared_as_one_action() {
+        // 指定 DNS
+        let set = crate::network::NetworkChange {
+            dns: Some("192.168.1.1, 8.8.8.8".into()),
             ..Default::default()
         };
-        let v = applied_notice(Some("cafe"), Some(&net), &snap(Some("Cafe"), None));
-        assert!(v["dns"].is_null());
+        let v = applied_notice(
+            Some("cafe"),
+            &snap(Some("Cafe"), None),
+            Some(&set),
+            true,
+            true,
+            None,
+        );
+        // 两组：DNS（1 行，值 = 那几台）+ 系统（SSID + 配置名）。
+        assert_eq!(v["groups"].as_array().unwrap().len(), 2);
+        assert_eq!(row(grp(&v, 0), 0)["value"], "192.168.1.1, 8.8.8.8");
+
+        // 清空 DNS（交回自动获取）：一行，值非空（本地化的「DHCP 提供」）。
+        let cleared = crate::network::NetworkChange {
+            dns_cleared: true,
+            ..Default::default()
+        };
+        let v2 = applied_notice(
+            Some("cafe"),
+            &snap(Some("Cafe"), None),
+            Some(&cleared),
+            true,
+            true,
+            None,
+        );
+        assert_eq!(v2["groups"].as_array().unwrap().len(), 2);
+        assert!(!row(grp(&v2, 0), 0)["value"].as_str().unwrap().is_empty());
     }
 
-    /// 不带网络配置的分支（THEN 缺省）：地址模式整行不给看，但配置名照弹。
+    /// 不带 change 的分支（THEN 缺省 / 系统本就合规跳过下发）：没有网络组，
+    /// nochange = true，前端据此显示「未更改任何参数」。
     #[test]
-    fn applied_notice_without_a_network_config_has_no_mode() {
-        let v = applied_notice(Some("label-only"), None, &snap(Some("Home"), None));
-        assert!(v["mode"].is_null());
+    fn applied_notice_without_a_change_has_no_actions() {
+        let v = applied_notice(
+            Some("label-only"),
+            &snap(Some("Home"), None),
+            None,
+            true,
+            true,
+            None,
+        );
         assert_eq!(v["profile"], "label-only");
         assert_eq!(v["fallback"], false);
+        assert_eq!(v["success"], true);
+        assert_eq!(v["nochange"], true);
+        assert!(v["groups"].as_array().unwrap().is_empty(), "无 change 则无网络组");
+
+        // change 有值但全空（Default）同样算 nochange：一分写入都没有。
+        let empty = crate::network::NetworkChange::default();
+        let v2 = applied_notice(
+            Some("label-only"),
+            &snap(Some("Home"), None),
+            Some(&empty),
+            true,
+            true,
+            None,
+        );
+        assert_eq!(v2["nochange"], true);
+        assert!(v2["groups"].as_array().unwrap().is_empty());
     }
 
-    /// 兜底：标 fallback、profile 为空，网络配置照常带。
+    /// 兜底：profile 字段为空、身份行显示「兜底」文案；失败路径每行 ❌ 并带
+    /// 「已回滚」明细 —— 但恢复本身失败时明细必须留空（写入状态未知，不谎报）。
     #[test]
-    fn applied_notice_marks_the_fallback() {
-        let net = NetworkConfig {
-            mode: Mode::Dhcp,
+    fn applied_notice_marks_the_fallback_and_failure() {
+        let change = crate::network::NetworkChange {
+            mode: Some("dhcp".into()),
             ..Default::default()
         };
-        let v = applied_notice(None, Some(&net), &snap(Some("Starbucks"), None));
+        // 成功兜底：profile 字段为空、身份行非空。
+        let v = applied_notice(
+            None,
+            &snap(Some("Starbucks"), None),
+            Some(&change),
+            true,
+            true,
+            None,
+        );
         assert_eq!(v["fallback"], true);
         assert!(v["profile"].is_null());
-        assert_eq!(v["mode"], "dhcp");
+        assert_eq!(v["success"], true);
         assert_eq!(v["ssid"], "Starbucks");
+        assert!(!row(grp(&v, 1), 0)["value"].as_str().unwrap().is_empty());
+
+        // 失败兜底（恢复成功）：同一批行全部 ❌，明细非空（「已回滚，未生效」）。
+        let v2 = applied_notice(
+            None,
+            &snap(Some("Starbucks"), None),
+            Some(&change),
+            false,
+            true,
+            Some("boom"),
+        );
+        assert_eq!(v2["success"], false);
+        assert_eq!(v2["restored"], true);
+        for g in v2["groups"].as_array().unwrap() {
+            for r in g["rows"].as_array().unwrap() {
+                if !r["ok"].is_null() {
+                    assert_eq!(r["ok"], false, "失败路径每行 ❌");
+                    assert!(!r["detail"].as_str().unwrap_or("").is_empty());
+                }
+            }
+        }
+        assert_eq!(v2["note"], "boom");
+
+        // 失败且恢复也失败：明细留空 —— 那时写入可能还留在系统里。
+        let v3 = applied_notice(
+            None,
+            &snap(Some("Starbucks"), None),
+            Some(&change),
+            false,
+            false,
+            Some("boom"),
+        );
+        assert_eq!(v3["restored"], false);
+        for g in v3["groups"].as_array().unwrap() {
+            for r in g["rows"].as_array().unwrap() {
+                assert!(r["detail"].is_null(), "恢复失败时不谎报「已回滚」");
+            }
+        }
     }
 
     /// The identity summary in the fingerprint-change log line: a missing field is a
@@ -3117,6 +3664,65 @@ mod mock_engine {
         assert!(
             view.fallback_active,
             "零命中兜底生效后 fallback_active 必须为 true，否则前端顶部/名称区显示不出兜底（问题 3A）"
+        );
+    }
+
+    /// 播报文案必须随成败**分流**：改动被回滚了，就不能说成「已变更」。
+    ///
+    /// 这条契约是 v1.8.5 修掉的真缺陷：`announce_change` 原本成功与失败用同一条
+    /// `net.change_notice`（「网络配置已变更」），而失败路径上那几项已经被回滚改回去了。
+    /// 用户据此以为自己的静态 IP 还在生效 —— 现场恰恰不是那样。
+    ///
+    /// 断言只依赖「两句必须不同」与「明细必须照样列出来」，不绑具体语言：
+    /// `i18n` 的当前语言是进程级全局状态，并行用例可能把它翻掉，
+    /// 拿英文原文做断言就是间歇性失败。
+    #[test]
+    fn a_rolled_back_change_is_never_reported_as_a_successful_one() {
+        crate::i18n::init();
+        let change = network::NetworkChange {
+            mode: Some("manual".into()),
+            ip: Some("10.0.0.2".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("10.0.0.1".into()),
+            dns_cleared: true,
+            ..Default::default()
+        };
+
+        let (ok_log, ok_notice) =
+            change_lines(&change, true).expect("有变更明细就必须有话说");
+        let (bad_log, bad_notice) =
+            change_lines(&change, false).expect("有变更明细就必须有话说");
+
+        assert_ne!(
+            ok_log, bad_log,
+            "成功与失败的日志不能是同一句话：失败路径上的改动已被回滚改回去了"
+        );
+        assert_ne!(
+            ok_notice, bad_notice,
+            "成功与失败的弹窗不能是同一句话：说成「已变更」会让用户以为改动还生效着"
+        );
+
+        // 明细照旧要列出来 —— 失败也不隐瞒「动过什么」，只是不说成「改成了」。
+        for line in [&ok_log, &ok_notice, &bad_log, &bad_notice] {
+            assert!(
+                line.contains("10.0.0.2"),
+                "变更明细必须出现在话里（动过的 IP 看不见，用户无从判断）：{line}"
+            );
+        }
+    }
+
+    /// 什么都没改 ⇒ 不发任何提示。「网络被改了」这句话必须是假的反面。
+    ///
+    /// 空明细（系统本就合规、跳过了下发）若也弹一条「网络配置已变更」，
+    /// 用户就得学会忽略这类提示 —— 假警报一多，真警报就没人看了。
+    #[test]
+    fn an_empty_change_produces_no_notice_at_all() {
+        crate::i18n::init();
+        let empty = network::NetworkChange::default();
+        assert!(change_lines(&empty, true).is_none(), "空明细不该产生成功提示");
+        assert!(
+            change_lines(&empty, false).is_none(),
+            "空明细不该产生失败提示"
         );
     }
 }

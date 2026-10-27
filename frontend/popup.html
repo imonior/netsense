@@ -137,7 +137,42 @@
     .modal-mask[hidden] { display: none; }
     .modal { width: 304px; max-width: 92%; background: var(--bg-card);
       border: 1px solid var(--line); border-radius: var(--t-r-md); padding: 14px;
-      box-shadow: var(--t-shadow); }
+      box-shadow: var(--t-shadow);
+      /* 兜底：任何弹窗都不许高过窗口。`.modal-mask` 是 `position:fixed; inset:0`，
+         它的高就是窗口高，所以这里的 `100%` 即窗口高；超出的部分在弹窗内滚。
+         （结果弹窗另有更细的布局，见下面的 `.ap-modal`。） */
+      max-height: calc(100% - 16px); overflow-y: auto; }
+    /* 「配置已应用」弹窗：紧凑版式 + **清单区内部滚动**。
+       弹窗本体不滚，只有中间的清单滚 —— 标题、失败原因与「关闭」按钮永远看得见，
+       内容再多也不会把「关闭」挤出可视区。
+       高度上限跟着可视区走（`calc(100% - 16px)` 是罩子高度，罩子 `inset:0` 铺满窗口）：
+       窗口比内容矮时清单自己滚，不把整张弹窗顶出屏幕上下沿。 */
+    .modal.ap-modal {
+      display: flex; flex-direction: column;
+      max-height: calc(100% - 16px);
+      /* 滚动交给 `.ap-body`（内层），外层不滚 —— 否则会出现两条滚动条。 */
+      overflow: hidden;
+      padding: 11px 12px;
+    }
+    .modal .ap-body {
+      flex: 1 1 auto; min-height: 0;
+      overflow-y: auto; overflow-x: hidden;
+      /* 滚到头不要再带着外层一起滚（罩子本身不滚，但避免滚动串联）。 */
+      overscroll-behavior: contain;
+    }
+    .modal .ap-foot { flex: none; }
+    /* 底部一行两件东西：时间戳在左、关闭按钮在右。
+       原本时间戳与按钮各占一行，白白多出一行高度 —— 弹窗越紧越该省。 */
+    .modal .ap-foot-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      margin-top: 6px;
+    }
+    .modal .ap-foot-row .ap-time { margin-top: 0; text-align: left; }
+    .modal .ap-foot-row button {
+      flex: none; padding: 5px 16px; font-size: 12px; border-radius: var(--t-r-sm);
+      cursor: pointer; border: 1px solid var(--t-accent);
+      background: var(--accent); color: var(--t-on-accent);
+    }
     .modal h3 { margin: 0 0 8px; font-size: 13px; }
     .modal .mv { font-size: 12px; color: var(--muted); margin: 3px 0; }
     .modal .mv b { color: var(--fg); }
@@ -150,6 +185,36 @@
     .modal .row-btns button:first-child { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     .modal .notes { max-height: 130px; overflow-y: auto; font-size: 11px; color: var(--muted);
       white-space: pre-wrap; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+    /* 「配置已应用」弹窗的分组清单（IPv4 / IPv6 / DNS / 动作 / 系统）：
+       标签在左、值右对齐、每行 ✅/❌，失败行下有红色明细，底部错误行 + 时间戳。
+       行距按「紧凑」定：分组之间 6px、组内行 3px —— 一次能看到的条目尽量多，
+       剩下的交给 `.ap-body` 滚。 */
+    .modal h3.ap-title-ok { color: var(--ok); }
+    .modal h3.ap-title-err { color: var(--t-err); }
+    .modal.ap-modal h3 { margin-bottom: 6px; }
+    .modal .ap-g { color: var(--accent); font-size: 11px; font-weight: 600; margin: 4px 0 1px; }
+    .modal .ap-g:first-child { margin-top: 0; }
+    .modal .ap-list { border: 1px solid var(--line); border-radius: var(--t-r-sm); overflow: hidden; }
+    .modal .ap-item { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 2px 8px; line-height: 1.3; }
+    .modal .ap-item + .ap-item { border-top: 1px solid var(--line); }
+    .modal .ap-label { color: var(--muted); flex: none; }
+    .modal .ap-val { color: var(--fg); font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .modal .ap-mark { flex: none; }
+    /* 动作组的状态色：成功 / 失败 / 进行中 / 逾期。五态各有各的色，
+       不压成一个红绿 —— 「本就满足」与「恢复失败」是两回事。 */
+    .modal .ap-mark.ap-ok { color: var(--ok); }
+    .modal .ap-mark.ap-err { color: var(--t-err); }
+    .modal .ap-mark.ap-wait { color: var(--warn); }
+    .modal .ap-mark.ap-warn { color: var(--warn); }
+    /* 明细有两种，不该同色：
+       - 网络下发失败行的「已回滚，未生效」：跟红色标题同族，是**整体失败**的一部分；
+       - 动作失败行的具体错误：那是一条动作自己的问题（如「打印机不存在」），
+         用琥珀色区分，免得与底部那条红色「整体失败原因」混成一件事。 */
+    .modal .ap-detail { color: var(--t-err); font-size: 11px; padding: 0 8px 2px; line-height: 1.25; word-break: break-word; }
+    .modal .ap-detail.ap-act { color: var(--warn); }
+    .modal .ap-err { color: var(--t-err); font-size: 11px; margin-top: 6px; word-break: break-word; }
+    .modal .ap-note { color: var(--warn); font-size: 11px; margin-top: 6px; word-break: break-word; }
+    .modal .ap-time { color: var(--muted); font-size: 11px; text-align: right; margin-top: 6px; }
     .modal .err { color: var(--t-err); font-size: 11px; word-break: break-word; margin: 6px 0; }
     .progress { height: 6px; background: var(--t-sunken); border: 1px solid var(--line);
       border-radius: var(--t-r-pill); overflow: hidden; margin: 8px 0 4px; }
@@ -206,7 +271,7 @@
     <div class="modal" id="update-modal"></div>
   </div>
   <div class="modal-mask" id="applied-mask" hidden>
-    <div class="modal" id="applied-modal"></div>
+    <div class="modal ap-modal" id="applied-modal"></div>
   </div>
 
   <script>
@@ -551,37 +616,158 @@
       return t("popup.cannot_verify", "This update cannot be verified: {reason}").replace("{reason}", reason);
     }
 
-    /// 「自动化刚应用了一个配置」弹窗：当前配置 + 网络身份。
+    /// 「自动化应用了一个配置」弹窗：只报**最终结果** —— 分组清单（IPv4 / IPv6 / DNS /
+    /// 动作 / 系统）里列出这一轮到底往系统里写了哪几项（后端 `groups`），每行标签 + 值 +
+    /// ✅/❌，失败行下有红色明细，底部是错误行与时间戳。版式对照用户给的参考图。
     ///
-    /// 不做去重：后端只在引擎**真的动手了**（首评 / 网络指纹变 / 配置内容变，且 3A 成功）
-    /// 时才发这个事件，轮询中什么都没变时根本收不到 —— 每条都是又一次真正的应用。
-    /// 空值行整行不给看（面板窄，一排「—」等于没有信息）。与信息卡刻意不同：这里是
-    /// 「刚发生了什么」的快照，排障看顶部当前网络信息卡 —— 那一卡的每个字段始终可见。
+    /// 「动作」组装的是 **3B1 / 3B2 区域内配的那些东西的执行情况**：3B1 是一次性动作
+    ///（运行软件、设默认打印机…）的逐条结果，3B2 是常驻动作（维持 VPN / WireGuard…）的
+    /// 当前状态。两者的结果**不在** `netsense://applied` 载荷里 —— 那条事件只讲网络下发，
+    /// 而动作在独立线程上异步跑，结果陆续从 `netsense://evaluation` 到达。因此弹窗打开后
+    /// 订阅那个事件，边到边填；没到的那几条显示「运行中」，不假装已完成。
+    ///
+    /// 不做去重：后端只在引擎**真的动手了**（首评 / 网络指纹变 / 配置内容变，且 3A 有结果）
+    /// 时才发这个事件，轮询中什么都没变时根本收不到 —— 每条都是又一次真正的应用或回滚。
+    /// 失败路径（`success=false`）照样弹：清单里那几项全部 ❌，标题按「是否已回滚」分流，
+    /// 失败原因以红色 ❌ 行压底。
+    /// 弹窗当前状态。`base` 是 `netsense://applied` 的载荷；`actions` / `workers`
+    /// 来自后续的 `netsense://evaluation`（3B1 逐条结果 / 3B2 实时状态）。
+    let apState = null;
+
     function renderApplied(d) {
+      // 记住这一轮的载荷：动作结果陆续到达时要重画同一张弹窗。
+      apState = { base: d || {}, actions: null, workers: null };
+      renderAppliedNow();
+    }
+
+    /// 3B2 常驻动作的状态 → 弹窗里的标记。
+    ///
+    /// 五态不能压成一个红绿：`satisfied`（本就满足，什么都没做）与 `faulted`
+    /// （恢复失败）是两回事，压成一个标记用户就会去查一条其实没问题的隧道。
+    function apWorkerMark(state) {
+      switch (state) {
+        case "pending": return { mark: "⏳", cls: "ap-wait" };
+        case "satisfied": return { mark: "✅", cls: "ap-ok" };
+        case "repaired": return { mark: "✅", cls: "ap-ok" };
+        case "faulted": return { mark: "❌", cls: "ap-err" };
+        case "overdue": return { mark: "❗", cls: "ap-warn" };
+        default: return { mark: "", cls: "" };
+      }
+    }
+
+    /// 画当前这一版弹窗（网络清单 + 动作结果 + 系统身份）。
+    function renderAppliedNow() {
+      if (!apState) return;
+      const d = apState.base || {};
       const box = document.getElementById("applied-modal");
-      const rows = [];
-      const row = (label, v) => { if (v) rows.push(`<div class="mv">${esc(label)} <b>${esc(v)}</b></div>`); };
-      row(t("popup.profile", "Applied profile"),
-          d.fallback ? t("popup.applied_fallback", "Fallback (no profile matched)") : d.profile);
-      row(t("popup.applied_mode", "Addressing"),
-          d.mode === "manual" ? t("popup.applied_manual", "Manual")
-          : d.mode === "dhcp" ? t("popup.applied_dhcp", "Automatic (DHCP)") : "");
-      row(t("popup.ip", "IPv4"), d.ip);
-      row(t("popup.netmask", "Netmask"), d.netmask);
-      row(t("popup.gateway", "Gateway"), d.gateway);
-      row(t("popup.dns", "DNS"), d.dns);
-      row(t("popup.routes", "Routes"), d.routes ? String(d.routes) : "");
-      row(t("status.ssid", "SSID"), d.ssid);
-      row(t("popup.interface", "Interface"), d.iface);
-      box.innerHTML = `<h3>${esc(t("popup.applied_title", "Configuration applied"))}</h3>
-        ${rows.join("")}
-        <div class="row-btns"><button id="ap-close">${esc(t("popup.close", "Close"))}</button></div>`;
+      const ok = !!d.success;
+      // 标题三态：成功 / 失败且已回滚 / 失败但快照恢复也失败（写入状态未知）。
+      const title = ok
+        ? t("popup.applied_title", "Network configuration is in effect")
+        : d.restored
+          ? t("popup.applied_failed_rb", "Network changes were rolled back")
+          : t("popup.applied_failed_title", "Network configuration did not take effect");
+      // 分组清单：组头（accent）+ 组内「标签 | 值 ✅/❌」行；ok=null 的身份行不带标记。
+      const groups = Array.isArray(d.groups) ? d.groups : [];
+      let list = "";
+      for (const g of groups) {
+        list += `<div class="ap-g">${esc(g.title)}</div><div class="ap-list">`;
+        for (const r of (g.rows || [])) {
+          const mark = r.ok === true ? "✅" : r.ok === false ? "❌" : "";
+          list += `<div class="ap-item"><span class="ap-label">${esc(r.label)}</span>`
+            + `<span class="ap-val">${esc(r.value)}${mark ? ` <span class="ap-mark">${mark}</span>` : ""}</span></div>`;
+          if (r.detail) list += `<div class="ap-detail">${esc(r.detail)}</div>`;
+        }
+        list += `</div>`;
+      }
+      // —— 动作组：3B1 一次性动作 + 3B2 常驻动作 ——
+      list += apActionsHtml();
+      // 本轮一分写入都没有（系统本就合规 / THEN 缺省）：清单之外补一句说明。
+      if (d.nochange) {
+        list += `<div class="mv">${esc(t("popup.applied_nochange", "No network parameters were changed"))}</div>`;
+      }
+      // 底部行按成败分流：失败原因 = 红色 ❌，降级附注（DNS 兜底等）= 琥珀色。
+      const bottom = d.note
+        ? (ok ? `<div class="ap-note">${esc(d.note)}</div>`
+              : `<div class="ap-err">❌ ${esc(d.note)}</div>`)
+        : "";
+      // 结构分三层：标题（固定）/ 清单（`.ap-body`，超长时这里滚）/ 底部（固定）。
+      // 失败原因与「关闭」按钮放在**固定**的底部层 —— 用户一眼就能看到「没生效」
+      // 和怎么关掉它，不必先滚到底部找。清单再长也不把这两样顶出可视区。
+      box.innerHTML = `<h3 class="${ok ? "ap-title-ok" : "ap-title-err"}">${esc(title)}</h3>
+        <div class="ap-body">${list}</div>
+        <div class="ap-foot">${bottom}
+          <div class="ap-foot-row">
+            <span class="ap-time">${esc(t("popup.time", "Time"))}: ${esc(apNow())}</span>
+            <button id="ap-close">${esc(t("popup.close", "Close"))}</button>
+          </div>
+        </div>`;
       document.getElementById("applied-mask").hidden = false;
       document.getElementById("ap-close").onclick = closeAppliedModal;
     }
 
+    /// 「动作」组：3B1 一次性动作的逐条结果 + 3B2 常驻动作的当前状态。
+    ///
+    /// 两者都**可能还没到**：3B1 在独立线程上跑，动作没交回结果之前这里显示「运行中」，
+    /// 而不是把它藏起来 —— 用户此刻最想知道的就是「那条打印机的动作跑起来没有」。
+    function apActionsHtml() {
+      const actions = apState.actions;   // 3B1：{ running, total, outcomes: [...] }
+      const workers = apState.workers;   // 3B2：[{ label, state, interval, repairs, error }]
+      if (!actions && !workers) return "";
+      let list = `<div class="ap-g">${esc(t("popup.group_actions", "Actions"))}</div><div class="ap-list">`;
+
+      // 3B1：一次性动作（运行软件 / 设默认打印机 / 跑脚本…）
+      if (actions) {
+        const outs = actions.outcomes || [];
+        if (actions.running && outs.length === 0) {
+          list += `<div class="ap-item"><span class="ap-label">${esc(t("popup.actions_running", "Running"))}</span>`
+            + `<span class="ap-val"><span class="ap-mark ap-wait">⏳</span></span></div>`;
+        }
+        for (const o of outs) {
+          list += `<div class="ap-item"><span class="ap-label">${esc(o.label)}</span>`
+            + `<span class="ap-val"><span class="ap-mark ${o.ok ? "ap-ok" : "ap-err"}">${o.ok ? "✅" : "❌"}</span></span></div>`;
+          if (o.error) list += `<div class="ap-detail ap-act">${esc(o.error)}</div>`;
+        }
+        // 还在跑：已完成的列在上面，未完成的给一行「N 条待执行」。
+        if (actions.running) {
+          const left = Math.max(0, (actions.total || 0) - outs.length);
+          if (left > 0) {
+            list += `<div class="ap-item"><span class="ap-label">${esc(t("popup.actions_pending", "Pending"))}</span>`
+              + `<span class="ap-val">${esc(String(left))} <span class="ap-mark ap-wait">⏳</span></span></div>`;
+          }
+        }
+      }
+
+      // 3B2：常驻动作（维持 VPN / WireGuard / 周期脚本…）
+      if (workers && workers.length) {
+        for (const w of workers) {
+          const st = apWorkerMark(w.state);
+          const detail = w.error
+            ? w.error
+            : (w.repairs > 0
+              ? t("popup.actions_repairs", "Restored {n} time(s)").replace("{n}", String(w.repairs))
+              : "");
+          list += `<div class="ap-item"><span class="ap-label">${esc(w.label)}</span>`
+            + `<span class="ap-val"><span class="ap-mark ${st.cls}">${st.mark}</span></span></div>`;
+          if (detail) list += `<div class="ap-detail ap-act">${esc(detail)}</div>`;
+        }
+      }
+      list += `</div>`;
+      return list;
+    }
+
+    /// 本地时间「YYYY-MM-DD HH:MM:SS」：弹窗底部的时间戳（与日志对时间时够用）。
+    function apNow() {
+      const d = new Date(), p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+        + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
     function closeAppliedModal() {
       document.getElementById("applied-mask").hidden = true;
+      // 清掉这一轮的状态：下一轮 applied 会重新建一份。留着的话，上一轮的动作
+      // 结果会先于新一轮的网络清单显示出来 —— 那是上一轮的事，不是这一轮的。
+      apState = null;
     }
 
     // 弹窗渲染：发现新版本 / 已是最新 / 检查失败 三种态
@@ -809,6 +995,27 @@
       // 弹窗展示当前应用的配置与网络信息。轮询中若无规则触发改变，后端不发此事件。
       window.__TAURI__.event.listen("netsense://applied", (e) => {
         renderApplied(e.payload || {});
+      });
+      // 3B1 / 3B2 的动作结果陆续到达：把它们填进**已经打开**的结果弹窗。
+      //
+      // 为什么单独订阅：`netsense://applied` 只讲网络下发，动作在独立线程上异步跑，
+      // 结果从 `netsense://evaluation` 到达 —— 弹窗先开、结果后到是常态。
+      // 弹窗没开时不留状态（下一轮 applied 会重新建一份），省得把上一轮的结果
+      // 挂到这一轮上。
+      window.__TAURI__.event.listen("netsense://evaluation", (e) => {
+        if (!apState) return;
+        const v = e.payload || {};
+        const lr = v.last_run || null;
+        if (lr) {
+          apState.actions = {
+            running: !!lr.running,
+            total: lr.total || 0,
+            outcomes: lr.outcomes || [],
+          };
+        }
+        apState.workers = Array.isArray(v.workers) ? v.workers : [];
+        // 弹窗已经关掉了就别再重画（`apState` 会被下一次 applied 覆盖）。
+        if (!document.getElementById("applied-mask").hidden) renderAppliedNow();
       });
       // 在线升级进度（下载 / 刷新 / 安装阶段 + 百分比）
       window.__TAURI__.event.listen("netsense://update_progress", (e) => {

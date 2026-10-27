@@ -72,24 +72,42 @@ pub struct InterfaceStatus {
 /// Shared 3A rollback: restore the NIC to the captured snapshot (ChatGPT #28/#29). All three
 /// platforms delegate their `restore_from_snapshot` to this so the logic is defined once: re-apply
 /// IP/mask/gateway/DNS on the same `target`, then re-add the routes that already existed before.
+///
+/// ⚠️ **回滚不得把 DNS 清空**（v1.8.5 修的真 bug）。快照里 DNS 读回来是空串
+/// （`Some("")`）时，它说的是「**这张网卡本来就没有手动 DNS**」—— 在 macOS 上
+/// `networksetup -getdnsservers` 对一张走 DHCP 的网卡回的是
+/// `There aren't any DNS Servers set on <svc>.`，而那张卡片的 DNS 其实是 DHCP 递过来的
+/// （用户自己填的解析器、以及本机 DNS 代理的地址都装在那份「手动 DNS」列表里）。
+///
+/// 把这份 `Some("")` 原样下发回去，会走到 `apply_ops` 的 `dns: Some("")` 分支 ——
+/// 那是一条**真的清空指令**（macOS: `networksetup -setdnsservers <svc> Empty`）。
+/// 于是「回滚」把 DHCP 递来的 DNS 和用户填的解析器一起抹掉，系统变成一个 nameserver
+/// 都没有：表现是「DNS 变成空的」，而现场再也回不去。
+///
+/// 正确做法：快照里没有 DNS ⇒ 回滚时**不碰 DNS**（`None`），让网卡继续用它原来的
+/// 获取方式；只有快照里确实有 DNS 地址时才把那份地址写回去。
+/// The rollback must not wipe the name servers: an empty DNS in the snapshot means
+/// "this interface had no *manual* DNS" (DHCP supplies it), not "clear the DNS".
 pub(crate) fn restore_snapshot_impl(
     plat: &impl NetworkPlatform,
     snap: &InterfaceStatus,
 ) -> Result<(), String> {
     if let (Some(ip), Some(netmask), Some(gw)) = (&snap.ipv4, &snap.netmask, &snap.gateway) {
+        // 快照里没有 DNS 地址 ⇒ 这一项**不动**（None），而不是「清空」（Some("")）。
+        // Only a snapshot that actually carries name servers restores them.
+        let dns = snap
+            .dns
+            .as_deref()
+            .filter(|d| !d.trim().is_empty())
+            .map(|d| d.to_string());
         let cfg = NetworkConfig {
             mode: Mode::Manual,
             target: snap.target,
             ip: Some(ip.clone()),
             netmask: Some(netmask.clone()),
             gateway: Some(gw.clone()),
-            dns: snap.dns.clone(),
-            v6mode: snap.v6mode.clone().and_then(|s| match s.as_str() {
-                "off" => Some(V6Mode::Off),
-                "automatic" => Some(V6Mode::Automatic),
-                "manual" => Some(V6Mode::Manual),
-                _ => None,
-            }),
+            dns,
+            v6mode: rollback_v6mode(snap),
             ipv6: None,
             v6prefix: None,
             v6gateway: None,
@@ -110,8 +128,107 @@ pub(crate) fn restore_snapshot_impl(
         }
         res
     } else {
-        plat.set_dhcp()
+        // 快照里没有完整 IPv4（下发前这张卡不在静态配置上，或地址还没租到）⇒ 切回 DHCP。
+        //
+        // 这里**不能**用 `plat.set_dhcp()`：三平台的 `set_dhcp()` 都顺带把 DNS 交回
+        // 自动获取（macOS 上是 `-setdnsservers <svc> Empty`），那是一条**真的清空指令**。
+        // 回滚要的是「回到快照时的样子」，而快照里没有 DNS 地址时正确的做法是
+        // **不碰 DNS**（缺省），不是清空 —— 与上面 Manual 分支是同一条规矩。
+        //
+        // v1.8.5 只修了 Manual 分支，这一支仍在清空 DNS；而「DHCP 还没租到地址」
+        // （`DHCP was expected to have leased an IPv4 address, but there is none`）
+        // 恰恰是本机最常走到的分支 —— 用户看到的「DNS 变成空的」主要来自这里。
+        //
+        // Never `set_dhcp()` here: every platform's `set_dhcp()` also hands DNS back
+        // to automatic (a real clearing). A rollback restores the snapshot's shape,
+        // and a snapshot without name servers means "do not touch DNS", not "clear it".
+        plat.apply_network(&NetworkConfig {
+            mode: Mode::Dhcp,
+            target: snap.target,
+            dns: snap
+                .dns
+                .as_deref()
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| d.to_string()),
+            v6mode: rollback_v6mode(snap),
+            ..Default::default()
+        })
     }
+}
+
+/// 快照里的 IPv6 模式在回滚时**能完整表达**的那一部分。
+///
+/// `manual` 被刻意丢掉：`InterfaceStatus` 不带 v6 地址 / 前缀 / 网关，而 `apply_ops`
+/// 对 `V6Mode::Manual` 要求三者齐全 —— 拿不到就整批下发失败，于是「回滚失败」把系统
+/// 留在半新半旧的状态，那比少还原一项糟得多（而且日志里只会看到一句失败原因）。
+/// `off` / `automatic` / `linklocal` 不需要任何地址，可以安全地写回去。
+///
+/// Only the IPv6 modes a snapshot can express completely. `manual` is dropped on
+/// purpose: the snapshot carries no v6 address/prefix/gateway, and `apply_ops`
+/// requires all three — a failed restore is worse than a partial one. `off`,
+/// `automatic` and `linklocal` need no addresses, so they can be written back safely.
+fn rollback_v6mode(snap: &InterfaceStatus) -> Option<V6Mode> {
+    match snap.v6mode.as_deref() {
+        Some("off") => Some(V6Mode::Off),
+        Some("automatic") => Some(V6Mode::Automatic),
+        Some("linklocal") => Some(V6Mode::LinkLocal),
+        _ => None,
+    }
+}
+
+/// 回滚**会**写回系统的哪几项。
+///
+/// 为什么回滚也要有一份明细：回滚本身就是一次真实的系统写入 —— 它要把地址、掩码、
+/// 网关、DNS（视快照而定）重新写一遍。此前回滚只在日志里留一行「已回滚」，用户
+/// 既看不见「改回了什么」，也看不见这件事发生过 —— 而这正是「任何一次对网络的改变
+/// 都要记录并弹窗提示」这条要求里最容易被漏掉的一次写入。
+///
+/// 分支必须与 [`restore_snapshot_impl`] **逐字一致**（快照有完整 IPv4 ⇒ 静态写回，
+/// 否则切 DHCP）。两份判断一旦分叉，报出来的明细就会和实际写进去的不一样 ——
+/// 那比不报更糟：用户会照着一条假的明细去排查。
+///
+/// What a rollback writes back. The branch must mirror [`restore_snapshot_impl`]
+/// exactly; if the two drift apart the reported list stops matching what was written.
+pub(crate) fn rollback_change(snap: &InterfaceStatus) -> crate::network::NetworkChange {
+    // 与 restore_snapshot_impl 同一条规矩：快照里没有 DNS 地址 ⇒ 不碰 DNS（None），
+    // 而不是「清空」（那在 macOS 上是 `-setdnsservers <svc> Empty`）。
+    let dns = snap
+        .dns
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| d.to_string());
+    let mut c = crate::network::NetworkChange::default();
+    if snap.ipv4.is_some() && snap.netmask.is_some() && snap.gateway.is_some() {
+        c.mode = Some("manual".into());
+        c.ip = snap.ipv4.clone();
+        c.netmask = snap.netmask.clone();
+        c.gateway = snap.gateway.clone();
+        c.dns = dns;
+        // 与 restore_snapshot_impl 里写回去的必须是同一份判断（见 rollback_v6mode）。
+        c.v6mode = match snap.v6mode.as_deref() {
+            Some("off") => Some("off".into()),
+            Some("automatic") => Some("automatic".into()),
+            Some("linklocal") => Some("linklocal".into()),
+            _ => None,
+        };
+    } else {
+        c.mode = Some("dhcp".into());
+        c.dns = dns;
+        // 与 restore_snapshot_impl 里写回去的必须是同一份判断（见 rollback_v6mode）。
+        c.v6mode = match snap.v6mode.as_deref() {
+            Some("off") => Some("off".into()),
+            Some("automatic") => Some("automatic".into()),
+            Some("linklocal") => Some("linklocal".into()),
+            _ => None,
+        };
+    }
+    // 回滚会把快照采集时已存在的路由重新加回去（见 restore_snapshot_impl）。
+    c.routes_added = snap
+        .routes
+        .iter()
+        .filter(|r| !r.delete && r.gateway.is_some())
+        .count();
+    c
 }
 
 /// 网卡种类。用于面板与设置窗口「网络硬件信息」列的分组展示。
@@ -2114,6 +2231,240 @@ mod mock_tests {
                 .iter()
                 .any(|(d, g, _)| d == "10.0.0.0/8" && g == "192.168.1.1"),
             "回滚应恢复快照里的旧路由 / rollback must restore the previous route"
+        );
+    }
+
+    /// **回滚不得把 DNS 清空**（v1.8.5 修的真 bug）。
+    ///
+    /// 现场形状：macOS 上一张走 DHCP 的网卡，`networksetup -getdnsservers` 回的是
+    /// `There aren't any DNS Servers set on Wi-Fi.` —— 读回层把这句话记成 `Some("")`
+    /// （这是「这张卡**没有手动 DNS**」，不是「读不到」）。于是快照里的 DNS 是空串。
+    ///
+    /// 而空串一旦原样下发，就走到 `apply_ops` 的 `dns: Some("")` 分支 —— 那是一条
+    /// **真的清空指令**（macOS: `networksetup -setdnsservers <svc> Empty`）。
+    /// 于是「回滚」把 DHCP 递来的解析器和用户填的解析器一起抹掉，系统变成一个
+    /// nameserver 都没有：表现是「DNS 变成空的」，而且现场再也回不去。
+    ///
+    /// 正确的回滚是：快照里没有 DNS 地址 ⇒ 这一项**不动**（`None`），
+    /// 让网卡继续用它原来的获取方式。
+    #[test]
+    fn a_rollback_never_clears_the_name_servers() {
+        let m = MockPlatform::new();
+        // 一张 DHCP 网卡的快照：地址齐全，DNS 是「没有手动 DNS」的空串。
+        let snap = InterfaceStatus {
+            ipv4: Some("10.20.20.168".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("10.20.20.20".into()),
+            dns: Some(String::new()),
+            ..Default::default()
+        };
+        m.restore_from_snapshot(&snap).unwrap();
+        let calls = m.calls();
+        let applied = calls
+            .iter()
+            .find_map(|c| match c {
+                Call::ApplyNetwork { cfg } => Some(cfg),
+                _ => None,
+            })
+            .expect("回滚要重新下发网络配置 / rollback must re-apply the network config");
+        assert_eq!(
+            applied.dns, None,
+            "快照里没有 DNS 时回滚不许清空它：Some(\"\") 会变成一条真的清空指令"
+        );
+        assert_ne!(
+            applied.dns.as_deref(),
+            Some(""),
+            "回滚绝不能下发「交回自动获取」——那是 -setdnsservers <svc> Empty"
+        );
+    }
+
+#[cfg(test)]
+fn fresh_calls(m: &crate::platform::mock::MockPlatform, mark: usize) -> Vec<Call> {
+    m.calls().into_iter().skip(mark).collect()
+}
+
+    /// 快照**没有**完整 IPv4 时的回滚（切回 DHCP）同样不得清空 DNS —— 这一支是
+    /// v1.8.5 漏掉的那一半，而它恰恰是本机最常走到的分支。
+    ///
+    /// 现场形状：下发前这张卡走 DHCP 且还没租到地址（`before.ipv4 == None`），
+    /// 于是 `restore_snapshot_impl` 走 else 分支。旧的 else 分支调 `set_dhcp()`，
+    /// 三平台的 `set_dhcp()` 都顺带把 DNS 交回自动获取（macOS 上就是
+    /// `-setdnsservers <svc> Empty`）⇒ **真清空**。用户看到的「DNS 变成空的」
+    /// 主要来自这里，而不是 Manual 分支。
+    ///
+    /// A rollback that falls back to DHCP must not clear the name servers either.
+    /// This is the half v1.8.5 missed: the old `set_dhcp()` branch wiped DNS on all
+    /// three platforms, and "DHCP has not leased an address yet" is the common shape.
+    #[test]
+    fn a_rollback_that_falls_back_to_dhcp_never_clears_the_name_servers() {
+        let m = MockPlatform::new();
+        let mark = m.calls().len();
+        let snap = InterfaceStatus {
+            // 地址还没租到 —— 正是 `DHCP was expected to have leased an IPv4
+            // address, but there is none` 那一类失败读回来的形状。
+            ipv4: None,
+            netmask: None,
+            gateway: None,
+            dns: Some(String::new()),
+            ..Default::default()
+        };
+        m.restore_from_snapshot(&snap).unwrap();
+        // Mock 的调用记录是**线程级累积**的（`thread_local!`，`new()` 不清空），
+        // 所以断言只能看这一行之后新增的那些调用。
+        let fresh = fresh_calls(&m, mark);
+        assert!(
+            !fresh.iter().any(|c| matches!(c, Call::SetDhcp)),
+            "回滚不能走 set_dhcp()：三平台它都顺带清空 DNS（-setdnsservers <svc> Empty）"
+        );
+        let applied = fresh
+            .iter()
+            .find_map(|c| match c {
+                Call::ApplyNetwork { cfg } => Some(cfg),
+                _ => None,
+            })
+            .expect("切 DHCP 的回滚也要重新下发网络配置");
+        assert_eq!(applied.mode, Mode::Dhcp, "这一支要切回 DHCP");
+        assert_ne!(
+            applied.dns.as_deref(),
+            Some(""),
+            "回滚绝不能下发「交回自动获取」——那是 -setdnsservers <svc> Empty"
+        );
+    }
+
+    /// 快照里**确实有** DNS 地址时，切 DHCP 那一支的回滚也要把那几台写回去。
+    #[test]
+    fn a_rollback_to_dhcp_restores_the_name_servers_the_snapshot_carried() {
+        let m = MockPlatform::new();
+        let mark = m.calls().len();
+        let snap = InterfaceStatus {
+            ipv4: None,
+            netmask: None,
+            gateway: None,
+            dns: Some("127.0.0.1".into()),
+            ..Default::default()
+        };
+        m.restore_from_snapshot(&snap).unwrap();
+        let applied = fresh_calls(&m, mark)
+            .into_iter()
+            .find_map(|c| match c {
+                Call::ApplyNetwork { cfg } => Some(cfg),
+                _ => None,
+            })
+            .expect("切 DHCP 的回滚要重新下发网络配置");
+        assert_eq!(
+            applied.dns.as_deref(),
+            Some("127.0.0.1"),
+            "快照里有的 DNS 必须原样写回去"
+        );
+    }
+
+    /// 回滚报出去的明细必须与它**实际写进去的**一致。
+    ///
+    /// 这两份判断（`rollback_change` 与 `restore_snapshot_impl`）一旦分叉，
+    /// 用户就会照着一条假的明细去排查 —— 那比不报更糟。
+    #[test]
+    fn the_rollback_report_matches_what_the_rollback_writes() {
+        let cases = [
+            // 快照有完整 IPv4 ⇒ 按静态写回；DNS 空 ⇒ 不碰。
+            (
+                InterfaceStatus {
+                    ipv4: Some("10.20.20.168".into()),
+                    netmask: Some("255.255.255.0".into()),
+                    gateway: Some("10.20.20.20".into()),
+                    dns: Some(String::new()),
+                    v6mode: Some("automatic".into()),
+                    ..Default::default()
+                },
+                "manual",
+                None,
+            ),
+            // 快照没有 IPv4 ⇒ 切 DHCP；DNS 空 ⇒ 不碰。
+            (
+                InterfaceStatus {
+                    dns: Some(String::new()),
+                    v6mode: Some("automatic".into()),
+                    ..Default::default()
+                },
+                "dhcp",
+                None,
+            ),
+            // 快照带着 DNS ⇒ 写回去。
+            (
+                InterfaceStatus {
+                    ipv4: Some("10.20.20.168".into()),
+                    netmask: Some("255.255.255.0".into()),
+                    gateway: Some("10.20.20.20".into()),
+                    dns: Some("127.0.0.1".into()),
+                    ..Default::default()
+                },
+                "manual",
+                Some("127.0.0.1"),
+            ),
+        ];
+        for (snap, want_mode, want_dns) in cases {
+            let m = MockPlatform::new();
+            let mark = m.calls().len();
+            let reported = rollback_change(&snap);
+            m.restore_from_snapshot(&snap).unwrap();
+            let applied = fresh_calls(&m, mark)
+                .into_iter()
+                .find_map(|c| match c {
+                    Call::ApplyNetwork { cfg } => Some(cfg),
+                    _ => None,
+                })
+                .expect("回滚要重新下发网络配置");
+
+            assert_eq!(
+                reported.mode.as_deref(),
+                Some(want_mode),
+                "回滚报的模式要与实际下发的一致: {reported:?}"
+            );
+            assert_eq!(
+                reported.dns.as_deref(),
+                want_dns,
+                "回滚报的 DNS 要与实际下发的一致（空 = 不碰，绝不能说成清空）: {reported:?}"
+            );
+            assert!(
+                !reported.dns_cleared,
+                "回滚永远不该报「DNS 被清空」: {reported:?}"
+            );
+            assert_eq!(
+                applied.dns.as_deref(),
+                want_dns,
+                "实际下发的 DNS 与回滚报的明细不一致: {applied:?}"
+            );
+            assert_eq!(
+                reported.v6mode, snap.v6mode,
+                "IPv6 模式要照快照报出来: {reported:?}"
+            );
+        }
+    }
+
+    /// 反面：快照里**确实有** DNS 地址时，回滚必须把那几台写回去。
+    /// 否则「回滚」把用户的解析器弄丢了 —— 那是同一个 bug 的另一半。
+    #[test]
+    fn a_rollback_restores_the_name_servers_the_snapshot_carried() {
+        let m = MockPlatform::new();
+        let snap = InterfaceStatus {
+            ipv4: Some("10.20.20.168".into()),
+            netmask: Some("255.255.255.0".into()),
+            gateway: Some("10.20.20.20".into()),
+            dns: Some("127.0.0.1".into()),
+            ..Default::default()
+        };
+        m.restore_from_snapshot(&snap).unwrap();
+        let calls = m.calls();
+        let applied = calls
+            .iter()
+            .find_map(|c| match c {
+                Call::ApplyNetwork { cfg } => Some(cfg),
+                _ => None,
+            })
+            .expect("回滚要重新下发网络配置");
+        assert_eq!(
+            applied.dns.as_deref(),
+            Some("127.0.0.1"),
+            "快照里有的 DNS 必须原样写回去 / the snapshot's name servers must come back"
         );
     }
 }

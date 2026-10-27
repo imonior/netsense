@@ -802,16 +802,10 @@ eq("改名字后保存出去的是新名字", p?.name, "Office 5G（工位）");
 eq("id 不跟着名字变（它是主键）", p?.id, "office");
 check("每条规则与条件都带 id（校验要求唯一）", (p?.rules || []).every((r) => r.id && r.conditions.every((c) => c.id)));
 
-group("DNS 三态：缺省 ≠ 空串");
+group("DNS 两态：auto（交回）/ set（指定）");
 resetSaves();
 /* 保存以后编辑器会 `loadAll()` 重读后端那一份（office 的 THEN 是静态的）—— 所以每一次保存前
-   都要把这一支显式设成 DHCP，让 payload 契约稳定地跑在「DHCP + 三态」这条路上。 */
-choose(byBind("then.network.mode"), "dhcp");
-choose(byActPre("dns-tri", "then."), "keep");
-await h.$("btn-save").onclick();
-p = saveOf("save_profile")?.payload;
-check("选「不改」= 整个 dns 字段消失", p && !("dns" in p.then.network), JSON.stringify(p?.then?.network));
-resetSaves();
+   都要把这一支显式设成 DHCP，让 payload 契约稳定地跑在「DHCP + 两态」这条路上。 */
 choose(byBind("then.network.mode"), "dhcp");
 choose(byActPre("dns-tri", "then."), "auto");
 await h.$("btn-save").onclick();
@@ -824,7 +818,7 @@ type(byBind("then.network.dns"), "192.168.1.1, 8.8.8.8");
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 eq("选「指定」= 按输入框的值下发", p?.then?.network?.dns, "192.168.1.1, 8.8.8.8");
-eq("另一分支的三态不被牵连：else 的 dns 仍是「交回系统」",
+eq("另一分支的两态不被牵连：else 的 dns 仍是「交回系统」",
   byActPre("dns-tri", "else.")?.children.find((c) => c.selected)?.value, "auto");
 
 group("「DHCP 提供」这一项在两种 IPv4 模式下都存在");

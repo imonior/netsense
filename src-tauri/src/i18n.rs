@@ -315,4 +315,59 @@ mod tests {
             assert!(drift.is_empty(), "{} 条译文的占位符与 en 不一致: {:?}", drift.len(), drift);
         });
     }
+
+    /// 「已变更」与「未生效、已回滚」必须是**两句不同的话**。
+    ///
+    /// 契约来自 v1.8.5 修掉的一个真缺陷：失败路径上那几项已经被回滚改回去了，
+    /// 弹窗却报「网络配置已变更」—— 用户据此以为自己的静态 IP 还在生效。
+    /// 这条断言把「失败路径不得说成已变更」钉在五语上：谁把两条文案改成一样，
+    /// 这里就红。
+    #[test]
+    fn the_undone_wording_never_says_the_change_landed() {
+        with_dicts(|| {
+            let dicts = DICTS.get().expect("with_dicts 已装好字典");
+            // 每种语言里「回滚」这个词长什么样。失败文案必须带上它 ——
+            // 否则用户看不出「动过但没生效」与「压根没动过」的区别。
+            let rollback_words = [
+                (Language::En, "rolled back"),
+                (Language::Zh, "回滚"),
+                (Language::ZhTw, "回滾"),
+                (Language::Ja, "ロールバック"),
+                (Language::Ko, "되돌"),
+            ];
+            for (lang, word) in rollback_words {
+                let d = dicts
+                    .get(&lang)
+                    .unwrap_or_else(|| panic!("{} 字典缺失", lang.code()));
+                let landed = d
+                    .get("net.change_notice")
+                    .unwrap_or_else(|| panic!("{} 缺 net.change_notice", lang.code()));
+                let undone = d
+                    .get("net.change_undone_notice")
+                    .unwrap_or_else(|| panic!("{} 缺 net.change_undone_notice", lang.code()));
+                assert_ne!(
+                    undone, landed,
+                    "{}: 失败路径的弹窗不能与成功路径同一句话",
+                    lang.code()
+                );
+                assert!(
+                    undone.contains(word),
+                    "{}: 失败文案要说明是回滚（应含 {word}）: {undone}",
+                    lang.code()
+                );
+                // 日志那一句同样不能与成功那句重合。
+                let landed_log = d
+                    .get("net.change")
+                    .unwrap_or_else(|| panic!("{} 缺 net.change", lang.code()));
+                let undone_log = d
+                    .get("net.change_undone")
+                    .unwrap_or_else(|| panic!("{} 缺 net.change_undone", lang.code()));
+                assert_ne!(
+                    undone_log, landed_log,
+                    "{}: 失败路径的日志不能与成功路径同一句话",
+                    lang.code()
+                );
+            }
+        });
+    }
 }

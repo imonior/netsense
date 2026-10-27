@@ -89,6 +89,9 @@ pub enum PrivOp {
         prefix: String,
         gateway: String,
     },
+    SetV6LinkLocal {
+        svc: String,
+    },
     RouteAdd {
         dest: String,
         gateway: String,
@@ -125,6 +128,7 @@ impl PrivOp {
                 prefix,
                 gateway,
             } => format!("setv6manual|{}|{}|{}|{}", svc, addr, prefix, gateway),
+            PrivOp::SetV6LinkLocal { svc } => format!("setv6linklocal|{}", svc),
             PrivOp::RouteAdd {
                 dest,
                 gateway,
@@ -176,6 +180,9 @@ impl PrivOp {
                 sh_q(prefix),
                 sh_q(gateway)
             ),
+            PrivOp::SetV6LinkLocal { svc } => {
+                format!("networksetup -setv6linklocal {}", sh_q(svc))
+            }
             PrivOp::RouteAdd {
                 dest,
                 gateway,
@@ -317,7 +324,7 @@ fn dns_ok(servers: &[String]) -> bool {
 /// -net default <gw>` 之类的写法在 shell 那边有效，白名单却只收 IPv4 / IPv4/len。
 fn allow_list_takes(ops: &[PrivOp]) -> bool {
     ops.iter().all(|o| match o {
-        PrivOp::SetDhcp { svc } | PrivOp::SetV6Off { svc } | PrivOp::SetV6Auto { svc } => {
+        PrivOp::SetDhcp { svc } | PrivOp::SetV6Off { svc } | PrivOp::SetV6Auto { svc } | PrivOp::SetV6LinkLocal { svc } => {
             slot_ok(svc)
         }
         PrivOp::SetManual {
@@ -673,6 +680,7 @@ fn apply_ops(svc: &str, p: &NetworkConfig) -> Result<Vec<PrivOp>, String> {
     match p.v6mode {
         Some(V6Mode::Off) => ops.push(PrivOp::SetV6Off { svc: svc.to_string() }),
         Some(V6Mode::Automatic) => ops.push(PrivOp::SetV6Auto { svc: svc.to_string() }),
+        Some(V6Mode::LinkLocal) => ops.push(PrivOp::SetV6LinkLocal { svc: svc.to_string() }),
         Some(V6Mode::Manual) => {
             let addr = p
                 .ipv6

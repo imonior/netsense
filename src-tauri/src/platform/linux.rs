@@ -778,6 +778,10 @@ fn con_mod_props(p: &NetworkConfig) -> Result<Vec<String>, String> {
             mods.push("ipv6.method".into());
             mods.push("auto".into());
         }
+        Some(V6Mode::LinkLocal) => {
+            mods.push("ipv6.method".into());
+            mods.push("link-local".into());
+        }
         Some(V6Mode::Manual) => {
             let addr = p
                 .ipv6
@@ -840,6 +844,7 @@ impl NetworkPlatform for LinuxPlatform {
         st.v6mode = get_field(&dev, "IP6.METHOD").map(|m| match m.as_str() {
             "auto" => "automatic".to_string(),
             "manual" => "manual".to_string(),
+            "link-local" => "linklocal".to_string(),
             "disabled" | "ignore" => "off".to_string(),
             other => other.to_string(),
         });
@@ -910,6 +915,7 @@ impl NetworkPlatform for LinuxPlatform {
             p.v6mode.as_ref().map(|m| match m {
                 V6Mode::Off => "disabled",
                 V6Mode::Automatic => "auto",
+                V6Mode::LinkLocal => "link-local",
                 V6Mode::Manual => "manual",
             }),
             p.ipv6.as_deref(),

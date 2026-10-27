@@ -207,6 +207,10 @@ exec_op() {
             need_service "$1"; [ $# -eq 1 ] || die "setv6auto arg count"
             networksetup -setv6automatic "$1"
             ;;
+        setv6linklocal)
+            need_service "$1"; [ $# -eq 1 ] || die "setv6linklocal arg count"
+            networksetup -setv6linklocal "$1"
+            ;;
         setv6manual)
             need_service "$1"; [ $# -eq 4 ] || die "setv6manual arg count"
             is_ipv6 "$2"   || die "bad ipv6: $2"

@@ -508,6 +508,43 @@ Key modelling points, each of which is easy to get wrong:
   same `target` and re-adds the routes that existed before the profile ran, so rollback never deletes a
   route owned by the OS or another app. When the snapshot has no static IP it degrades to DHCP (same
   path as the health fallback). A verify-after-rollback step is still a future hardening (see §14).
+- **Rollback must not clear the DNS** (fixed in v1.8.5). The snapshot's `dns` is replayed as
+  `NetworkConfig.dns`, and `dns: Some("")` is a **real clearing instruction** on every platform
+  (macOS: `networksetup -setdnsservers <svc> Empty`). That value is exactly what macOS reports for
+  an interface that has **no *manual* name servers**: `networksetup -getdnsservers` answers
+  `There aren't any DNS Servers set on <svc>.` for a DHCP interface, while the DNS it actually uses
+  is handed down by DHCP — and the user's own resolver (e.g. a local DNS proxy on `127.0.0.1`) lives
+  in that *manual* list. Replaying the empty value therefore wiped both, leaving the machine with
+  no name server at all and no way back. The rule: **a snapshot without name servers leaves DNS
+  untouched during rollback**; only a snapshot that actually carries them restores them.
+
+### 7.1 The change list: every write to the system is logged and announced
+
+`Stage3A` carries a `NetworkChange` — **which parameters this round actually wrote**: addressing
+mode, IP, netmask, gateway, DNS, IPv6 mode, static routes added/removed. `engine::announce_change`
+puts it in the log **and** raises it as a toast (`netsense://action`, kind `network`), and the two
+carry the *same sentence* — a user comparing the log against the panel must not read two different
+accounts of one change.
+
+Why this exists: "Applied profile JYH" says what the **engine decided**; it does not say what the
+**system** was made to look like. When something else on the machine keeps rewriting the network
+(the usual suspect list: a VPN client, a proxy, a DHCP client), the only way to tell them apart is
+a log that spells out the actual parameters — and a panel that says so out loud rather than only
+writing it down.
+
+Two rules keep the signal trustworthy:
+
+- **DNS is three-valued.** `dns` absent = *not touched*; `dns: ""` = **actually cleared**
+  (macOS: `networksetup -setdnsservers <svc> Empty`); `dns: "1.1.1.1"` = written to those servers.
+  Collapsing "not touched" into "cleared" would raise a false alarm on every round, and a user who
+  has learned to ignore the alarm stops seeing the real one.
+- **An empty change list says nothing.** When the pre-apply diff finds the system already compliant,
+  3A skips the apply entirely; the change list is then empty and **no** toast is raised. "The network
+  changed" must be the negation of a lie.
+
+The paths that change the network *without* going through `apply_3a` are announced too, because they
+are exactly the ones a user cannot predict: `set_dhcp()` (manual button, health fallback, 3A degrade)
+also hands DNS back to automatic on macOS, so it reports `dns_cleared`.
 
 ---
 
@@ -929,7 +966,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **644 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **677 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，

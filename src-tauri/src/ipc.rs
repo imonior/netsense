@@ -1491,7 +1491,28 @@ fn pick_install_asset(
     } else {
         "other"
     };
+    pick_install_asset_for(release, assets, sums, goos, goarch)
+}
 
+/// [`pick_install_asset`] 的平台无关版本：平台由调用方给定。
+///
+/// 为什么要抽出来：上面那个函数用 `cfg!(target_arch)` 推导平台，于是**它挑什么包
+/// 取决于测试跑在哪台机器上**。一条想验证「清单不可达不该让安装包消失」的用例，
+/// 若直接调它，就得在 ARM64 Linux 上准备 arm64 资产、在 x86_64 上准备 x64 资产 ——
+/// 用例于是只在一种架构上成立，换条 CI 腿就红（v1.8.4 的 linux-arm64 腿就是这么红的：
+/// 243 passed / 1 failed，挂在「取不到校验清单不该让安装包消失」上）。
+///
+/// 把平台提成参数后，**任何一条 CI 腿上跑的都是同一份输入**，用例断言的才是
+/// 「逻辑对不对」，而不是「这台机器的架构是什么」。
+///
+/// 生产路径的行为一字未变：上面那个函数仍然按 `cfg!` 推导平台后转调这里。
+fn pick_install_asset_for(
+    release: &serde_json::Value,
+    assets: &[serde_json::Value],
+    sums: Option<&str>,
+    goos: &str,
+    goarch: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<u64>) {
     let best = pick_verified_asset(assets, goos, goarch, sums);
 
     let checksum_url = release["assets"]
@@ -2146,7 +2167,7 @@ mod tests {
     use super::{
         asset_matches, install_verdict, installable_ext, is_plausible_ip, mark_mainland, parse_ipapi,
         parse_ipify, parse_ipip, parse_ipsb, parse_ipwho, pick_asset_for, pick_install_asset,
-        pick_verified_asset, platform_of, token_anchored, Sums,
+        pick_install_asset_for, pick_verified_asset, platform_of, token_anchored, Sums,
     };
     use serde_json::json;
 
@@ -2334,11 +2355,46 @@ mod tests {
         );
     }
 
+    /// 平台无关版本（[`pick_install_asset_for`]）与按 `cfg!` 推导平台的那个
+    /// （[`pick_install_asset`]）必须给出**同一个答案** —— 抽参数那一步最容易出的错
+    /// 就是「测试里走新函数、生产里走旧函数」，两边的行为悄悄分叉。
+    ///
+    /// 这条用例因此**故意**用两个入口跑同一份资产：断言两者挑中的名字一致。
+    /// 它跑在哪台机器上都成立（两边的平台推导规则相同），不依赖架构。
+    #[test]
+    fn the_platform_agnostic_picker_agrees_with_the_cfg_derived_one() {
+        let assets = shipped_assets();
+        let release = json!({
+            "assets": [{ "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }]
+        });
+        let (_dl, via_cfg, _cu, _s) = pick_install_asset(&release, &assets, None);
+        // 按本机 cfg! 推出的平台，取同一份资产：两边要么都挑得到同一个，要么都挑不到。
+        let (goos, goarch) = if cfg!(target_os = "macos") {
+            ("macos", if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" })
+        } else if cfg!(target_os = "windows") {
+            ("windows", "x86_64")
+        } else {
+            ("linux", if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" })
+        };
+        let (_dl2, via_explicit, _cu2, _s2) =
+            pick_install_asset_for(&release, &assets, None, goos, goarch);
+        assert_eq!(
+            via_cfg, via_explicit,
+            "{goos}/{goarch}: 两个入口必须给出同一个答案"
+        );
+    }
+
     /// 用户现场回归（v1.7.1，64 位 Windows + x64 构建）：直连取 SHA256SUMS 失败曾被界面
     /// 说成「当前平台没有可安装的安装包」—— x64 安装包其实已经挑中，坏的只是校验清单那一跳。
     /// Field report (v1.7.1, 64-bit Windows, x64 build): an unreachable SHA256SUMS used to
     /// surface as "no installable package for this platform" although the installer itself
     /// had been picked all along.
+    ///
+    /// ⚠️ 平台是**写死**的（windows / x86_64），不是「按跑测试的这台机器算」。
+    /// 这条用例一开始调的是那个按 `cfg!(target_arch)` 推导平台的函数，于是它在 x86_64 上
+    /// 过、在 ARM64 Linux 上红（v1.8.4 的 linux-arm64 腿：243 passed / 1 failed）——
+    /// 那条腿的资产表里只有 `amd64.deb`，而 ARM64 上要找的是 arm64 包，于是「安装包消失」
+    /// 成了架构的产物，而不是逻辑的产物。平台提成参数后，每条 CI 腿跑的输入都一样。
     #[test]
     fn an_unreachable_checksum_manifest_does_not_hide_the_installer() {
         let assets = shipped_assets();
@@ -2346,15 +2402,57 @@ mod tests {
             "assets": [{ "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }]
         });
         // 预检没拿到正文（线上：直连与镜像都失败 → `Sums::Unreachable` → `text()` 为 None）。
-        let (dl, name, cu, _size) = pick_install_asset(&release, &assets, None);
-        // 不管跑在哪个平台（本测试在任何 CI 腿上都执行），资产都必须挑得到。
+        let (dl, name, cu, _size) =
+            pick_install_asset_for(&release, &assets, None, "windows", "x86_64");
+        // 资产在、清单下不到：安装包必须照样挑得到。
         assert!(name.is_some(), "取不到校验清单不该让安装包消失: {name:?}");
         assert!(dl.is_some() && cu.is_some(), "链接该在: {:?}", (dl, cu));
-        // 资产在、清单下不到：判定必须说「校验清单下不到」，而不是「没有可安装的包」。
+        // 判定必须说「校验清单下不到」，而不是「没有可安装的包」。
         assert_eq!(
             install_verdict(false, dl.as_ref(), name.as_ref(), cu.as_ref(), &Sums::Unreachable),
             Some("sums_unreachable")
         );
+    }
+
+    /// 同一件事的**架构无关**版本：Windows 上有 nsis/msi 两个候选，Linux 上只有 deb。
+    /// 这条用例把「清单下不到」在几个平台上各跑一遍，确认**没有任何一个平台**会因此
+    /// 把安装包报成「不存在」。
+    ///
+    /// 之前只有 windows+x86_64 一条，于是 ARM64 Linux 这条腿上没有覆盖 ——
+    /// 而恰恰是它（第一个真正跑起来的 arm64 腿）暴露了那条平台依赖。
+    #[test]
+    fn an_unreachable_manifest_never_hides_an_installer_on_any_platform() {
+        let release = json!({
+            "assets": [{ "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }]
+        });
+        // 每个平台一份「那个平台真会发的资产」，形状取自发布页上真实存在的名字。
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("windows", "x86_64", &["NetSense_1.0.3_x64-setup.exe"]),
+            ("windows", "arm64", &["NetSense_1.0.3_arm64-setup.exe"]),
+            ("windows", "x86", &["NetSense_1.0.3_x86-setup.exe"]),
+            ("macos", "arm64", &["NetSense_1.0.3_aarch64.dmg"]),
+            ("macos", "x86_64", &["NetSense_1.0.3_x64.dmg"]),
+            ("linux", "x86_64", &["NetSense_1.0.3_amd64.deb"]),
+            ("linux", "arm64", &["NetSense_1.0.3_arm64.deb"]),
+        ];
+        for (goos, goarch, names) in cases {
+            let assets: Vec<serde_json::Value> = names
+                .iter()
+                .map(|n| json!({ "name": n, "url": format!("https://example.invalid/{n}") }))
+                .collect();
+            let (dl, name, cu, _) =
+                pick_install_asset_for(&release, &assets, None, goos, goarch);
+            assert!(
+                name.is_some(),
+                "{goos}/{goarch}: 取不到校验清单不该让安装包消失: {name:?}"
+            );
+            assert!(dl.is_some() && cu.is_some(), "{goos}/{goarch}: 链接该在");
+            assert_eq!(
+                install_verdict(false, dl.as_ref(), name.as_ref(), cu.as_ref(), &Sums::Unreachable),
+                Some("sums_unreachable"),
+                "{goos}/{goarch}: 判定必须说「清单下不到」"
+            );
+        }
     }
 
     /// 用户现场的精确形状：windows + x86_64。`pick_asset_for` 是纯函数，所以这条在
@@ -2401,6 +2499,46 @@ mod tests {
         );
         // 真正没有候选时仍然是 None —— 上面几条放宽的不是这一条。
         assert_eq!(pick_verified_asset(&assets, "windows", "arm64", None), None);
+    }
+
+    /// 回归防护：CI 的 7 条腿分属 3 个 OS × 4 个架构。**任何一条断言「挑到了某个包」
+    /// 的用例，若它的平台是按 `cfg!` 推导的，就只在那一条腿上成立** ——
+    /// v1.8.4 的 linux-arm64 腿就是这样红的（243 passed / 1 failed，挂在
+    /// 「取不到校验清单不该让安装包消失」上：ARM64 上要找 arm64 包，
+    /// 而那份资产表里只有 `amd64.deb`）。
+    ///
+    /// 这条用例把「平台由谁决定」这件事变成可断言的：挑选逻辑的入口分成两层 ——
+    /// `pick_install_asset`（按 `cfg!` 推导，生产用）与 `pick_install_asset_for`
+    /// （平台由调用方给定，测试用）。断言这个分层**存在且两边一致**，
+    /// 于是「有人又把测试改回依赖 `cfg!`」会在本机就被看见。
+    #[test]
+    fn the_platform_is_a_parameter_not_a_property_of_the_test_machine() {
+        let assets = shipped_assets();
+        let release = json!({
+            "assets": [{ "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }]
+        });
+        // 每个平台都必须能用自己的资产挑到包 —— 不论这条用例跑在哪台机器上。
+        for (goos, goarch, expected) in [
+            ("windows", "x86_64", "NetSense_1.0.3_x64-setup.exe"),
+            ("macos", "arm64", "NetSense_1.0.3_aarch64.dmg"),
+            ("macos", "x86_64", "NetSense_1.0.3_x64.dmg"),
+            ("linux", "x86_64", "NetSense_1.0.3_amd64.deb"),
+        ] {
+            let (_, name, _, _) =
+                pick_install_asset_for(&release, &assets, None, goos, goarch);
+            assert_eq!(
+                name.as_deref(),
+                Some(expected),
+                "{goos}/{goarch}: 平台是参数，挑选结果不该随跑测试的机器变"
+            );
+        }
+        // 平台写死成 arm64 时，arm64 的包挑不到就是挑不到（资产表里确实没有）——
+        // 这与「跑在 ARM64 机器上」是两件不同的事，不该混为一谈。
+        assert_eq!(
+            pick_install_asset_for(&release, &assets, None, "linux", "arm64").1,
+            None,
+            "资产表里没有 arm64 的包，挑不到是对的"
+        );
     }
 
     /// 1.0.3 那次发布里真实存在的资产。名字里**没有** OS token：只按 token 认平台

@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 644 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 677 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -135,8 +135,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `netsense://status` | `status_payload`（见下） | 每次评估结束、配置落盘/热重载、语言切换、动作完成；编辑器还比对载荷里的 `config_rev`，据此决定要不要整趟重读（见「广播何时会重建表单」） |
 | `netsense://evaluation` | `EngineView` | 引擎刚做完一轮评估（编辑器据此刷新徽标），3B1 每交回**一条**动作结果，以及 3B2 worker 每报出一次**状态变化**（连续两次相同结果不会重发） |
 | `netsense://conflict` | `{ profiles: [name] }` | **每个冲突事件只发一次**（引擎按 Profile 的 **id 集合**签名去重，换了名字也不重发；payload 里给的是展示名），前端弹窗 |
-| `netsense://action` | `{ kind, ok, message }` | `kind` 为 `apply` / `dhcp` / `probe`（这三条来自手动入口 —— 命令本身只是把请求排进队列）或 `monitor`（健康度监测自动回落 DHCP，没有人点过任何按钮）。**逐条动作的进度不在这里**，在 `evaluation` 的 `last_run` |
-| `netsense://applied` | `{ profile, fallback, mode, ip, netmask, gateway, dns, routes, ssid, iface }` | **自动化成功应用了一个配置**：首评、网络指纹变化、配置内容变化这三种来路之一，且 3A 成功（含「本就满足、跳过下发」）。`profile = null` + `fallback = true` 表示零命中兜底；`mode` / `ip` 等地址字段为 `null` 时前端整行隐藏。轮询中没有任何规则触发改变时后端**不发**此事件（`decide_plan` 直接返回 `None`），面板据此弹「配置已应用」模态框，并把自己叫到前台 |
+| `netsense://action` | `{ kind, ok, message }` | `kind` 为 `apply` / `dhcp` / `probe`（这三条来自手动入口 —— 命令本身只是把请求排进队列）、`monitor`（健康度监测自动回落 DHCP，没有人点过任何按钮）或 `network`（**每一次对系统的网络写入**：`apply_3a` 下发的地址/DNS/路由、`set_dhcp` 的回落与 DNS 交回自动）。`kind = network` 的 `message` 说清「改了哪几项」，与日志里那一行是**同一句话**；什么也没改时不发此事件。**逐条动作的进度不在这里**，在 `evaluation` 的 `last_run` |
+| `netsense://applied` | `{ profile, fallback, ssid, iface, success, restored, nochange, groups, note? }` | **自动化应用了一个配置的结果弹窗**（只报最终结果）：首评、网络指纹变化、配置内容变化这三种来路之一，且 3A 有结果。`profile = null` + `fallback = true` 表示零命中兜底。`groups` 是**分组清单**（IPv4 / IPv6 / DNS / 系统），每行 `{ label, value, ok, detail }`：`ok = true|false` 是该项成败，`ok = null` 是系统身份行（没有成败可言）；`detail` 只在失败行上出现（快照恢复成功时写「已回滚，未生效」，恢复失败时**留空** —— 那时写入状态未知，不谎报）。`success` 是整体成败，`restored` 只在失败路径上有意义（快照恢复本身成没成功），`nochange = true` 表示这一轮一分写入都没有（系统本就合规 / THEN 缺省），`note` 是降级附注（成功）或失败原因（失败）。轮询中没有任何规则触发改变时后端**不发**此事件（`decide_plan` 直接返回 `None`），面板据此弹结果模态框，并把自己叫到前台 |
 | `netsense://update_progress` | `{ phase, percent }` | 在线升级：`download` / `refresh` / `install` |
 
 **广播何时会重建表单。** 编辑器只在**会换掉整片字段**的变化后重建表单：切换选中项、增删条目、

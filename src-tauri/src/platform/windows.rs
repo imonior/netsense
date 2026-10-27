@@ -858,6 +858,7 @@ enum WinOp {
         prefix: String,
         gw: String,
     },
+    SetV6LinkLocal { iface: String },
     RouteAdd {
         iface: String,
         dest: String,
@@ -906,6 +907,21 @@ impl WinOp {
                  psq(addr),
                  psq(prefix),
                  psq(gw)
+            ),
+            // 仅链路本地：启用 ms_tcpip6 绑定（fe80 随之存在），但关闭 RA 处理 /
+            // 受管地址配置 / 其它有状态配置 / DHCPv6 —— 于是拿不到任何全局地址、也没有
+            // 默认路由。先清掉已存在的非链路本地地址，避免上次 manual / 租来的全局地址残留。
+            // Link-local only: keep the ms_tcpip6 binding (so fe80 survives) but turn off RA
+            // processing / managed-address / other-stateful / DHCPv6 — leaving no global address
+            // and no default route. Any pre-existing non-link-local address is removed first.
+            WinOp::SetV6LinkLocal { iface } => format!(
+                "Get-NetIPAddress -InterfaceAlias {} -AddressFamily IPv6 -ErrorAction SilentlyContinue \
+                   | Where-Object {{ $_.PrefixOrigin -ne 'WellKnown' }} | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue;\
+                 Enable-NetAdapterBinding -Name {} -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue;\
+                 Set-NetIPInterface -InterfaceAlias {} -AddressFamily IPv6 -RouterDiscovery Disabled -ManagedAddressConfiguration Disabled -OtherStatefulConfiguration Disabled -Dhcp Disabled -ErrorAction Stop;",
+                psq(iface),
+                psq(iface),
+                psq(iface)
             ),
             WinOp::RouteAdd {
                 iface,
@@ -1016,6 +1032,9 @@ fn apply_ops(iface: &str, p: &NetworkConfig) -> Result<Vec<WinOp>, String> {
             iface: iface.to_string(),
         }),
         Some(V6Mode::Automatic) => ops.push(WinOp::SetV6Auto {
+            iface: iface.to_string(),
+        }),
+        Some(V6Mode::LinkLocal) => ops.push(WinOp::SetV6LinkLocal {
             iface: iface.to_string(),
         }),
         Some(V6Mode::Manual) => {

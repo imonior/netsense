@@ -88,6 +88,17 @@ pub enum V6Mode {
     #[default]
     Automatic,
     Manual,
+    /// 仅链路本地：只保留 `fe80::/64`，不做 SLAAC、不收 RA、不跑 DHCPv6，
+    /// 因此拿不到任何全局地址，也没有默认路由。三平台语义一致：
+    /// macOS = `networksetup -setv6linklocal`；Linux(NM) = `ipv6.method=link-local`；
+    /// Windows = 启用 ms_tcpip6 绑定并关掉 RouterDiscovery / ManagedAddressConfiguration /
+    /// OtherStatefulConfiguration / DHCPv6。
+    /// Link-local only: keep `fe80::/64`, no SLAAC, no RA processing, no DHCPv6 — hence no
+    /// global address and no default route. Same semantics on all three platforms:
+    /// macOS `networksetup -setv6linklocal`; Linux(NM) `ipv6.method=link-local`; Windows
+    /// enables the ms_tcpip6 binding and turns off RouterDiscovery / ManagedAddressConfiguration
+    /// / OtherStatefulConfiguration / DHCPv6.
+    LinkLocal,
     Off,
 }
 

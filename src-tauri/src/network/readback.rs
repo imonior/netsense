@@ -155,6 +155,7 @@ pub fn check(got: &InterfaceStatus, want: &NetworkConfig) -> Result<(), VerifyFa
             V6Mode::Off => "off",
             V6Mode::Automatic => "automatic",
             V6Mode::Manual => "manual",
+            V6Mode::LinkLocal => "linklocal",
         };
         if got_v6.trim() != want_s {
             mismatches.push(mismatch("v6mode", want_s, Some(got_v6.trim())));
