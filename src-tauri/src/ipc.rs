@@ -2368,13 +2368,26 @@ mod tests {
             "assets": [{ "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }]
         });
         let (_dl, via_cfg, _cu, _s) = pick_install_asset(&release, &assets, None);
-        // 按本机 cfg! 推出的平台，取同一份资产：两边要么都挑得到同一个，要么都挑不到。
-        let (goos, goarch) = if cfg!(target_os = "macos") {
-            ("macos", if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" })
+        // 显式侧的平台必须和 `pick_install_asset` 内部按 `cfg!` 推出的**逐字一致**，
+        // 否则在 32 位 x86 或 ARM64 Windows 这类「非 x86_64」的构建腿上，cfg 侧推出
+        // `x86` / `arm64`，而这里若写死 `x86_64`，两边挑中的名字就不同 —— 这条用例
+        // 本来要在任意架构的 CI 腿上都成立，却反过来依赖了架构（v1.8.5 的 windows-x86
+        // 腿就栽在这）。所以这里照搬上面的推导规则。
+        let goos = if cfg!(target_os = "macos") {
+            "macos"
         } else if cfg!(target_os = "windows") {
-            ("windows", "x86_64")
+            "windows"
         } else {
-            ("linux", if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" })
+            "linux"
+        };
+        let goarch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else if cfg!(target_arch = "x86") {
+            "x86"
+        } else {
+            "other"
         };
         let (_dl2, via_explicit, _cu2, _s2) =
             pick_install_asset_for(&release, &assets, None, goos, goarch);
