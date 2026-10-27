@@ -28,6 +28,8 @@ pub const MAIN_LABEL: &str = "main";
 pub const SETTINGS_LABEL: &str = "settings";
 /// 日志窗口 label。
 pub const LOGS_LABEL: &str = "logs";
+/// 「配置已应用」结果弹窗窗口 label（独立于编辑器 / 托盘面板 / 设置 / 日志之外的第五扇窗）。
+pub const APPLIED_LABEL: &str = "applied";
 
 /// 失焦收起后忽略托盘点击的时间窗口，避免"点一下反而先关后开"。
 const REOPEN_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -51,7 +53,7 @@ fn last_anchor() -> &'static Mutex<Option<(f64, f64)>> {
     LAST.get_or_init(|| Mutex::new(None))
 }
 
-/// 记下本次开合面板的锚点，供 [`show`] 复用。
+/// 记下本次开合面板的锚点，供 `toggle` 与 `show_applied` 复用。
 pub fn note_anchor(anchor: Option<(f64, f64)>) {
     *last_anchor().lock().unwrap_or_else(|e| e.into_inner()) = anchor;
 }
@@ -94,20 +96,24 @@ pub fn toggle(app: &AppHandle, anchor: Option<(f64, f64)>) {
     let _ = win.set_focus();
 }
 
-/// 把面板叫出来（不切换）：自动化刚应用了一个配置时，让用户看见弹窗。
+/// 把「配置已应用」结果弹窗窗口叫出来（独立于托盘面板 / 编辑器之外的一扇窗）。
 ///
-/// 与 [`toggle`] 的分工：toggle 是用户的显式开合，这个只负责「该被看见的时候它在」。
-/// 已可见时什么都不做 —— 不重摆位置：用户可能刚把它拖到别处，拖到一半被拽回去比不摆更烦。
-/// 也不抢焦点：面板本身置顶，露出来就够了；从用户手里抢焦点是托盘常驻进程最惹人烦的那件事。
-/// 锚点用上一次点托盘时记下的那个（见 [`note_anchor`]），从没点过就退化为左上角。
-pub fn show(app: &AppHandle) {
-    let Some(win) = app.get_webview_window(POPUP_LABEL) else {
+/// 与托盘面板的关键区别：
+///   - 它**常驻置顶**（`tauri.conf.json` 里 `alwaysOnTop`），任何时候都浮在最上面，
+///     不依赖编辑器是否打开、不依赖用户有没有点过托盘 —— 用户盯着哪扇窗都能看见这次应用的结果。
+///   - 它**不抢焦点**：只 `show()`、绝不 `set_focus()`。从用户手里夺走输入/鼠标焦点是
+///     托盘常驻进程最惹人烦的那件事，一个纯展示用的结果回执更没理由这么做。
+///
+/// 定位复用上一次点托盘记下的锚点（见 `note_anchor`）；从没点过（`None`）退化为左上角兜底。
+pub fn show_applied(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(APPLIED_LABEL) else {
         crate::log::warn(&crate::i18n::tf(
             "app.window_missing",
-            &[("label", POPUP_LABEL)],
+            &[("label", APPLIED_LABEL)],
         ));
         return;
     };
+    // 已经开着就别重摆：用户可能把它拖到别处，拽回去比不摆更烦（同 `toggle`）。
     if win.is_visible().unwrap_or(false) {
         return;
     }

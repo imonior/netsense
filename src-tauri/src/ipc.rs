@@ -362,6 +362,19 @@ pub fn close_log_viewer(state: State<'_, std::sync::Arc<AppState>>) {
     }
 }
 
+/// 隐藏「配置已应用」结果弹窗窗口（用户点「关闭」时调用，不退出应用）。
+///
+/// 这扇窗独立于编辑器 / 托盘面板之外，常驻置顶、不抢焦点；点关闭只是把它收起来，
+/// 下一轮应用会再次由 `emit_applied` 把它叫出来。
+#[tauri::command]
+pub fn close_applied(state: State<'_, std::sync::Arc<AppState>>) {
+    if let Some(app) = state.app.get() {
+        if let Some(w) = app.get_webview_window(crate::popup::APPLIED_LABEL) {
+            let _ = w.hide();
+        }
+    }
+}
+
 /// 前端读取已保存无线网络列表（填充编辑器下拉）。
 ///
 /// `async` 不是可选项：`list_known_ssids` 会拉起系统子进程（macOS 上
@@ -536,6 +549,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         silent_execution,
         update_mirror,
         dns_fallback,
+        show_applied_popup,
     ) = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -547,6 +561,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
             s.silent_execution,
             s.update_mirror.clone(),
             s.dns_fallback.clone(),
+            s.show_applied_popup,
         )
     };
     let (autostart_on, autostart_error) = match crate::appconfig::autostart_enabled() {
@@ -624,6 +639,9 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         // 带 `skip_serializing_if`，空列表会被整个省略，界面就得处理第三种状态。
         "dns_fallback_enabled": dns_fallback.enabled,
         "dns_fallback_servers": dns_fallback.servers.join(","),
+        // 应用后是否弹结果弹窗：默认开启；前端把它做成一个开关，关掉后自动与手动
+        // 两条应用路径都不再弹 `netsense://applied` 弹窗（仍走 toast）。
+        "show_applied_popup": show_applied_popup,
     });
     serde_json::to_string(&payload).unwrap_or_default()
 }
@@ -686,6 +704,24 @@ pub fn set_silent_execution(
     }
     crate::state::publish_status(state.inner());
     Ok(crate::platform::priv_channel().code().to_string())
+}
+
+/// 切换「应用配置后是否弹结果弹窗」。默认开启；关掉后自动与手动两条应用路径都不再弹
+/// `netsense://applied` 弹窗（仍走 toast）。它只改偏好，不触及任何网络的匹配与下发内容。
+#[tauri::command(async)]
+pub fn set_show_applied_popup(
+    state: State<'_, std::sync::Arc<AppState>>,
+    enable: bool,
+) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = s.clone();
+        next.show_applied_popup = enable;
+        next.save(&state.settings_path)?;
+        *s = next;
+    }
+    crate::state::publish_status(state.inner());
+    Ok(())
 }
 
 /// 设「安装包从哪儿下」：空串 = 直连 GitHub，其余 = 前缀式镜像地址。

@@ -2164,6 +2164,9 @@ impl NetworkPlatform for MacPlatform {
             NetworkTarget::Wifi => wifi_service().ok_or_else(|| i18n::t("pal.no_wifi_service"))?,
             NetworkTarget::Ethernet => ethernet_service().ok_or_else(|| i18n::t("pal.no_ethernet_service"))?,
         };
+        // 落到哪一张网络服务：排查「改错了网卡」时这是第一步 —— 用户常以为改的是 Wi-Fi，
+        // 实际命中的是那张以太网服务。debug 档才出，避免默认档被适配器名刷屏。
+        crate::log::debug(&i18n::tf("net.apply_adapter", &[("adapter", &svc)]));
         exec_ops(&apply_ops(&svc, p)?)
     }
 

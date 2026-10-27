@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NetSense</title>
+  <link rel="stylesheet" href="theme.css">
+  <style>
+    /* 结果弹窗是一扇**独立**窗口：不挂在编辑器、托盘面板、设置或日志任何一扇里。
+       它常驻置顶、出现时不抢焦点 —— 用户盯着哪扇窗都能看见，又不会被它夺走输入。 */
+    :root {
+      --card: var(--t-card);
+      --line: var(--t-line);
+      --fg: var(--t-fg);
+      --muted: var(--t-fg-dim);
+      --accent: var(--t-accent);
+      --ok: var(--t-ok);
+      --warn: var(--t-warn);
+      --err: var(--t-err);
+      --on-accent: var(--t-on-accent);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--card); color: var(--fg);
+      font: 12px/1.3 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      border: 1px solid var(--line); border-radius: var(--t-r-md);
+      /* 整扇窗就是这张弹窗：本体不滚，只有中间的清单滚，让标题与关闭按钮永远看得见。 */
+      display: flex; flex-direction: column; overflow: hidden; padding: 11px 12px;
+    }
+    h3 { margin: 0 0 6px; font-size: 13px; }
+    h3.ok { color: var(--ok); }
+    h3.err { color: var(--err); }
+    /* 清单区内部滚动：内容再多也不把「关闭」挤出可视区（同面板弹窗的约束）。 */
+    .ap-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+    .ap-foot { flex: none; }
+    .ap-foot-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+    .ap-foot-row .ap-time { text-align: left; color: var(--muted); font-size: 11px; }
+    .ap-foot-row button {
+      flex: none; padding: 5px 16px; font-size: 12px; border-radius: var(--t-r-sm);
+      cursor: pointer; border: 1px solid var(--accent);
+      background: var(--accent); color: var(--on-accent);
+    }
+    .mv { font-size: 11px; color: var(--muted); line-height: 1.5; }
+    /* 分组清单（IPv4 / IPv6 / DNS / 动作 / 系统）：标签在左、值右对齐、每行 ✅/❌，
+       失败行下有红色明细，底部错误行 + 时间戳。行距按「紧凑」定，一次能看到尽量多的条目。 */
+    .ap-g { color: var(--accent); font-size: 11px; font-weight: 600; margin: 4px 0 1px; }
+    .ap-g:first-child { margin-top: 0; }
+    .ap-list { border: 1px solid var(--line); border-radius: var(--t-r-sm); overflow: hidden; }
+    .ap-item { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 2px 8px; line-height: 1.3; }
+    .ap-item + .ap-item { border-top: 1px solid var(--line); }
+    .ap-label { color: var(--muted); flex: none; }
+    .ap-val { color: var(--fg); font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ap-mark { flex: none; }
+    /* 动作组状态色：成功 / 失败 / 进行中 / 逾期，不压成一个红绿。 */
+    .ap-mark.ap-ok { color: var(--ok); }
+    .ap-mark.ap-err { color: var(--err); }
+    .ap-mark.ap-wait { color: var(--warn); }
+    .ap-mark.ap-warn { color: var(--warn); }
+    /* 明细两态不同色：网络下发失败行的「已回滚，未生效」= 红；动作失败行 = 琥珀。 */
+    .ap-detail { color: var(--err); font-size: 11px; padding: 0 8px 2px; line-height: 1.25; word-break: break-word; }
+    .ap-detail.ap-act { color: var(--warn); }
+    .ap-err { color: var(--err); font-size: 11px; margin-top: 6px; word-break: break-word; }
+    .ap-note { color: var(--warn); font-size: 11px; margin-top: 6px; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <h3 id="ap-title"></h3>
+  <div class="ap-body" id="ap-body"></div>
+  <div class="ap-foot" id="ap-foot"></div>
+
+  <script>
+    const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
+    const invoke = (cmd, args) => {
+      if (!hasTauri()) return Promise.reject(new Error("no tauri bridge"));
+      return window.__TAURI__.core.invoke(cmd, args);
+    };
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    let strings = {};
+    const t = (k, d) => strings[k] || d || k;
+
+    /// 弹窗当前状态。`base` 是 `netsense://applied` 的载荷；`actions` / `workers`
+    /// 来自后续的 `netsense://evaluation`（3B1 逐条结果 / 3B2 实时状态）。
+    let apState = null;
+
+    /// 收到应用结果：记住这一轮的载荷，动作结果陆续到达时重画同一张弹窗。
+    function renderApplied(d) {
+      apState = { base: d || {}, actions: null, workers: null };
+      renderAppliedNow();
+    }
+
+    /// 3B2 常驻动作的状态 → 标记（五态不压成一个红绿）。
+    function apWorkerMark(state) {
+      switch (state) {
+        case "pending": return { mark: "⏳", cls: "ap-wait" };
+        case "satisfied": return { mark: "✅", cls: "ap-ok" };
+        case "repaired": return { mark: "✅", cls: "ap-ok" };
+        case "faulted": return { mark: "❌", cls: "ap-err" };
+        case "overdue": return { mark: "❗", cls: "ap-warn" };
+        default: return { mark: "", cls: "" };
+      }
+    }
+
+    /// 画当前这一版弹窗（网络清单 + 动作结果 + 时间戳）。
+    function renderAppliedNow() {
+      if (!apState) return;
+      const d = apState.base || {};
+      const ok = !!d.success;
+      // 标题三态：成功 / 失败且已回滚 / 失败但快照恢复也失败（写入状态未知）。
+      const title = ok
+        ? t("popup.applied_title", "Network configuration is in effect")
+        : d.restored
+          ? t("popup.applied_failed_rb", "Network changes were rolled back")
+          : t("popup.applied_failed_title", "Network configuration did not take effect");
+      const titleEl = document.getElementById("ap-title");
+      titleEl.className = ok ? "ok" : "err";
+      titleEl.textContent = title;
+      // 分组清单：组头（accent）+ 组内「标签 | 值 ✅/❌」行；ok=null 的身份行不带标记。
+      // 行标签后端发的是 i18n key（popup.ip / popup.dns / popup.profile…），必须过
+      // t()：直接渲染会原样显示成「popup.dns」这样的 key（1.8.5 的弹窗正是这个错）。
+      // 组标题（g.title）后端已按当前语言本地化好，原样显示。
+      const groups = Array.isArray(d.groups) ? d.groups : [];
+      let list = "";
+      for (const g of groups) {
+        list += `<div class="ap-g">${esc(g.title)}</div><div class="ap-list">`;
+        for (const r of (g.rows || [])) {
+          const mark = r.ok === true ? "✅" : r.ok === false ? "❌" : "";
+          list += `<div class="ap-item"><span class="ap-label">${esc(t(r.label))}</span>`
+            + `<span class="ap-val">${esc(r.value)}${mark ? ` <span class="ap-mark">${mark}</span>` : ""}</span></div>`;
+          if (r.detail) list += `<div class="ap-detail">${esc(r.detail)}</div>`;
+        }
+        list += `</div>`;
+      }
+      // —— 动作组：3B1 一次性动作 + 3B2 常驻动作 ——
+      list += apActionsHtml();
+      // 本轮一分写入都没有（系统本就合规 / THEN 缺省）：清单之外补一句说明。
+      if (d.nochange) {
+        list += `<div class="mv">${esc(t("popup.applied_nochange", "No network parameters were changed"))}</div>`;
+      }
+      document.getElementById("ap-body").innerHTML = list;
+      // 底部行按成败分流：失败原因 = 红色 ❌，降级附注（DNS 兜底等）= 琥珀色。
+      const bottom = d.note
+        ? (ok ? `<div class="ap-note">${esc(d.note)}</div>`
+              : `<div class="ap-err">❌ ${esc(d.note)}</div>`)
+        : "";
+      document.getElementById("ap-foot").innerHTML = `${bottom}
+        <div class="ap-foot-row">
+          <span class="ap-time">${esc(t("popup.time", "Time"))}: ${esc(apNow())}</span>
+          <button id="ap-close">${esc(t("popup.close", "Close"))}</button>
+        </div>`;
+      document.getElementById("ap-close").onclick = closeAppliedModal;
+    }
+
+    /// 「动作」组：3B1 一次性动作的逐条结果 + 3B2 常驻动作的当前状态。
+    ///
+    /// 两者都**可能还没到**：3B1 在独立线程上跑，动作没交回结果之前这里显示「运行中」，
+    /// 而不是把它藏起来 —— 用户此刻最想知道的就是「那条动作跑起来没有」。
+    function apActionsHtml() {
+      const actions = apState.actions;   // 3B1：{ running, total, outcomes: [...] }
+      const workers = apState.workers;   // 3B2：[{ label, state, interval, repairs, error }]
+      if (!actions && !workers) return "";
+      let list = `<div class="ap-g">${esc(t("popup.group_actions", "Actions"))}</div><div class="ap-list">`;
+
+      // 3B1：一次性动作（运行软件 / 设默认打印机 / 跑脚本…）
+      if (actions) {
+        const outs = actions.outcomes || [];
+        if (actions.running && outs.length === 0) {
+          list += `<div class="ap-item"><span class="ap-label">${esc(t("popup.actions_running", "Running"))}</span>`
+            + `<span class="ap-val"><span class="ap-mark ap-wait">⏳</span></span></div>`;
+        }
+        for (const o of outs) {
+          list += `<div class="ap-item"><span class="ap-label">${esc(o.label)}</span>`
+            + `<span class="ap-val"><span class="ap-mark ${o.ok ? "ap-ok" : "ap-err"}">${o.ok ? "✅" : "❌"}</span></span></div>`;
+          if (o.error) list += `<div class="ap-detail ap-act">${esc(o.error)}</div>`;
+        }
+        // 还在跑：已完成的列在上面，未完成的给一行「N 条待执行」。
+        if (actions.running) {
+          const left = Math.max(0, (actions.total || 0) - outs.length);
+          if (left > 0) {
+            list += `<div class="ap-item"><span class="ap-label">${esc(t("popup.actions_pending", "Pending"))}</span>`
+              + `<span class="ap-val">${esc(String(left))} <span class="ap-mark ap-wait">⏳</span></span></div>`;
+          }
+        }
+      }
+
+      // 3B2：常驻动作（维持 VPN / WireGuard / 周期脚本…）
+      if (workers && workers.length) {
+        for (const w of workers) {
+          const st = apWorkerMark(w.state);
+          const detail = w.error
+            ? w.error
+            : (w.repairs > 0
+              ? t("popup.actions_repairs", "Restored {n} time(s)").replace("{n}", String(w.repairs))
+              : "");
+          list += `<div class="ap-item"><span class="ap-label">${esc(w.label)}</span>`
+            + `<span class="ap-val"><span class="ap-mark ${st.cls}">${st.mark}</span></span></div>`;
+          if (detail) list += `<div class="ap-detail ap-act">${esc(detail)}</div>`;
+        }
+      }
+      list += `</div>`;
+      return list;
+    }
+
+    /// 本地时间「YYYY-MM-DD HH:MM:SS」：弹窗底部的时间戳（与日志对时间时够用）。
+    function apNow() {
+      const d = new Date(), p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+        + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    /// 关闭：清掉这一轮状态，并让后端把这一扇窗口收起来（不退出应用）。
+    function closeAppliedModal() {
+      apState = null;
+      invoke("close_applied").catch(() => {});
+    }
+
+    /// 静态占位：真实内容由事件（`netsense://applied`）驱动，在应用外直接查看这份文件
+    /// 时没有 Tauri 桥、事件永远不会来 —— 一只空盒子读作「坏了」。占位文案走 i18n 字典，
+    /// 首次真实渲染会整块替换 ap-body，应用内用户看不到它（窗口在事件到达后才显示）。
+    /// Static placeholder: the real content is event-driven (`netsense://applied`), and
+    /// with no Tauri bridge (viewing this file outside the app) no event ever arrives —
+    /// an empty box reads as "broken". The copy goes through the i18n dictionary; the
+    /// first real render replaces the whole ap-body, and in-app users never see this
+    /// (the window is only shown after the event lands).
+    function renderEmpty() {
+      if (apState) return;
+      document.getElementById("ap-body").innerHTML =
+        `<div class="mv" style="padding:4px 2px;">${esc(t("popup.applied_empty",
+          "This window lists what NetSense wrote to the network settings the last time a profile was applied. It is filled in by the running app — apply a profile in NetSense and the result appears here."))}</div>`;
+    }
+
+    (async () => {
+      // 文案一次性拉全（5 语）；主题那一档由 `netsense://status` 的 `theme` 字段兜底切换，
+      // 不单独问（参考面板窗口的 `applyTheme`）。
+      try {
+        strings = await invoke("get_strings");
+        renderEmpty(); // 字典到位后用当前语言重画占位 / re-draw the placeholder in the active language
+      } catch (e) { /* 浏览器直开：显示 key 本身 */ }
+    })();
+    renderEmpty();
+
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      // 后端在网络切换 / 配置重载 / 手动应用后广播，弹窗窗口据此对色与对语言。
+      window.__TAURI__.event.listen("netsense://status", (e) => {
+        const p = e.payload || {};
+        if (p.theme) document.documentElement.dataset.theme = p.theme;
+        if (p.language) document.documentElement.lang = p.language;
+      });
+      // 自动化应用了某个配置（首次连上 / 网络变化 / 配置变更，且 3A 成功）：弹窗展示
+      // 当前应用的配置与网络信息。轮询中若无规则触发改变，后端不发此事件。
+      window.__TAURI__.event.listen("netsense://applied", (e) => {
+        renderApplied(e.payload || {});
+      });
+      // 3B1 / 3B2 的动作结果陆续到达：把它们填进**已经打开**的结果弹窗。
+      //
+      // 为什么单独订阅：`netsense://applied` 只讲网络下发，动作在独立线程上异步跑，
+      // 结果从 `netsense://evaluation` 到达 —— 弹窗先开、结果后到是常态。
+      // 弹窗没开时不留状态（下一轮 applied 会重新建一份），省得把上一轮的结果挂到这一轮上。
+      window.__TAURI__.event.listen("netsense://evaluation", (e) => {
+        if (!apState) return;
+        const v = e.payload || {};
+        const lr = v.last_run || null;
+        if (lr) {
+          apState.actions = {
+            running: !!lr.running,
+            total: lr.total || 0,
+            outcomes: lr.outcomes || [],
+          };
+        }
+        apState.workers = Array.isArray(v.workers) ? v.workers : [];
+        renderAppliedNow();
+      });
+    }
+  </script>
+</body>
+</html>

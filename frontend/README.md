@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 677 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 690 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -215,7 +215,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，58 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，60 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -246,6 +246,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `set_log_retention` | `days` | 设日志保留天数（越界按 1–365 夹紧），落盘 + 立刻按新窗口清一次，返回夹紧后的值 |
 | `set_log_level` | `level` | 设日志级别（`error` / `warn` / `info` / `debug`）并**当场生效**：除了写进 `settings.json`，还立刻翻动内存里的级别闸门（`log::set_min_level`），不用重启 —— 用户在设置里调到 Debug，下一条采样就落盘。认不出的值按 `info`（默认档）收而不是拒绝：设置里那颗下拉只会发出这四个值，收到别的说明前端有 bug，静默按默认档放行比报错更不影响使用；返回归一后的值 |
 | `set_silent_execution` | `enable` | 开 / 关「静默执行」：把偏好写进**软件配置**，开启时并尽量建立免密通道（Windows 常驻 helper / macOS sudoers / Linux sudo），之后应用网络配置不再逐次弹 UAC / 授权框。通道建不起来时偏好照存、`priv` 回落成 `prompt`，下一次应用仍走原生授权（不会静默失败）；返回当前通道状态。关闭只改偏好、不撤销已建通道（撤销走 `uninstall_priv_channel`） |
+| `set_show_applied_popup` | `enable` | 开 / 关「应用后弹窗提醒」：把偏好写进**软件配置**。开启时自动与手动两条应用路径都弹出 `netsense://applied` 结果弹窗（逐项列出本次实际写入的设置）；关闭后只走 toast。它只改偏好、不触及任何网络下发，因此出错时只需把勾选框退回磁盘那一档 |
 | `uninstall_priv_channel` | — | 撤销 macOS 的免密通道：在一次授权之内删掉白名单包装脚本与 `/etc/sudoers.d/netsense`，并把 `notify.priv_removed` 记进日志。安装通道有两条路：设置里的「静默执行」开关（`set_silent_execution`，主动装一次）与下一次应用配置时顺手装好（`platform::macos` 的 bootstrap 分支，装是下发的副产品）。非 macOS 平台回一条 `pal.priv_unsupported`；界面上那颗按钮在 `platform == "macos"` 且 `priv` 为 `"direct"` 或 `"outdated"` 时出现（旧版通道也留着那条 sudoers 规则，删得掉；等一次应用它会先被换成本版） |
 | `open_config_folder` | — | 在系统文件管理器里打开 `config.json` 所在目录（路径由后端现算，界面不自己拼） |
 | `open_app_settings_folder` | — | 打开 `settings.json` 所在目录。**不**复用上一条：自动化配置可以来自可执行文件同级，那时两条路径不是一个目录 |
@@ -267,6 +268,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `open_editor` / `close_editor` | — | 显示 / 隐藏编辑器（隐藏 = 收回菜单栏常驻） |
 | `open_settings` / `close_settings` | — | 显示 / 隐藏软件设置窗口（面板的「设置」走前者） |
 | `open_log_viewer` / `close_log_viewer` | — | 显示 / 隐藏日志窗口（面板的「日志」走前者） |
+| `close_applied` | — | 隐藏「配置已应用」结果弹窗窗口（label = applied）：只收回窗口、不退出应用；该窗口 `visible:false` 创建，由后端 `emit_applied` 在应用成功（且设置开启弹窗）时拉起，关闭按钮走这条命令 |
 | `open_logs` | — | 用系统默认程序打开**当前实际使用**的日志目录 |
 | `get_log_files` | — | `{ log_dir, files[], max_lines }`：目录里的日志文件清单（新→旧）+ 单次行数上限。目录一并返回，因为日志目录不可写时后端会退到临时目录，界面自己拼的那个路径可能是错的 |
 | `read_log` | `name`, `lines?` | 读某个日志文件的**尾部**若干行（`{ name, text, lines, truncated }`）。只接受文件名，名字形状在 Rust 侧重新校验，所以这里递不出目录外的路径 |

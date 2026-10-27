@@ -49,6 +49,10 @@
     main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 16px 14px; gap: 8px; }
     .bar { display: flex; align-items: center; gap: 10px; flex: none; }
     .bar input[type=text] { flex: 1; min-width: 0; }
+    /* 级别筛选：一组切换按钮，选中的那颗高亮（accent 实底）。 */
+    .bar .lbl { color: var(--muted); font-size: 11px; }
+    .bar .lvl { padding: 4px 10px; font-size: 11px; }
+    .bar .lvl.on { background: var(--accent); color: var(--t-on-accent); border-color: var(--accent); }
     /* 「已显示 N / 共 M 行 · 更旧的…」是本地化句子，五种语言长度差很多：让它截断，
        而不是把同一行的筛选框挤到 0 宽。 */
     .val { color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden;
@@ -103,6 +107,14 @@
   </header>
 
   <main>
+    <div class="bar" id="level-bar">
+      <span class="lbl" data-i18n="logs.filter_level">Level</span>
+      <button class="lvl on" data-lvl="all" data-i18n="logs.level_all">All</button>
+      <button class="lvl" data-lvl="E" data-i18n="logs.level_error">Error</button>
+      <button class="lvl" data-lvl="W" data-i18n="logs.level_warn">Warning</button>
+      <button class="lvl" data-lvl="I" data-i18n="logs.level_info">Info</button>
+      <button class="lvl" data-lvl="D" data-i18n="logs.level_debug">Debug</button>
+    </div>
     <div class="bar">
       <input type="text" id="in-filter" data-i18n-placeholder="logs.filter" placeholder="Filter" spellcheck="false">
       <span class="val" id="v-status"></span>
@@ -166,6 +178,11 @@
     let shown = 0;      // 本次返回的行数
     let truncated = false;
     let busy = false;
+    // 选中的级别筛选（空 = 不过滤）。与后端写入时的 MIN_LEVEL 闸门是两回事：这里是纯显示端，
+    // 只对文件里**已有**的行再按严重度收窄（后端设成 Debug 才会把 D 行写进文件）。
+    let levelFilter = "";
+    // 级别筛选的「最小严重度」映射：选 E 只看错误，W 含错误+警告，I 含前三者，D 全部。
+    const LEVEL_MIN = { "": null, "E": ["E"], "W": ["E", "W"], "I": ["E", "W", "I"], "D": ["E", "W", "I", "D"] };
 
     function optLabel(f) {
       return f.today ? `${f.name} ${t("logs.today", "(today)")}` : f.name;
@@ -214,7 +231,14 @@
       const pre = el("out");
       const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
       const lines = body ? body.split("\n") : [];
-      const kept = q ? lines.filter(l => l.toLowerCase().includes(q)) : lines;
+      const allowed = LEVEL_MIN[levelFilter];
+      let kept = q ? lines.filter(l => l.toLowerCase().includes(q)) : lines;
+      // 级别筛选：与子串过滤叠加。无法识别级别的辅助行在过滤时保留，免得误删真实日志。
+      if (allowed) kept = kept.filter(l => {
+        const m = /\] \[([EWDI])/.exec(l);
+        if (!m) return true;
+        return allowed.includes(m[1]);
+      });
       const mark = (line) => {
         const i = q ? line.toLowerCase().indexOf(q) : -1;
         if (i < 0) return esc(line);
@@ -244,6 +268,14 @@
     el("btn-refresh").onclick = async () => { await loadFiles(true); await readBody(); };
     el("btn-dir").onclick = () => invoke("open_logs").catch(e => toast(String(e)));
     el("btn-close").onclick = () => invoke("close_log_viewer").catch(() => {});
+    // 级别筛选切换：同一时刻只有一颗高亮，点了立即按新级别重画（不重新读盘）。
+    document.querySelectorAll("#level-bar .lvl").forEach(b => {
+      b.onclick = () => {
+        levelFilter = b.dataset.lvl || "";
+        document.querySelectorAll("#level-bar .lvl").forEach(x => x.classList.toggle("on", x === b));
+        renderBody();
+      };
+    });
 
     // 每 2.5 秒问一次，但只在窗口真的看得见、且用户勾了「自动」时才问。关掉窗口
     // 只是隐藏（这个进程会一直活着），所以看不见的时候把定时器**停掉**，而不是

@@ -8,7 +8,7 @@
 //! ## 每个字段都过同一句判据
 //!
 //! `language`、`theme`、`log_retention_days`、`proxy`、`window_sizes`、`silent_execution`、
-//! `update_mirror`、`mirror_hidden`、`dns_fallback`：改它们都不改变任何 Profile 的匹配结果，
+//! `update_mirror`、`mirror_hidden`、`dns_fallback`、`show_applied_popup`：改它们都不改变任何 Profile 的匹配结果，
 //! 也不改变任何下发内容 —— 能改这两样的只有 `config.json`。看起来该有第十个的「开机启动」
 //! **不在这里**：它的真相在操作系统那一侧（LaunchAgent / 登录项 / 注册表 Run 键），用户也可以
 //! 绕开本应用直接改它（系统设置里就能关掉某个登录项）。存一份布尔值就等于给自己造一个会说谎的
@@ -266,6 +266,11 @@ pub struct AppConfig {
     /// 之后全部静默。它只控制「要不要走免密通道」，不改变任何 Profile 的匹配或下发内容。
     #[serde(default)]
     pub silent_execution: bool,
+    /// 应用配置（自动或手动）后是否弹出「配置已应用」结果弹窗。默认开启：结果弹窗是用户
+    /// 确认「改动真的生效了」的唯一可见凭据，关掉它等于把反馈也关了。它只控制这个弹窗，
+    /// 不改变任何 Profile 的匹配结果、也不改变任何下发内容。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_applied_popup: bool,
     /// 升级安装包的下载镜像。缺省 = 直连 GitHub。
     ///
     /// 它改变的是「去哪儿取安装包」，与 `proxy`（走哪条出口）正交：两者可以同时生效，
@@ -356,6 +361,18 @@ fn default_theme() -> String {
     DEFAULT_THEME.to_string()
 }
 
+/// 结果弹窗默认开启：用户点了「应用」就该看到一个明确的结果，而不是只靠一条 toast 去猜。
+fn default_true() -> bool {
+    true
+}
+
+/// 默认值（true）不写进文件：绝大多数用户的 `settings.json` 里不该出现一个
+/// `show_applied_popup: true` 的噪声（与 `window_sizes` 同一条道理 —— 偏好而非配置，
+/// 没改过就不该出现在文件里）。用户关掉它时值变成 false，那才值得记下来。
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -369,6 +386,7 @@ impl Default for AppConfig {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            show_applied_popup: true,
             mirror_hidden: Vec::new(),
         }
     }
@@ -893,6 +911,7 @@ mod tests {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            show_applied_popup: true,
             mirror_hidden: Vec::new(),
         };
         cfg.save(&p).unwrap();
@@ -929,6 +948,7 @@ mod tests {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            show_applied_popup: true,
             mirror_hidden: Vec::new(),
         }
         .clamped();
@@ -946,6 +966,7 @@ mod tests {
             silent_execution: false,
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
+            show_applied_popup: true,
             mirror_hidden: Vec::new(),
         }
         .clamped();
@@ -1218,6 +1239,7 @@ mod tests {
                 silent_execution: false,
                 update_mirror: UpdateMirror::default(),
                 dns_fallback: DnsFallback::default(),
+                show_applied_popup: true,
                 mirror_hidden: Vec::new(),
             }
             .clamped()

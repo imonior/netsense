@@ -561,42 +561,46 @@
     const rows = [];
     // Interface（总是显示）
     if (primary) {
-      rows.push([t("popup.interface"), nicTitle(primary), "network_interface", primary.name]);
+      rows.push([t("popup.interface"), nicTitle(primary), false]);
     } else if (s.primary_interface) {
-      rows.push([t("popup.interface"), s.primary_interface, "network_interface", s.primary_interface]);
+      rows.push([t("popup.interface"), s.primary_interface, false]);
     }
     // SSID（无线才显示具体值，有线时留空行占位）
-    rows.push([t("status.ssid"), wireless ? ssidDisplay : "", "wifi_ssid", wireless ? s.ssid : undefined]);
+    rows.push([t("status.ssid"), wireless ? ssidDisplay : "", false]);
     // MAC
     if (primary && primary.mac) {
-      rows.push([t("popup.mac"), primary.mac, "bssid", primary.mac]);
+      rows.push([t("popup.mac"), primary.mac, false]);
     } else if (s.bssid) {
-      rows.push([t("popup.mac"), s.bssid, "bssid", s.bssid]);
+      rows.push([t("popup.mac"), s.bssid, false]);
     }
     // IPv4
     const ipv4 = s.ipv4 || (primary && primary.ipv4);
-    if (ipv4) rows.push([t("popup.ip"), ipv4]);
+    if (ipv4) rows.push([t("popup.ip"), ipv4, true]);
     // Netmask
     const netmask = (primary && primary.netmask) || s.netmask;
-    if (netmask) rows.push([t("popup.netmask"), netmask]);
+    if (netmask) rows.push([t("popup.netmask"), netmask, true]);
     // Gateway
     const gateway = s.gateway || (primary && primary.gateway);
-    if (gateway) rows.push([t("popup.gateway"), gateway, "gateway_mac", s.gateway_mac || (primary && primary.gateway_mac)]);
+    if (gateway) rows.push([t("popup.gateway"), gateway, true]);
     // IPv6（地址 → 前缀 → 网关 → DNS；有则显示，与托盘面板同一套字段、同一顺序）
     const gw6 = s.gateway6 || (primary && primary.gateway6);
-    if (primary && primary.ipv6) rows.push([t("popup.ipv6"), primary.ipv6]);
-    if (primary && primary.prefix6) rows.push([t("popup.prefix6"), primary.prefix6]);
-    if (gw6) rows.push([t("popup.gateway6"), gw6]);
+    if (primary && primary.ipv6) rows.push([t("popup.ipv6"), primary.ipv6, true]);
+    if (primary && primary.prefix6) rows.push([t("popup.prefix6"), primary.prefix6, true]);
+    if (gw6) rows.push([t("popup.gateway6"), gw6, true]);
     // DNS
     const dns = s.dns || (primary && primary.dns);
-    if (dns) rows.push([t("popup.dns"), dns]);
-    
-    let p3 = rows.map(([k, v, type, canUse]) => {
+    if (dns) rows.push([t("popup.dns"), dns, true]);
+
+    // 第三列「当前网络」：地址类值行（IP / 掩码 / 网关 / IPv6 三项 / DNS）右侧一枚
+    // 「复制」按钮。旧版这里是「use」（一键把该值填进条件区），但 IP / 掩码 / 网关 /
+    // DNS 这些条目根本没有对应的条件类型，按钮常年按了没反应 —— 删掉，换成人人
+    // 用得上的复制。行结构从 [label, value, type, canUse] 简化成 [label, value, copy]。
+    let p3 = rows.map(([k, v, copyable]) => {
       const hasValue = v !== undefined && v !== null && v !== "";
       if (!hasValue && k !== t("status.ssid")) return "";
       return `<div class="kv"><span class="k">${esc(k)}</span>` +
         `<span class="v"><span class="vt">${esc(v || "—")}</span>` +
-        (canUse ? `<button class="mini-btn" data-act="use-cond" data-type="${type}" data-val="${esc(canUse)}">${esc(t("editor.use_value"))}</button>` : "") +
+        (copyable && hasValue ? `<button class="mini-btn" data-act="copy-net" data-val="${esc(v)}">${esc(t("editor.copy_value"))}</button>` : "") +
         `</span></div>`;
     }).filter(Boolean).join("");
     
@@ -1478,17 +1482,27 @@
     renderAll();
   }
 
-  function addCondition(type, value) {
-    if (!draft) { toast(t("editor.none_selected")); return; }
-    (draft.rules ||= []);
-    let r = draft.rules[draft.rules.length - 1];
-    if (!r || r.enabled === false) { r = { id: uid("r"), enabled: true, conditions: [] }; draft.rules.push(r); }
-    (r.conditions ||= []);
-    const same = r.conditions.find(c => c.type === type);
-    if (same) same.value = value;
-    else r.conditions.push({ id: uid("c"), enabled: true, type, value });
-    dirty = true;
-    renderAll();
+  /// 把一个当前网络值复制进剪贴板（值行右侧的「复制」按钮）。
+  /// WebView 的 `navigator.clipboard` 需要 secure context（Tauri 页面满足）；
+  /// 不可用时退回 `execCommand` 兜底 —— 两条路都失败才报错。
+  async function copyNet(v) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(v);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = v;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      toast(t("editor.copied"));
+    } catch (err) {
+      toast(t("editor.copy_failed"));
+    }
   }
 
   /* —————————————————————— 载入 —————————————————————— */
@@ -1867,7 +1881,7 @@
           .catch(err => toast(String(err)));
         return;
       }
-      case "use-cond": addCondition(el.dataset.type, el.dataset.val); return;
+      case "copy-net": copyNet(el.dataset.val); return;
       case "add-rule": (draft.rules ||= []).push({ id: uid("r"), enabled: true, conditions: [] }); dirty = true; renderAll(); return;
       case "del-rule": draft.rules.splice(Number(el.dataset.i), 1); dirty = true; renderAll(); return;
       case "add-cond": {
@@ -2326,8 +2340,12 @@
     });
     L("netsense://evaluation", (e) => {
       const p = typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
-      if (p) { view = p; refreshLive(); schedulePreview(); }
+      if (p) {
+        view = p; refreshLive(); schedulePreview();
+      }
     });
+    // 配置已应用（手动或自动）：结果弹窗由独立的 applied 窗口承接（见 applied.html），
+    // 编辑器不内嵌它 —— 那扇窗常驻置顶、不抢焦点，与编辑器/托盘互不隶属，这里不再订阅。
     L("netsense://conflict", () => maybeShowConflictDialog());
     // 后台动作的结果只做提示：配置内容没变，重读会把用户正在填的表单冲掉
     L("netsense://action", (e) => {

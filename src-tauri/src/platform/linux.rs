@@ -895,6 +895,8 @@ impl NetworkPlatform for LinuxPlatform {
             NetworkTarget::Wifi => wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_device_hint"))?,
             NetworkTarget::Ethernet => ethernet_iface().ok_or_else(|| i18n::t("pal.no_ethernet_iface"))?,
         };
+        // 落到哪一块设备：排查「改错了网卡」时这是第一步。debug 档才出，避免默认档刷屏。
+        crate::log::debug(&i18n::tf("net.apply_adapter", &[("adapter", &dev)]));
         let conn = active_connection(&dev)
             .ok_or_else(|| i18n::tf("pal.no_active_conn_on", &[("dev", &dev)]))?;
 

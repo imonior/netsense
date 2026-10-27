@@ -1492,6 +1492,8 @@ impl NetworkPlatform for WindowsPlatform {
             NetworkTarget::Wifi => wifi_iface().ok_or_else(|| i18n::t("pal.no_wifi_adapter_hint"))?,
             NetworkTarget::Ethernet => ethernet_iface().ok_or_else(|| i18n::t("pal.no_ethernet_adapter"))?,
         };
+        // 落到哪一张适配器：排查「改错了网卡」时这是第一步。debug 档才出，避免默认档刷屏。
+        crate::log::debug(&i18n::tf("net.apply_adapter", &[("adapter", &iface)]));
         exec_ops(&apply_ops(&iface, p)?)
     }
 

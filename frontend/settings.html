@@ -310,6 +310,10 @@
         <input type="text" id="in-dnsfb" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.dns_fallback_placeholder" placeholder="1.1.1.1, 8.8.8.8">
       </div>
       <div class="err" id="err-dnsfb" hidden></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chk-applied-popup"><span id="k-applied-popup" data-i18n="sett.show_applied_popup">Show the "applied" result popup</span></label>
+      </div>
+      <div class="hint" id="hint-applied-popup" data-i18n="sett.show_applied_hint">After a profile is applied (automatically or by hand), show a popup listing exactly which settings were written. Off: only a toast is shown.</div>
       <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
     </div>
   </main>
@@ -398,6 +402,7 @@
       el("row-priv-remove").hidden = !(d.platform === "macos" && (d.priv === "direct" || d.priv === "outdated"));
       el("chk-silent").checked = !!d.silent_execution;
       el("chk-dnsfb").checked = !!d.dns_fallback_enabled;
+      el("chk-applied-popup").checked = !!d.show_applied_popup;
       // 用户正在手填服务器时不许被焦点刷新覆盖（见 in-dnsfb 的 oninput 把 dnsfbDirty 置真）。
       if (!dnsfbDirty) el("in-dnsfb").value = d.dns_fallback_servers || "";
       el("v-version").textContent = d.version || "—";
@@ -518,6 +523,21 @@
       }
     }
     el("chk-dnsfb").onchange = (ev) => saveDnsFallback(ev.target.checked);
+    // 应用后弹窗：开 = 自动与手动两条路径都弹 `netsense://applied` 结果弹窗；关 = 只走 toast。
+    // 它只改偏好、不触及任何网络下发，所以出错时只需把勾选框退回磁盘那一档即可。
+    el("chk-applied-popup").onchange = async (ev) => {
+      const want = ev.target.checked;
+      ev.target.disabled = true;
+      try {
+        await invoke("set_show_applied_popup", { enable: want });
+        toast(t("sett.saved", "Saved"));
+      } catch (e) {
+        ev.target.checked = !want;   // 后端报错，勾选框就不许停在没写进去的那一档
+        toast(String(e));
+      } finally {
+        ev.target.disabled = false;
+      }
+    };
     // 填了服务器就替用户把开关勾上：只填地址却不开开关，保存出去的还是关着，
     // 看起来就是「存了却没生效」。
     el("in-dnsfb").onchange = () => {

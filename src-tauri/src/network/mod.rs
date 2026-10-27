@@ -274,6 +274,42 @@ pub fn apply_3a<P: NetworkPlatform>(
     // 2. 下发网络配置。先记一行「开始下发」：它是每一次执行动作的起点标记，
     //    与下发的成功（engine.pass_3a）/ 失败（engine.error）配成一条完整时间线。
     crate::log::info(&i18n::tf("net.apply_start", &[("mode", mode_name(&cfg.mode))]));
+    // 下发前把「要写入系统的目标配置」整段记下来：排查「网络被改成了什么」时这是
+    // 第一条也是最重要的一条 —— 比事后回读更早，且不受回读沉降窗口影响。
+    // 只在真正要下发时才记（跳过下发那一支在上面临门返回，到不了这里），所以默认档
+    // 也不过载：每一轮换发的配置只此一行，而不是每个评估周期一行。
+    let mut target_detail = format!("mode={}", mode_name(&cfg.mode));
+    if let (Some(ip), Some(mask)) = (&cfg.ip, &cfg.netmask) {
+        target_detail.push_str(&format!(", ip={}/{}", ip, mask));
+    } else if let Some(ip) = &cfg.ip {
+        target_detail.push_str(&format!(", ip={}", ip));
+    }
+    if let Some(g) = &cfg.gateway {
+        target_detail.push_str(&format!(", gw={}", g));
+    }
+    // DNS 三态：缺失 = 不动（沿用系统现在的）；空串 = 交回自动获取；非空 = 就用这几台。
+    match cfg.dns.as_deref() {
+        None => target_detail.push_str(", dns=unchanged"),
+        Some("") => target_detail.push_str(", dns=auto"),
+        Some(s) => target_detail.push_str(&format!(", dns=[{}]", s)),
+    }
+    if let Some(v6) = &cfg.v6mode {
+        target_detail.push_str(&format!(", v6={:?}", v6));
+    }
+    if let Some(v6) = &cfg.ipv6 {
+        target_detail.push_str(&format!(", ipv6={}", v6));
+    }
+    if !cfg.routes.is_empty() {
+        let rs: Vec<String> = cfg.routes.iter().map(|r| {
+            if r.delete {
+                format!("del {}", r.dest)
+            } else {
+                format!("{} via {}", r.dest, r.gateway.clone().unwrap_or_default())
+            }
+        }).collect();
+        target_detail.push_str(&format!(", routes=[{}]", rs.join("; ")));
+    }
+    crate::log::info(&i18n::tf("net.apply_target", &[("detail", &target_detail)]));
     // 本轮实际会动系统的哪几项 —— 先算出来，好让「变更明细」在下发失败时
     // 也能报出来（那次系统可能已经被改了一半）。
     // What this round will actually write to the system: computed up front so the

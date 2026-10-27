@@ -40,6 +40,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 // 本工具链的 `std::sync::mpsc` 没有 `unbounded_channel`，用 `channel` 即可：
 // 这里每条消息只是一次「请走一轮」的提醒，队列长度天然有限（消费者每秒醒一次并 try_recv 收干）。
+// `run_on_main_thread` 把「拉起结果弹窗」这件事派回主线程执行（GUI 操作必须在主线程）；
+// `get_webview_window` 等窗口查询由 `AppHandle` 自身提供，无需额外 trait import。
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -956,6 +958,15 @@ impl Engine {
         }
         let Some(tx) = state.engine_tx.get().cloned() else {
             log::error(&i18n::t("engine.channel_no_actions"));
+            // 通道没了（理论上是退出期的竞态）：动作提交不出去，不会有 RunDone 来
+            // 解除弹窗的推迟。这里就地清掉等待标志并把窗口叫出来 —— 网络结果已经
+            // 事件发到隐藏窗口了，别让用户盯着一扇永远不出现的弹窗。
+            if state
+                .applied_show_pending
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                show_applied_window(state);
+            }
             return;
         };
         let seq = self.begin_run(profile, which);
@@ -1287,6 +1298,16 @@ fn apply_runs(state: &Arc<AppState>, runs: &[(u64, one_shot::BatchReport)]) -> b
             Some(slot) => {
                 log_run(&slot, report);
                 attributed = true;
+                // 3B1 收尾 = 这一轮自动化（网络配置 + 一次性动作）真正结束：结果弹窗
+                // 若在等动作结果（`emit_applied` 推迟了显示），此刻叫出来 —— 用户看到
+                // 的就是完整的「动作成败 + 网络配置」，而不是先弹一半、结果慢慢补。
+                // 已被取代的那次运行（None 分支）不算：等最新那次的收尾。
+                if state
+                    .applied_show_pending
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    show_applied_window(state);
+                }
             }
             None => log::warn(&i18n::tf("engine.stale_report", &[("seq", &seq.to_string())])),
         }
@@ -1817,7 +1838,24 @@ fn applied_groups(
     groups
 }
 
-/// 发「配置已应用」弹窗，并把面板叫出来（窗口操作回主线程，与托盘点击同一条路）。
+/// 把独立的结果弹窗窗口叫出来（窗口操作回主线程）。
+///
+/// 两条路径共用：`emit_applied` 的立即显示路径，与 3B1 动作收尾后的补显示路径
+/// （[`apply_runs`]）。窗口操作必须回主线程，而调用方在引擎线程上 —— 与托盘的
+/// 延迟单击同一个模式（两个 handle：一个借给 `run_on_main_thread` 当 `&self`，
+/// 一个 move 进闭包；同一个 `app` 不能既被借用又被 move 捕获，否则 E0505）。
+fn show_applied_window(state: &Arc<AppState>) {
+    if let Some(app) = state.app.get().cloned() {
+        let app_cl = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            // 结果弹窗是一扇独立置顶窗口（applied）：任何时候都浮在最上、且不抢焦点，
+            // 与编辑器 / 托盘面板 / 设置 / 日志互不隶属。直接叫它出来，无需判断别的窗是否开着。
+            crate::popup::show_applied(&app_cl);
+        });
+    }
+}
+
+/// 发「配置已应用」弹窗，并按需把独立的结果弹窗窗口叫出来（窗口操作回主线程）。
 ///
 /// 闸门「有网络才弹」：冷启动时一张网卡都没亮，兜底也会走到 commit，那样的弹窗只是开机
 /// 噪音 —— 需求说的是「首次连上网络或网络连接改变后」。SSID 与主网卡任一可读即算有网
@@ -1826,6 +1864,17 @@ fn applied_groups(
 /// `change` 是这一轮**实际写下的几项**（3A 回读记账），`ok` 标记整体成败，
 /// `note` 携带降级附注或失败原因。`restored` 只在失败路径上有意义：
 /// 它决定逐行明细能不能说「已回滚，未生效」—— 快照恢复本身失败时明细必须留空。
+///
+/// `actions_pending` = 这一轮已经（或即将）把 3B1 一次性动作提交给后台线程。需求：
+/// 结果弹窗要在**整轮自动化**（网络配置 + 一次性动作）都结束后出现，一并显示动作
+/// 结果 —— 这种情况下事件照发（隐藏窗口先收下并渲染），窗口显示推迟到动作收尾
+/// （`apply_runs` 归因报告的那一刻，见 [`show_applied_window`]）。
+// 参数与 `applied_notice` 的事件载荷一一对应：它们本来就不是一个可以随便收拢的
+// 「配置项清单」，而是同一条事件的逐字段展开 —— 收进结构体只会多一层搬运，不减少
+// 任何调用方的认知负担。9 > clippy 默认阈值 7，故显式豁免。
+// Parameters mirror the `applied_notice` event payload field-for-field: bundling
+// them into a struct would only add a layer of shuffling, so exempt explicitly.
+#[allow(clippy::too_many_arguments)]
 fn emit_applied(
     state: &Arc<AppState>,
     eng: &Engine,
@@ -1834,7 +1883,19 @@ fn emit_applied(
     ok: bool,
     restored: bool,
     note: Option<&str>,
+    actions_pending: bool,
 ) {
+    // 系统设置里「应用后弹窗」关掉了：自动与手动两条路径都从这里走，关门一次等于两条都不弹。
+    // 这里只读 settings（config 锁），而本函数的调用方至多只持 engine 锁，故属于
+    // engine→config 顺序，不会与任何 config→engine 站点冲突（见模块头锁顺序分析）。
+    let show = state
+        .settings
+        .lock()
+        .map(|s| s.show_applied_popup)
+        .unwrap_or(true);
+    if !show {
+        return;
+    }
     let snap = &eng.snapshot;
     if snap.ssid.is_none() && snap.primary_interface.is_none() {
         return;
@@ -1844,11 +1905,14 @@ fn emit_applied(
         "netsense://applied",
         applied_notice(name, snap, change, ok, restored, note),
     );
-    if let Some(app) = state.app.get().cloned() {
-        // 两个 handle：一个借给 `run_on_main_thread` 当 `&self`，一个 move 进闭包 ——
-        // 同一个 `app` 不能既被 `&self` 借用又被内层 `move` 捕获（同 tray.rs 的单击路径）。
-        let app_cl = app.clone();
-        let _ = app.run_on_main_thread(move || crate::popup::show(&app_cl));
+    if actions_pending {
+        // 动作还在后台跑：窗口先不显示，等 3B1 收尾报告归因后由 `apply_runs` 叫出来。
+        // 事件已发，隐藏窗口此刻就把网络部分渲染好了 —— 显示时数据已就绪。
+        state
+            .applied_show_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    } else {
+        show_applied_window(state);
     }
 }
 
@@ -2144,6 +2208,7 @@ fn commit_plan(
                         ..
                     }) = &three_a
                     {
+                        // 3A 失败 = 3B 一条都不跑（硬屏障）：没有动作在等，弹窗立即显示。
                         emit_applied(
                             state,
                             eng,
@@ -2154,6 +2219,7 @@ fn commit_plan(
                             // 还留在系统里，弹窗不能说「已回滚，未生效」。
                             rolled_back.is_some(),
                             Some(&reason),
+                            false,
                         );
                     }
                     // 重下失败不弹「应用失败」**气泡**（与上面那个弹窗是两件事）：多半是
@@ -2204,6 +2270,8 @@ fn commit_plan(
                     // （来自 `change`，不是计划态/配置原文）。走到这里只有三种来路 ——
                     // 首评、网络指纹变了、配置内容变了；轮询中什么都没变时 decide_plan
                     // 直接返回 None，到不了这里（「轮询不弹」由此成立，无需另设状态）。
+                    // THEN 分支的 3B1 马上要提交（branch_3b 紧随其后）：有启用的动作时
+                    // 弹窗推迟到动作收尾（需求：整轮自动化结束后再弹，一并显示动作结果）。
                     emit_applied(
                         state,
                         eng,
@@ -2212,6 +2280,12 @@ fn commit_plan(
                         true,
                         true,
                         applied_note,
+                        opts.one_shot
+                            && profile
+                                .then
+                                .as_ref()
+                                .map(|b| one_shot::any_enabled(&b.one_shot))
+                                .unwrap_or(false),
                     );
                     if !staying {
                         log::info(&i18n::tf("engine.switch", &[
@@ -2240,6 +2314,7 @@ fn commit_plan(
                 announce_rollback(state, change, rolled_back.as_deref());
                 // 兜底失败也弹「最终结果」弹窗：试图下写的几项全部 ❌，让用户看见
                 // 「这一轮打算改什么、为什么没成」。与成功弹窗共用同一套分组 UI。
+                // 3A 失败 = 3B 不跑：没有动作在等，弹窗立即显示。
                 emit_applied(
                     state,
                     eng,
@@ -2248,6 +2323,7 @@ fn commit_plan(
                     false,
                     rolled_back.is_some(),
                     Some(reason),
+                    false,
                 );
                 // 兜底也要出声：这一支没有 Profile 的红叉可挂，而「零命中 + 兜底没落地」
                 // 意味着现场仍是上一个网络的配置 —— 用户看不出任何名堂，只觉得网络莫名能用。
@@ -2274,7 +2350,18 @@ fn commit_plan(
             }
             // 兜底也是一次「成功应用的配置」：弹窗里标成兜底，用户看得出此刻没有
             // Profile 命中。与 Profile 分支同一个闸门（有网络才弹）。只报**最终落地的设置**。
-            emit_applied(state, eng, None, fb_change, true, true, None);
+            // 兜底的 3B1 马上要提交（branch_3b 紧随其后）：有启用的动作时推迟显示，
+            // 与 Profile 分支同一需求 —— 整轮自动化结束（动作出结果）后再弹。
+            emit_applied(
+                state,
+                eng,
+                None,
+                fb_change,
+                true,
+                true,
+                None,
+                one_shot::any_enabled(&fb.one_shot),
+            );
             // —— 3B：合成一个说得清归属的身份 ——
             // 兜底不接管健康监测：它没有「当前环境」可探测，也没有 Profile 可归属。
             // holder 必然挂着一支 THEN（见 fallback_holder），branch_3b 由此取到那一支。
@@ -2416,6 +2503,20 @@ fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) 
             // 回滚写回去的那几项同样要报 —— 它是一次真实的系统写入。
             announce_rollback(state, change, rolled_back.as_deref());
             crate::state::emit_action(state, "apply", false, msg);
+            // 手动应用也要弹「配置已应用」结果弹窗（失败态）：用户在编辑器点了应用、在等一个
+            // 明确的结果，只给一个 toast 等于让他自己去猜改动有没有真的落地。与自动应用路径
+            // commit_plan 同一个入口、同一个「系统设置可关」闸门。
+            // 3A 失败 = 3B 不跑（branch_3b 自行跳过）：没有动作在等，弹窗立即显示。
+            emit_applied(
+                state,
+                &eng,
+                Some(profile.name.as_str()),
+                Some(change),
+                false,
+                rolled_back.is_some(),
+                Some(reason),
+                false,
+            );
         }
         _ => {
             if let Some(Stage3A::Applied { note, change }) = &three_a {
@@ -2433,6 +2534,24 @@ fn manual_apply(state: &Arc<AppState>, id: &str, allowed: &Arc<AllowedScripts>) 
                 // 手动应用同样报出「改了哪几项」：用户点了按钮在等结果，
                 // 只告诉他「应用成功」而不说清改了哪些参数，等于让他自己猜。
                 announce_change(state, change, true);
+                // 手动应用也要弹「配置已应用」结果弹窗：用户在编辑器点了应用、在等一个
+                // 明确的结果，只给一个 toast 等于让他自己去猜改动有没有真的落地。
+                // 与自动应用路径 commit_plan 同一个入口、同一个「系统设置可关」闸门。
+                // 生效分支的 3B1 马上要提交（branch_3b 在函数尾部）：有启用的动作时
+                // 推迟显示，与自动路径同一需求 —— 动作出结果后再弹、一并显示成败。
+                emit_applied(
+                    state,
+                    &eng,
+                    Some(profile.name.as_str()),
+                    Some(change),
+                    true,
+                    true,
+                    note.as_deref(),
+                    which
+                        .of(&profile)
+                        .map(|b| one_shot::any_enabled(&b.one_shot))
+                        .unwrap_or(false),
+                );
             }
             let msg = i18n::tf("engine.manual_ok", &[
                 ("name", &profile.name),

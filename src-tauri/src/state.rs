@@ -62,6 +62,13 @@ pub struct AppState {
     pub app: OnceLock<AppHandle>,
     /// SSID 监视线程句柄；重启监视或退出时用 `stop()` 停掉旧线程。
     pub watcher: Mutex<Option<WatcherHandle>>,
+    /// 结果弹窗窗口是否在等「3B1 一次性动作跑完」再显示。
+    ///
+    /// 需求：结果弹窗要在**整轮自动化**（网络配置 + 一次性动作）结束后出现，一并显示
+    /// 动作结果。动作在独立线程上异步跑，`emit_applied` 发事件时若动作已提交，就置位
+    /// 本标志而不显示窗口；3B1 收尾报告（`Msg::RunDone`）被引擎归因的那一刻清位并显示
+    /// （见 `engine::apply_runs`）。动作提交失败（通道缺失）时由提交方清位补显示。
+    pub applied_show_pending: AtomicBool,
 }
 
 impl AppState {
@@ -102,6 +109,7 @@ impl AppState {
             config_rev: AtomicU64::new(1),
             app: OnceLock::new(),
             watcher: Mutex::new(None),
+            applied_show_pending: AtomicBool::new(false),
         }
     }
 
@@ -233,10 +241,37 @@ pub fn emit_action(state: &Arc<AppState>, kind: &str, ok: bool, message: String)
 /// 在 macOS 15.6+ 上还包括一次 1~4s 的 `system_profiler`；同一次刷新里面板广播与
 /// 事件监听必须看到同一份快照，否则既多付一次代价、又可能两处显示不一致。
 pub fn status_payload(state: &Arc<AppState>, st: &platform::InterfaceStatus) -> serde_json::Value {
-    let engine_view = {
+    // 视图 + 当前生效配置的 IPv6 模式，同一个 engine→config 锁序块里取完。
+    let (engine_view, v6mode) = {
         let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::to_value(eng.view(&cfg)).unwrap_or_default()
+        let view = eng.view(&cfg);
+        // 「生效配置的 IPv6 模式」是**设置值**（用户在编辑器里填的），不是实测值：
+        // 托盘面板据此决定 IPv6 一段显示「Off」还是具体字段（为空给红色「—」）。
+        // 生效中且配了网络的分支才有；没有生效配置（零命中且兜底没落地 / 兜底没配
+        // 网络回落）时给 null —— 面板退回旧行为，读到什么显示什么。
+        // 分支选取：兜底生效看兜底的 network；否则按 Active 的 Profile 取 THEN 的
+        // network（THEN 没配网络才看 ELSE —— 手动应用 ELSE 分支时的近似）。
+        let net = if view.fallback_active {
+            cfg.fallback.as_ref().and_then(|f| f.network.as_ref())
+        } else if let crate::engine::Decision::Active { id } = &view.state {
+            cfg.profile_by_id(id).and_then(|p| {
+                p.then
+                    .as_ref()
+                    .and_then(|b| b.network.as_ref())
+                    .or_else(|| {
+                        p.else_branch
+                            .as_ref()
+                            .and_then(|b| b.network.as_ref())
+                    })
+            })
+        } else {
+            None
+        };
+        let v6mode = net
+            .and_then(|n| n.v6mode.as_ref())
+            .and_then(|m| serde_json::to_value(m).ok());
+        (serde_json::to_value(view).unwrap_or_default(), v6mode)
     };
     let (profiles, config_path) = {
         let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
@@ -262,6 +297,9 @@ pub fn status_payload(state: &Arc<AppState>, st: &platform::InterfaceStatus) -> 
     serde_json::json!({
         "status": st,
         "engine": engine_view,
+        // 当前生效配置的 IPv6 模式（"off" / "automatic" / "manual" / "linklocal"，
+        // 没有生效配置 = null）。托盘面板按它分流 IPv6 一段的显示方式。
+        "v6mode": v6mode,
         "profiles": profiles,
         "language": i18n::current().code(),
         "theme": theme,
