@@ -235,12 +235,29 @@ Violating the lock order self-deadlocks — `std::sync::Mutex` is not reentrant.
 - 3B2 persistent workers share the same post mechanism (`Msg::Worker`) but live with the Active  
   Profile: any new apply first stops the old worker group (otherwise "keep VPN up" from the old  
   environment would fight the new environment's routing table).
+- **One deliberate exception to "no I/O under a lock"**: the three enum caches in `platform.rs`
+  (`cached_apps` / `cached_printers` / `cached_known_ssids`) sample **while holding their own
+  lock**. Holding it is the mechanism, not an oversight — it makes the sample single-flight, so a
+  startup warm-up (`warm_enum_caches`) racing the first editor open shares one subprocess run
+  instead of spawning two. Each lock is private to one cache: it is **not** the `engine` / `config`
+  pair and takes no part in that order, so it can never deadlock with a `pass()`. The cost is
+  deliberate as well — a concurrent caller waits for the in-flight sample (up to the 5–15 s
+  Windows installed-apps scan) instead of paying for a second one of its own. Do **not** extend
+  this pattern to any lock a `pass()` can hold.
 
 ### 7.1 并发与加锁纪律（简体中文）
 
 
 锁顺序恒为 `engine` → `config`，且只在 `pass()` 内部同时持有两者；平台 I/O 不持锁；广播只在锁
 全部释放后调用；3B1/3B2 不碰引擎线程与锁。
+
+**「持锁不做 I/O」只有一处刻意的例外**：`platform.rs` 的三个枚举缓存（`cached_apps` /
+`cached_printers` / `cached_known_ssids`）是**持锁采样**的。持锁正是机制本身而非疏漏 —— 它让
+采样成为 single-flight：启动预热（`warm_enum_caches`）与首次开屏撞在一起时，两者共用一次子进程，
+而不是各起一条 PowerShell。每把锁都只属于那一个缓存：**不**是 `engine` / `config` 那一对，也不
+参与那个锁顺序，因此不可能与 `pass()` 死锁。代价同样是刻意的：并发的调用方会等这次采样跑完
+（Windows 已装程序那趟最长 5–15 秒）而不是自己再付一份。这个模式**不得**扩展到任何 `pass()`
+可能持有的锁上。
 
 ---
 

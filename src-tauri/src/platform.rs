@@ -370,70 +370,141 @@ pub(crate) fn invalidate_nics() {
 /// 看到它；超过两分钟还看不到，第一反应会是「软件坏了」而不是「再等等」。
 const ENUM_CACHE_TTL: Duration = Duration::from_secs(120);
 
+/// **空结果**的退避 TTL。空结果既可能是「这台机器真的一条都没有」，也可能是采样脚本
+/// 没起来（`list_installed_apps` / `list_printers` 把失败同样收敛成空数组，只记日志）。
+///
+/// 两种极端都错：
+/// - **完全不缓存空结果**（此前的做法）→ 失败时每次开屏都重扫一遍。Windows 上已装程序
+///   那趟是 5–15 秒，于是用户每次打开设置界面都白等这么久，然后拿到的还是空。
+/// - **照 120 秒缓存空结果** → 一次失败被当成「这台机器没装东西」讲两分钟，
+///   界面说的和真实原因不是一回事。
+///
+/// 取 30 秒：失败只挡这一轮，三十秒后自动重试（装了新程序、脚本恢复都能自己好），
+/// 又不会让用户在连续几次开屏里反复付那几秒。
+const ENUM_EMPTY_TTL: Duration = Duration::from_secs(30);
+
+/// 按结果是否为空挑 TTL：空走 [`ENUM_EMPTY_TTL`]，非空走 [`ENUM_CACHE_TTL`]。
+fn enum_ttl(len: usize) -> Duration {
+    if len == 0 {
+        ENUM_EMPTY_TTL
+    } else {
+        ENUM_CACHE_TTL
+    }
+}
+
 /// 三个枚举缓存各自的存储单元。抽出来只是为了不让 `static` 声明处挂一串嵌套泛型 ——
 /// 与 `NicCacheEntry` 同一个理由。
 type AppCacheCell = Mutex<Option<(Instant, Vec<AppEntry>)>>;
 type PrinterCacheCell = Mutex<Option<(Instant, Vec<PrinterInfo>)>>;
 type SsidCacheCell = Mutex<Option<(Instant, Vec<String>)>>;
+#[cfg(target_os = "windows")]
+type AdapterCacheCell = Mutex<Option<(Instant, Vec<NicInfo>)>>;
 
 /// 带 TTL 的已装程序清单。
 ///
-/// **空结果不进缓存**：它既可能是「这台机器真的一条都没有」，也可能是脚本没起来 ——
-/// `list_installed_apps` 把后者同样收敛成空数组（那条路径只记日志）。缓存一次失败，
-/// 之后两分钟里每次下拉都是空的，而界面因此说的是「这台机器没装东西」，错得更彻底。
+/// 空结果走 [`ENUM_EMPTY_TTL`]（30 秒退避）而不是不进缓存：见那里的取舍。
+///
+/// **整段持锁，采样也在锁内**（single-flight）：启动预热线程与首屏枚举会同时要这一份，
+/// 各采各的就变成同时起两条 PowerShell 干同一件事，耗时翻倍还互相抢 CPU；持锁让后到的
+/// 那个等第一份结果、直接共享。采样慢（Windows 上 5–15 秒）正是要这么做的理由 ——
+/// 慢的那一份最不该被重复做。
 pub(crate) fn cached_apps(plat: &Platform) -> Vec<AppEntry> {
     static C: OnceLock<AppCacheCell> = OnceLock::new();
     let cell = C.get_or_init(|| Mutex::new(None));
-    {
-        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, v)) = guard.as_ref() {
-            if at.elapsed() < ENUM_CACHE_TTL {
-                return v.clone();
-            }
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = guard.as_ref() {
+        if at.elapsed() < enum_ttl(v.len()) {
+            return v.clone();
         }
     }
     let fresh = plat.list_installed_apps();
-    if !fresh.is_empty() {
-        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), fresh.clone()));
-    }
+    *guard = Some((Instant::now(), fresh.clone()));
     fresh
 }
 
-/// 带 TTL 的打印机清单。空结果不进缓存，理由同 [`cached_apps`]。
+/// 带 TTL 的打印机清单。空结果走 [`ENUM_EMPTY_TTL`] 退避、整段持锁做 single-flight，
+/// 理由同 [`cached_apps`]。
 pub(crate) fn cached_printers(plat: &Platform) -> Vec<PrinterInfo> {
     static C: OnceLock<PrinterCacheCell> = OnceLock::new();
     let cell = C.get_or_init(|| Mutex::new(None));
-    {
-        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, v)) = guard.as_ref() {
-            if at.elapsed() < ENUM_CACHE_TTL {
-                return v.clone();
-            }
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = guard.as_ref() {
+        if at.elapsed() < enum_ttl(v.len()) {
+            return v.clone();
         }
     }
     let fresh = plat.list_printers();
-    if !fresh.is_empty() {
-        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), fresh.clone()));
-    }
+    *guard = Some((Instant::now(), fresh.clone()));
     fresh
 }
 
-/// 带 TTL 的已知网络（SSID）清单。空结果不进缓存，理由同 [`cached_apps`]。
+/// 启动预热：后台把三项静态枚举各采一遍，填进各自的 TTL 缓存。
+///
+/// 编辑器开屏要的是**完整**的下拉（已装程序 / 打印机 / 已知网络），少一项用户就以为
+/// 软件没扫全，所以不能靠「挪出首屏」换速度 —— 唯一不动完整性的提速办法是**把等待
+/// 挪到用户不在看的时候**：NetSense 是托盘常驻应用，进程一起来就在后台采，等用户点开
+/// 设置界面时这三项已经在 [`ENUM_CACHE_TTL`] 窗口里，首屏直接命中。
+///
+/// 顺序刻意是「便宜的先、最慢的最后」：已装程序那趟（Windows 上 5–15 秒）放最后，
+/// 这样即使它还没采完，前两项已经缓存好了；而它本身在前端就是后台补拉，不在首屏关键
+/// 路径上（见 `editor.html` 的 `loadInstalledApps`）。
+///
+/// 与首屏并发时不会各采一遍：[`cached_apps`] 等三个缓存是整段持锁采样的（single-flight），
+/// 后到的那个等第一份结果、直接共享。
+pub(crate) fn warm_enum_caches(plat: &Platform) {
+    cached_known_ssids(plat);
+    cached_printers(plat);
+    cached_apps(plat);
+}
+
+/// 带 TTL 的已知网络（SSID）清单。空结果走 [`ENUM_EMPTY_TTL`] 退避、整段持锁做
+/// single-flight，理由同 [`cached_apps`]。
 pub(crate) fn cached_known_ssids(plat: &Platform) -> Vec<String> {
     static C: OnceLock<SsidCacheCell> = OnceLock::new();
     let cell = C.get_or_init(|| Mutex::new(None));
-    {
-        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, v)) = guard.as_ref() {
-            if at.elapsed() < ENUM_CACHE_TTL {
-                return v.clone();
-            }
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = guard.as_ref() {
+        if at.elapsed() < enum_ttl(v.len()) {
+            return v.clone();
         }
     }
     let fresh = plat.list_known_ssids().unwrap_or_default();
-    if !fresh.is_empty() {
-        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), fresh.clone()));
+    *guard = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
+/// [`list_adapters`] 结果的进程级 TTL 缓存。
+///
+/// 与 [`cached_nics`] 刻意是**两**份缓存：两者回答不同的问题（在用网卡 /
+/// 本机所有网卡，含拔了线的物理口），适配器那条不能跟接口那条共用同一份快照 ——
+/// 否则刚插上的扩展坞在缓存窗口内就看不到，而「接口条件下拉」恰恰要能提前给那个口配好网络。
+/// TTL 取和 [`NIC_LIST_TTL`] 相同的 2 秒，挡的是**同一轮内的重复调用**（面板刷新与
+/// 开屏撞在一起时，`list_adapters` 会在几毫秒内被问两遍），让第二遍不再另起一条
+/// PowerShell。
+///
+/// ⚠️ 它对「第二次打开编辑器」**没有**贡献：两次开屏的间隔远大于 2 秒，缓存必然 miss，
+/// 那条 PowerShell 照旧要起。想让开屏不等它，只有两条路 —— 把 TTL 提到分钟级
+/// （[`ENUM_CACHE_TTL`]，代价是刚插上的扩展坞在窗口内看不到），或把它移出首屏关键路径
+/// 去后台补拉。别把「加了缓存」当成「开屏变快了」。
+///
+/// 仅 Windows 走这条缓存：适配器枚举（PowerShell 冷启动）是 Windows 独有的开销，
+/// macOS / Linux 的 `list_adapters` 实现不调用它，因此整函数 `#[cfg]` 限定到 Windows，
+/// 避免在非 Windows 目标上成为死代码。
+#[cfg(target_os = "windows")]
+pub(crate) fn cached_adapters<F: FnOnce() -> Vec<NicInfo>>(sample: F) -> Vec<NicInfo> {
+    static C: OnceLock<AdapterCacheCell> = OnceLock::new();
+    let cell = C.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, list)) = guard.as_ref() {
+            if at.elapsed() < NIC_LIST_TTL {
+                return list.clone();
+            }
+        }
     }
+    let fresh = sample();
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some((Instant::now(), fresh.clone()));
     fresh
 }
 
@@ -774,6 +845,20 @@ pub struct AppEntry {
     pub path: String,
 }
 
+/// 编辑器开屏一次性拉齐的枚举数据：把「在用网卡 / 本机网卡 / 已知网络 / 打印机 / 已装程序」
+/// 五份合并成一个返回值，让前端一次 IPC 就拿全（见 [`NetworkPlatform::editor_enumerations`]）。
+/// One-shot bundle of editor-open enumerations, returned by a single IPC call instead of five.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EditorEnumerations {
+    /// 已保存网络的 SSID 列表（编辑器「网络条件」下拉候选）。
+    pub networks: Vec<String>,
+    /// 在用网卡（面板与硬件列）。
+    pub interfaces: Vec<NicInfo>,
+    /// 本机装着的网卡（含没插线的口，接口条件下拉候选）。
+    pub adapters: Vec<NicInfo>,
+    /// 本机打印机清单（「设为默认打印机」候选）。
+    pub printers: Vec<PrinterInfo>,
+}
 /// PAL 契约：Core Engine 只依赖此 trait，不直接碰系统命令。
 pub trait NetworkPlatform: Send + Sync {
     fn watch_ssid(&self, cb: Box<dyn Fn(Option<String>) + Send + Sync>) -> WatcherHandle;

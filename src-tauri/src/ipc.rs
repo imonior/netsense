@@ -19,7 +19,7 @@ use crate::engine::{ActionKind, Msg};
 use crate::i18n;
 use crate::log;
 // `list_known_ssids` 是 PAL trait 方法，需把 trait 引入作用域
-use crate::platform::{platform_name, priv_channel, NetworkPlatform as _, AppEntry, NicInfo, PrinterInfo};
+use crate::platform::{platform_name, priv_channel, NetworkPlatform as _, AppEntry, EditorEnumerations, NicInfo, PrinterInfo};
 use crate::state::{self, AppState};
 
 /// 前端读取当前网络状态 + 引擎视图（Active / Conflict / 每个 Profile 的三态）+ 语言 + 提权通道。
@@ -375,6 +375,23 @@ pub fn close_applied(state: State<'_, std::sync::Arc<AppState>>) {
     }
 }
 
+/// 取最近一次「配置已应用」的结果载荷；还没有过任何一轮应用时为 `null`。
+///
+/// 结果弹窗窗口用它补上事件广播的时序洞：窗口启动即创建，但页面要过一会儿才加载完、
+/// 才注册上监听，而引擎的第一轮 pass 就跑在它之前 —— 那一发广播送不到。页面加载完
+/// 主动来取一份，就不必指望「广播那一刻页面恰好在线」（对应
+/// `AppState::last_applied`，由 `engine::emit_applied` 写入）。
+#[tauri::command]
+pub fn get_last_applied(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Option<serde_json::Value> {
+    state
+        .last_applied
+        .lock()
+        .ok()
+        .and_then(|v| v.as_ref().cloned())
+}
+
 /// 前端读取已保存无线网络列表（填充编辑器下拉）。
 ///
 /// `async` 不是可选项：`list_known_ssids` 会拉起系统子进程（macOS 上
@@ -423,6 +440,46 @@ pub fn get_installed_apps(state: State<'_, std::sync::Arc<AppState>>) -> Vec<App
     // 走 TTL 缓存：这是开屏最贵的那一项（Windows 上要递归遍历两个开始菜单目录找 .lnk），
     // 而它的答案在装新程序之前不会变。详见 `platform::cached_apps`。
     crate::platform::cached_apps(&state.plat)
+}
+
+/// 编辑器开屏一次性枚举：已保存网络 / 在用网卡 / 本机网卡 / 打印机。
+///
+/// 把原本要发的四条 IPC（`get_networks` / `get_interfaces` / `get_adapters` /
+/// `get_printers`）合成一条，省下四趟往返 —— 面板因此更早拿到候选。四条各自背后的
+/// 子进程采样在内部**并发**跑（`std::thread::scope`），不比前端原本的 `Promise.all`
+/// 慢。
+///
+/// ⚠️ 合并时**必须照旧走那两个 TTL 缓存**（`cached_known_ssids` / `cached_printers`，
+/// 见 [`crate::platform::ENUM_CACHE_TTL`]）：原先 `get_networks` / `get_printers`
+/// 两条命令是各自套着它们的，直接改调 `plat.list_known_ssids()` / `list_printers()`
+/// 会把缓存绕过去 —— 于是第二次及以后开屏都要重起一遍子进程（Windows 上打印机那趟是
+/// CIM 查询，最慢的一项），比合并之前更慢。合成的那一刻最容易丢的就是这类"命令层才
+/// 有的包装"。
+///
+/// 并发**不等于**省下冷启动：这四条是四条各自独立的 PowerShell，同时起只是让它们的
+/// 冷启动在时间上重叠，首屏等待由「最慢那条」决定，而不是「四条之和」。真正省掉它们
+/// 的只有缓存命中，以及在首屏之外补拉。
+///
+/// 已装程序**不**在这里：它最慢（Windows 扫开始菜单 5–15 秒），编辑器仍在后台补拉
+/// （见前端 `loadInstalledApps`），不进首屏关键路径 —— 这条合成命令因此只覆盖那四项。
+#[tauri::command(async)]
+pub fn get_editor_enumerations(state: State<'_, std::sync::Arc<AppState>>) -> String {
+    let plat = &state.plat;
+    let enums = std::thread::scope(|s| {
+        // 四条枚举互相独立、各自只做只读采样，并发跑可以让 Windows 上多条 PowerShell
+        // 冷启动在时间上重叠，首屏等待由「最慢那条」决定而不是「五条之和」。
+        let h_net = s.spawn(|| crate::platform::cached_known_ssids(plat));
+        let h_if = s.spawn(|| plat.list_interfaces());
+        let h_ad = s.spawn(|| plat.list_adapters());
+        let h_pr = s.spawn(|| crate::platform::cached_printers(plat));
+        EditorEnumerations {
+            networks: h_net.join().unwrap_or_default(),
+            interfaces: h_if.join().unwrap_or_default(),
+            adapters: h_ad.join().unwrap_or_default(),
+            printers: h_pr.join().unwrap_or_default(),
+        }
+    });
+    serde_json::to_string(&enums).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// 弹系统自己的文件选择器挑一个程序，返回其路径；用户取消 → `None`。

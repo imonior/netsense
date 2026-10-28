@@ -1363,38 +1363,55 @@ fn set_default_printer_script(printer: &str) -> String {
 
 /// 「这台机器装着哪些能启动的程序」，一条一个 JSON 对象 `{name, path}`。
 ///
-/// 只扫**开始菜单**（全机 + 当前用户两份）里的 `.lnk`：每一个快捷方式都是安装器写下的
-/// 「给人启动的入口」。但 `.lnk` 本身不是程序 —— 用户要的是「真实 exe 的路径 + 可读名」，
-/// 和 macOS 的 `.app` 列表一个口径，于是这里把每个 `.lnk` 解析成它指向的 `.exe`：
-/// - `path` 写成 **exe 的真实路径**（而不是 `.lnk` 路径），悬停 / 下发都看这一条、跑这一条；
-/// - `name` 优先取 exe 的 `FileDescription`（装好之后的可读名，比如「Google Chrome」），
-///   取不到再退回 exe 文件名（去扩展名），不退回 `.lnk` 的「Uninstall …」这种噪音；
+/// 扫**四个根**里的 `.lnk`：全机与当前用户的开始菜单，再加当前用户与公共桌面 ——
+/// 只扫开始菜单会漏掉「装了但没建开始菜单项」「只在桌面留了快捷方式」的那一批，
+/// 而下拉的承诺是**完整**，漏一个用户就会以为软件没扫全。
+///
+/// `.lnk` 本身不是程序 —— 用户要的是「真实目标路径 + 可读名」，和 macOS 的 `.app`
+/// 列表一个口径，于是这里把每个 `.lnk` 解析成它指向的目标：
+/// - `path` 写成**目标的真实路径**（而不是 `.lnk` 路径），悬停 / 下发都看这一条、跑这一条；
+/// - `name` 取**快捷方式自己的名字**（`BaseName`），也就是用户在开始菜单 / 桌面上看到的
+///   那个名字 —— 选程序时他认的就是这一个。
+///
+///   此前取的是 exe 的 `VersionInfo.FileDescription`，两个理由换掉它：
+///   ① 那要为每个快捷方式多读一次 exe 的版本资源（`Get-Item` + PE 解析），几百个快捷方式
+///   就是几百次随机磁盘读 —— 这一趟 5–15 秒的大头正是它，而它换来的只是一个显示名；
+///   ② 文件描述常是空、或同一厂商多个程序共用一句（「Setup」「Application」），
+///   反而不如快捷方式名贴近用户认知。
+/// - 目标扩展名放宽到 `.exe` / `.bat` / `.cmd`，与 [`pick_app_script`] 的文件筛选器
+///   （`.exe/.lnk/.bat/.cmd`）对齐 —— 手选能选到 `.bat`，下拉却枚举不出来，那是不自洽。
+///   这三类 `Start-Process -FilePath` 都起得来。
 /// - 过滤掉卸载类入口：`.lnk` 名或目标路径里含 `uninstall` / `卸载` 的一律不要，否则下拉里
 ///   一半是「Uninstall <App>」。
 ///
 /// 解析 `.lnk` 走 `WScript.Shell` COM，需要 STA 线程，所以外层的调用方走 [`ps_sta`]
-/// （不是 [`ps`]）。`Get-ChildItem -Recurse` 对两个根各自递归，`SilentlyContinue` 让某个根
-/// 读不动时还有另一个；两个都空才输出 `[]`。`.lnk` 解析失败或目标不是 `.exe`（文档 / 目录 /
-/// URL 快捷方式）的直接丢，不进下拉。
+/// （不是 [`ps`]）。`Get-ChildItem -Recurse` 对四个根各自递归，`SilentlyContinue` 让某个根
+/// 读不动（或该根目录不存在）时还有其他几个；全都空才输出 `[]`。`.lnk` 解析失败或目标
+/// 不是可执行文件（文档 / 目录 / URL 快捷方式）的直接丢，不进下拉。
+///
+/// Microsoft Store 应用（AppX）**不**在这里：它没有 `.lnk`、也没有可直接 `Start-Process`
+/// 的 exe 路径，只能用 `shell:AppsFolder\<族名>!<AppId>` 起 —— 加进来却启动不了，就是一条
+/// 「点了没反应」的候选，比不给更糟。要支持它得同时改 [`WindowsPlatform::launch_app`]
+/// 的分派，属另一件事。
 const INSTALLED_APPS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
 $shell = New-Object -ComObject WScript.Shell;
 $appDirs=@(
   (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
-  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+  (Join-Path $env:USERPROFILE 'Desktop'),
+  (Join-Path $env:PUBLIC 'Desktop')
 );
 $rows=@(foreach ($d in $appDirs) {
   Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
     $lnk = $_.FullName;
     try { $target = $shell.CreateShortcut($lnk).TargetPath } catch { $target = '' }
     if (-not $target) { return }
-    if ($target -notmatch '\.exe$') { return }
+    if ($target -notmatch '(\.exe|\.bat|\.cmd)$') { return }
     $base = $_.BaseName;
     # i18n-exempt: matching a localized Start-Menu entry name (system output), not UI text
     if ($base -match '(?i)uninstall|卸载') { return }
     if ($target -match '(?i)uninstall|卸载') { return }
-    try { $desc = (Get-Item -LiteralPath $target).VersionInfo.FileDescription } catch { $desc = '' }
-    if (-not $desc) { $desc = [System.IO.Path]::GetFileNameWithoutExtension($target) }
-    [pscustomobject]@{ name=$desc; path=$target }
+    [pscustomobject]@{ name=$base; path=$target }
   }
 });
 if ($rows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rows -Compress }"#;
@@ -1668,61 +1685,13 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
     /// 名字比少给一个更糟。剩下的问题只是「未连接的非物理适配器算不算本机网卡」：
     /// `Get-NetAdapter` 会把 WAN Miniport 一家的十几个伪适配器一起端出来，全列出来
     /// 会把真正的口淹掉，所以这里只留物理口和已经连上的（网桥、vEthernet 这类）。
-    /// 一次 PowerShell 拿全部行；不套 `cached_nics`：编辑器刷新要看到刚插上扩展坞的口。
+    /// 走 2 秒 TTL 缓存（`cached_adapters`）：既不至于每次刷新都重起一条 PowerShell，
+    /// 也足够让「插上坞站再刷新」在短暂等待后看得到新口。
     fn list_adapters(&self) -> Vec<super::NicInfo> {
-        const ADAPTER_ROWS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
-$phys = New-Object System.Collections.Generic.HashSet[int];
-foreach ($n in @(Get-NetAdapter -Physical)) { [void]$phys.Add($n.ifIndex) };
-$list = New-Object System.Collections.Generic.List[object];
-foreach ($n in @(Get-NetAdapter)) {
-  $t = ("$($n.InterfaceDescription) $($n.Name)").ToLower();
-  if (@($vpn | Where-Object { $t.Contains($_) }).Count -gt 0) { continue };
-  if ($n.Status -ne 'Up' -and -not $phys.Contains($n.ifIndex)) { continue };
-  $list.Add([pscustomobject]@{ name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status });
-};
-if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
-
-        let needles: Vec<&str> = super::VPN_APP_TABLE.iter().map(|(needle, _)| *needle).collect();
-        let script = format!("$vpn={};\n{}", ps_arr(&needles), ADAPTER_ROWS_PS);
-        let Ok(raw) = ps(&script) else {
-            return Vec::new();
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
-            return Vec::new();
-        };
-        // 只有一个口时 PowerShell 把数组退化成单个对象，与 list_interfaces 同一处理
-        let rows: Vec<&serde_json::Value> = match &v {
-            serde_json::Value::Array(a) => a.iter().collect(),
-            other => vec![other],
-        };
-        let get = |r: &serde_json::Value, k: &str| -> String {
-            r.get(k)
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        };
-        let mut out: Vec<super::NicInfo> = rows
-            .into_iter()
-            .filter(|r| !get(r, "name").is_empty())
-            .map(|r| {
-                let name = get(r, "name");
-                let desc = get(r, "desc");
-                let mac = get(r, "mac");
-                super::NicInfo {
-                    kind: kind_from_row(&get(r, "media"), &desc, &name),
-                    up: get(r, "status").eq_ignore_ascii_case("Up"),
-                    label: (!desc.is_empty()).then_some(desc),
-                    mac: (!mac.is_empty()).then_some(mac),
-                    name,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        // 名称字典序（Ethernet / Ethernet 2 / Wi-Fi）：类型分组是界面的事，下拉要稳定顺序
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        out
+        super::cached_adapters(|| self.sample_adapters())
     }
+
+
 
     /// 系统的 UI 语言。`GetUserDefaultUILanguage` 给的是一个 LANGID：低 10 位是主语言，
     /// 高 6 位是子语言。只把这五种字典对得上的主语言翻成标签，其余（含读不到的 0）一律
@@ -2055,6 +2024,67 @@ pub(crate) fn parse_ps_routes(out: &str) -> Vec<RouteConfig> {
     routes
 }
 
+impl WindowsPlatform {
+    /// `list_adapters` 的真实采样（无缓存）：一次 PowerShell 拿全部行。
+    ///
+    /// 抽成独立方法，好让带 TTL 的 [`NetworkPlatform::list_adapters`] 在缓存窗口内复用它，
+    /// 而不必把整段脚本塞进闭包。
+    fn sample_adapters(&self) -> Vec<super::NicInfo> {
+        const ADAPTER_ROWS_PS: &str = r#"$ErrorActionPreference='SilentlyContinue';
+$phys = New-Object System.Collections.Generic.HashSet[int];
+foreach ($n in @(Get-NetAdapter -Physical)) { [void]$phys.Add($n.ifIndex) };
+$list = New-Object System.Collections.Generic.List[object];
+foreach ($n in @(Get-NetAdapter)) {
+  $t = ("$($n.InterfaceDescription) $($n.Name)").ToLower();
+  if (@($vpn | Where-Object { $t.Contains($_) }).Count -gt 0) { continue };
+  if ($n.Status -ne 'Up' -and -not $phys.Contains($n.ifIndex)) { continue };
+  $list.Add([pscustomobject]@{ name=$n.Name; desc=$n.InterfaceDescription; mac=$n.MacAddress; media=$n.MediaType; status=$n.Status });
+};
+if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
+
+        let needles: Vec<&str> = super::VPN_APP_TABLE.iter().map(|(needle, _)| *needle).collect();
+        let script = format!("$vpn={};\n{}", ps_arr(&needles), ADAPTER_ROWS_PS);
+        let Ok(raw) = ps(&script) else {
+            return Vec::new();
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+            return Vec::new();
+        };
+        // 只有一个口时 PowerShell 把数组退化成单个对象，与 list_interfaces 同一处理
+        let rows: Vec<&serde_json::Value> = match &v {
+            serde_json::Value::Array(a) => a.iter().collect(),
+            other => vec![other],
+        };
+        let get = |r: &serde_json::Value, k: &str| -> String {
+            r.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let mut out: Vec<super::NicInfo> = rows
+            .into_iter()
+            .filter(|r| !get(r, "name").is_empty())
+            .map(|r| {
+                let name = get(r, "name");
+                let desc = get(r, "desc");
+                let mac = get(r, "mac");
+                super::NicInfo {
+                    kind: kind_from_row(&get(r, "media"), &desc, &name),
+                    up: get(r, "status").eq_ignore_ascii_case("Up"),
+                    label: (!desc.is_empty()).then_some(desc),
+                    mac: (!mac.is_empty()).then_some(mac),
+                    name,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        // 名称字典序（Ethernet / Ethernet 2 / Wi-Fi）：类型分组是界面的事，下拉要稳定顺序
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+}
 #[cfg(test)]
 mod tests {
     use super::*;

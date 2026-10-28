@@ -165,9 +165,18 @@ impl NetworkChange {
     }
 }
 
-/// 回读校验的采样节律：下发后网卡要重新关联、DHCP 还要拿地址，立刻读会误判失败。
-const READBACK_ATTEMPTS: usize = 4;
-const READBACK_SETTLE: Duration = Duration::from_millis(800);
+/// 回读校验的采样次数：下发后网卡要重新关联、DHCP 还要拿地址，立即读会误判失败，
+/// 所以给几次「采样 → 沉降 → 再比对」的机会。次数刻意压到 3：够网卡把地址拿稳、
+/// 又不会把一次「其实早该成功」的下发拖到好几秒之后（最坏停在 1.2s 睡眠 + 3 次采样）。
+const READBACK_ATTEMPTS: usize = 3;
+
+/// 回读退避步长：第 `attempt` 次失败后的等待。有界递增（400 → 800 → 1200ms）——
+/// 第一次重试更快看到变化，又不会像无界指数那样把总校验时长拉到不可预期。封顶 1200ms。
+const READBACK_SETTLE_MAX: Duration = Duration::from_millis(1200);
+fn readback_settle(attempt: usize) -> Duration {
+    let ms = (400 + 400 * attempt as u64).min(READBACK_SETTLE_MAX.as_millis() as u64);
+    Duration::from_millis(ms)
+}
 
 /// The mode's name inside a log line: spelled exactly as in the config file (serde
 /// lowercase), so a user comparing the log against the editor sees the same word.
@@ -379,6 +388,12 @@ pub fn apply_3a<P: NetworkPlatform>(
         };
     }
     let mut last: Option<VerifyFailure> = None;
+    // 「只重采变化项」不会漏采：每一次回读都拿**整份** `fresh_status` 与**整份** `want`
+    // 比对（[`readback_match`] 里的 `check` 对 `want` 的每一项——ip / 掩码 / 网关 / DNS /
+    // 路由 / IPv6——逐条核对），`want` 本就是这批下发**实际改动了哪些项**的权威记录
+    // （没动的项在 `want` 里是 `None`，不比正是「不动它」的语义）。平台快照是单体的
+    // （一次 `fresh_status` 把 SSID/RSSI 等一并采回），我们不能挑字段只采，但**比较**始终
+    // 覆盖 `want` 的全部字段，所以任何一个被改动的项都不会在任一次尝试里被跳过。
     for attempt in 0..READBACK_ATTEMPTS {
         match readback_match(plat, cfg, &before.routes) {
             Ok(()) => {
@@ -389,9 +404,9 @@ pub fn apply_3a<P: NetworkPlatform>(
             }
             Err(f) => {
                 // One line per mismatching read-back (debug level): inside the
-                // 4×800ms settle window, "which attempt and what differed" is
-                // exactly what troubleshooting a non-effective apply needs.
-                // 每一次没对上的回读都留一行（debug 档）：4×800ms 的沉降期内
+                // 400→800→1200ms settle window, "which attempt and what differed"
+                // is exactly what troubleshooting a non-effective apply needs.
+                // 每一次没对上的回读都留一行（debug 档）：400→800→1200ms（共 3 次）的沉降期内
                 // 「第几次、差在哪」正是排查下发不生效时要看的东西。
                 if attempt + 1 < READBACK_ATTEMPTS {
                     crate::log::debug(&i18n::tf(
@@ -401,7 +416,7 @@ pub fn apply_3a<P: NetworkPlatform>(
                             ("detail", &f.to_string()),
                         ],
                     ));
-                    std::thread::sleep(READBACK_SETTLE);
+                    std::thread::sleep(readback_settle(attempt));
                 }
                 last = Some(f);
             }

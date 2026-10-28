@@ -100,7 +100,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 690 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 691 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -215,7 +215,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，60 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，62 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -235,7 +235,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `probe_network` | — | 重新采样并立即评估当前网络：唯一命中就走「立即应用」那条链路（网络 + 3B），多命中只报告名字、零命中只报告，都不动网卡。不受 DHCP 暂停约束，也不解除暂停（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字）。交的是**空中那个名字**，与面板「当前网络」那一格同源，判据见上面那段 |
 | `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |
-| `get_installed_apps` | — | 本机登记了启动项的程序 `[{name, path}]`（第 4 列「启动程序」动作的候选）：macOS 是 /Applications 一带的 `.app`，Windows 是开始菜单的 `.lnk`（`Start-Process` 直接受理它），Linux 是 XDG 目录里 `Type=Application` 的 `.desktop`。`path` 是平台自己受理的形状（`open -a` / `Start-Process` / exec），界面按 `name` 列出、选中的是它。枚举不到就是空表：候选只是捷径，手输与「浏览…」始终在 |
+| `get_editor_enumerations` | — | 编辑器开屏一次性枚举：已保存网络 / 在用网卡 / 本机网卡 / 打印机，合成一条 IPC（替代编辑器原本发的 `get_networks` / `get_interfaces` / `get_adapters` / `get_printers` 四条），省四趟往返；四条子进程采样在后端内部并发（`std::thread::scope`），不比前端 `Promise.all` 慢 —— 也就是说**省的是往返，不是子进程**（冷启动在时间上重叠，耗时仍是 `max(各条)` 而非 `sum`）。真正的提速来自另一处：`main.rs` 启动即后台预热这三项枚举（见 `platform::warm_enum_caches`），开屏通常直接命中 120 秒缓存。`list_adapters` 另有一份 2 秒 TTL 缓存（`cached_adapters`），只挡**同一轮内被问两遍**（刷新与开屏撞在一起），刻意做短，挡不住下一次开屏。**不含**已装程序（`get_installed_apps` 仍后台补拉）。返回 `{networks, interfaces, adapters, printers}` 的 JSON 字符串 |
+| `get_installed_apps` | — | 本机登记了启动项的程序 `[{name, path}]`（第 4 列「启动程序」动作的候选）：macOS 是 /Applications 一带的 `.app`，Windows 是**开始菜单两个根 + 当前用户桌面 + 公共桌面**里的 `.lnk`（`Start-Process` 直接受理它），Linux 是 XDG 目录里 `Type=Application` 的 `.desktop`。Windows 侧显示名取快捷方式自己的名字（即开始菜单 / 桌面上看到的那一个），目标是 `.exe` / `.bat` / `.cmd` —— 与 `pick_app` 的文件筛选器同一范围，手选得到的手输范围下拉也给得出；Microsoft Store 应用（AppX）**不**在列，它没有 `.lnk`、也没有可直接启动的路径，列进去只会多出一条点了没反应的候选。`path` 是平台自己受理的形状（`open -a` / `Start-Process` / exec），界面按 `name` 列出、选中的是它。枚举不到就是空表：候选只是捷径，手输与「浏览…」始终在 |
 | `pick_app` | — | 打开系统文件选择器挑一个可启动目标，返回选中路径。**取消回 `null`**（什么都不该发生）；选择器起不来才是错误，且错误原文就是给用户看的话 —— 两者分开报，才能把「用户反悔」与「这台机器没有可用的选择器」（Linux 上 zenity / kdialog 都没有时回 `pal.no_file_dialog`）分清楚 |
 | `set_language` | `code` | 切换 UI 语言并写进**软件配置**；`code` 为 `system` 时是「跟随系统」—— 字段从 `settings.json` 里删掉，本次生效的语言现问操作系统。不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
 | `set_theme` | `code` | 切换界面配色并写进**软件配置**：`system` / `light` / `dark` 三档之一，存的就是用户选的这一档，返回值才是当下生效的那一套（`light`/`dark`）。认不出的 `code` 一律拒绝（`sett.theme_rejected`）而不是退回默认档 —— 界面发出一个后端不认的值说明前端有 bug，静默收下只会把它藏起来。与语言同一条判据：不碰 `config.json`，不触发热重载，只广播一次 `netsense://status`（载荷里的 `theme` 是算出来的那一套），并记一条 `notify.theme_set` |
@@ -269,6 +270,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `open_settings` / `close_settings` | — | 显示 / 隐藏软件设置窗口（面板的「设置」走前者） |
 | `open_log_viewer` / `close_log_viewer` | — | 显示 / 隐藏日志窗口（面板的「日志」走前者） |
 | `close_applied` | — | 隐藏「配置已应用」结果弹窗窗口（label = applied）：只收回窗口、不退出应用；该窗口 `visible:false` 创建，由后端 `emit_applied` 在应用成功（且设置开启弹窗）时拉起，关闭按钮走这条命令 |
+| `get_last_applied` | — | 取最近一次「配置已应用」的结果载荷（`null` = 还没有过任何一轮应用）。结果弹窗窗口用它补上事件广播的时序洞：页面加载可能晚于引擎首轮 pass 的广播，那一发收不到，故加载完主动来取一次 |
 | `open_logs` | — | 用系统默认程序打开**当前实际使用**的日志目录 |
 | `get_log_files` | — | `{ log_dir, files[], max_lines }`：目录里的日志文件清单（新→旧）+ 单次行数上限。目录一并返回，因为日志目录不可写时后端会退到临时目录，界面自己拼的那个路径可能是错的 |
 | `read_log` | `name`, `lines?` | 读某个日志文件的**尾部**若干行（`{ name, text, lines, truncated }`）。只接受文件名，名字形状在 Rust 侧重新校验，所以这里递不出目录外的路径 |

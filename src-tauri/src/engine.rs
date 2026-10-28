@@ -1756,6 +1756,26 @@ fn applied_groups(
         }
     };
 
+    // —— 系统：配置名 / SSID / 接口。身份行没有成败可言，不带标记。 ——
+    //
+    // 排**第一组**：这一组回答的是「这是哪一套配置、连的是哪个网」，先说身份再说改了
+    // 什么 —— 反过来用户得从清单末尾往上找身份才能对上号。
+    // System first: it answers "which profile, which network", so the reader knows what
+    // they are looking at before reading what was written.
+    let mut sys = Vec::new();
+    let profile_disp = match name {
+        Some(n) => n.to_string(),
+        None => i18n::t("popup.applied_fallback"),
+    };
+    sys.push(applied_row("popup.profile", profile_disp, None, None));
+    if let Some(s) = &snap.ssid {
+        sys.push(applied_row("status.ssid", s.clone(), None, None));
+    }
+    if let Some(i) = &snap.primary_interface {
+        sys.push(applied_row("popup.interface", i.clone(), None, None));
+    }
+    group(&i18n::t("popup.group_system"), sys);
+
     // —— IPv4：模式 / 地址 / 掩码 / 网关 / 路由增删 ——
     let mut v4 = Vec::new();
     if let Some(m) = &c.mode {
@@ -1821,20 +1841,6 @@ fn applied_groups(
         );
     }
 
-    // —— 系统：配置名 / SSID / 接口。身份行没有成败可言，不带标记。 ——
-    let mut sys = Vec::new();
-    let profile_disp = match name {
-        Some(n) => n.to_string(),
-        None => i18n::t("popup.applied_fallback"),
-    };
-    sys.push(applied_row("popup.profile", profile_disp, None, None));
-    if let Some(s) = &snap.ssid {
-        sys.push(applied_row("status.ssid", s.clone(), None, None));
-    }
-    if let Some(i) = &snap.primary_interface {
-        sys.push(applied_row("popup.interface", i.clone(), None, None));
-    }
-    group(&i18n::t("popup.group_system"), sys);
     groups
 }
 
@@ -1845,9 +1851,30 @@ fn applied_groups(
 /// 延迟单击同一个模式（两个 handle：一个借给 `run_on_main_thread` 当 `&self`，
 /// 一个 move 进闭包；同一个 `app` 不能既被借用又被 move 捕获，否则 E0505）。
 fn show_applied_window(state: &Arc<AppState>) {
+    // 没有载荷就不叫窗口：一扇「没内容可显示」的置顶无边框窗是最糟的形态 ——
+    // 用户既看不到结果，又得去别处找怎么关掉它（1.8.6 那扇黑窗的教训）。
+    let payload = state
+        .last_applied
+        .lock()
+        .ok()
+        .and_then(|v| v.as_ref().cloned());
+    let Some(payload) = payload else {
+        log::warn(&i18n::t("engine.applied_no_payload"));
+        return;
+    };
     if let Some(app) = state.app.get().cloned() {
         let app_cl = app.clone();
         let _ = app.run_on_main_thread(move || {
+            // 定向重发一次最新载荷：窗口页面可能是在上一次全局广播**之后**才加载完的
+            // （冷启动首评正是这种情形），那一发它没收到。重发让「显示」这件事
+            // 不再依赖页面加载时序 —— 页面若仍没就绪，它加载完会自己来取
+            // （`ipc::get_last_applied`），两条路都通向同一份内容。
+            let _ = tauri::Emitter::emit_to(
+                &app_cl,
+                crate::popup::APPLIED_LABEL,
+                "netsense://applied",
+                payload,
+            );
             // 结果弹窗是一扇独立置顶窗口（applied）：任何时候都浮在最上、且不抢焦点，
             // 与编辑器 / 托盘面板 / 设置 / 日志互不隶属。直接叫它出来，无需判断别的窗是否开着。
             crate::popup::show_applied(&app_cl);
@@ -1900,11 +1927,14 @@ fn emit_applied(
     if snap.ssid.is_none() && snap.primary_interface.is_none() {
         return;
     }
-    crate::state::emit(
-        state,
-        "netsense://applied",
-        applied_notice(name, snap, change, ok, restored, note),
-    );
+    // 先存一份再广播：结果弹窗窗口可能还没加载完（冷启动首评就跑在它之前），那一发
+    // 全局广播会丢。缓存下来后，「显示」与「内容」不再依赖页面加载时序 —— 显示时
+    // 定向重发一次，页面加载完也会自己来取（见 [`show_applied_window`] 与 `ipc::get_last_applied`）。
+    let payload = applied_notice(name, snap, change, ok, restored, note);
+    if let Ok(mut last) = state.last_applied.lock() {
+        *last = Some(payload.clone());
+    }
+    crate::state::emit(state, "netsense://applied", payload);
     if actions_pending {
         // 动作还在后台跑：窗口先不显示，等 3B1 收尾报告归因后由 `apply_runs` 叫出来。
         // 事件已发，隐藏窗口此刻就把网络部分渲染好了 —— 显示时数据已就绪。
@@ -3310,34 +3340,34 @@ mod tests {
         assert_eq!(v["ssid"], "Home");
         assert_eq!(v["iface"], "wi-fi");
         assert_eq!(v["nochange"], false);
-        // 四组都在：IPv4 / IPv6 / DNS / 系统，顺序固定。
+        // 四组都在，顺序固定：**系统**在最上面（先说身份），其后 IPv4 / IPv6 / DNS。
         assert_eq!(v["groups"].as_array().unwrap().len(), 4);
+        // 系统组（第 0 组）：配置名 / SSID / 接口，身份行不带标记（ok = null）。
+        let gs = grp(&v, 0);
+        assert_eq!(gs["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(row(gs, 0)["value"], "home");
+        assert_eq!(row(gs, 1)["value"], "Home");
+        assert_eq!(row(gs, 2)["value"], "wi-fi");
+        assert_rows_shaped(gs, None);
         // IPv4 组：模式 / 地址 / 掩码 / 网关 / 新增路由 = 5 行，原始值逐行核对。
-        let g4 = grp(&v, 0);
+        let g4 = grp(&v, 1);
         assert_eq!(g4["rows"].as_array().unwrap().len(), 5);
         assert_eq!(row(g4, 1)["value"], "192.168.1.5");
         assert_eq!(row(g4, 2)["value"], "255.255.255.0");
         assert_eq!(row(g4, 3)["value"], "192.168.1.1");
         assert_eq!(row(g4, 4)["value"], "2");
         // IPv6 组：manual 的地址三件套随模式一起进清单。
-        let g6 = grp(&v, 1);
+        let g6 = grp(&v, 2);
         assert_eq!(g6["rows"].as_array().unwrap().len(), 4);
         assert_eq!(row(g6, 1)["value"], "2001:db8::1");
         assert_eq!(row(g6, 2)["value"], "64");
         assert_eq!(row(g6, 3)["value"], "fe80::1");
         // DNS 组：写成了那几台。
-        assert_eq!(row(grp(&v, 2), 0)["value"], "192.168.1.1, 8.8.8.8");
-        // 系统组：配置名 / SSID / 接口，身份行不带标记（ok = null）。
-        let gs = grp(&v, 3);
-        assert_eq!(gs["rows"].as_array().unwrap().len(), 3);
-        assert_eq!(row(gs, 0)["value"], "home");
-        assert_eq!(row(gs, 1)["value"], "Home");
-        assert_eq!(row(gs, 2)["value"], "wi-fi");
-        // 网络组每行 ✅ 且无明细；系统组每行无标记。
-        for n in 0..3 {
+        assert_eq!(row(grp(&v, 3), 0)["value"], "192.168.1.1, 8.8.8.8");
+        // 三个网络组每行 ✅ 且无明细；系统组（无标记）已在上面核过。
+        for n in 1..4 {
             assert_rows_shaped(grp(&v, n), Some(true));
         }
-        assert_rows_shaped(gs, None);
     }
 
     /// DHCP 只产生「寻址模式」一行，没有地址/DNS 行；DNS 组整组不出现。
@@ -3356,12 +3386,14 @@ mod tests {
             None,
         );
         assert_eq!(v["success"], true);
-        // 两组：IPv4（1 行）+ 系统（SSID 读不到 ⇒ 配置名 + 接口两行）。
+        // 两组：系统在前（SSID 读不到 ⇒ 配置名 + 接口两行）+ IPv4（1 行）。
         assert_eq!(v["groups"].as_array().unwrap().len(), 2);
-        let g4 = grp(&v, 0);
+        let gs = grp(&v, 0);
+        assert_eq!(gs["rows"].as_array().unwrap().len(), 2, "配置名 + 接口");
+        assert_rows_shaped(gs, None);
+        let g4 = grp(&v, 1);
         assert_eq!(g4["rows"].as_array().unwrap().len(), 1, "只有寻址模式一行");
         assert_rows_shaped(g4, Some(true));
-        assert_rows_shaped(grp(&v, 1), None);
     }
 
     /// DNS 两态：指定服务器与清空（交回自动）各占一行，二者互斥。
@@ -3380,9 +3412,9 @@ mod tests {
             true,
             None,
         );
-        // 两组：DNS（1 行，值 = 那几台）+ 系统（SSID + 配置名）。
+        // 两组：系统在前 + DNS（1 行，值 = 那几台）。
         assert_eq!(v["groups"].as_array().unwrap().len(), 2);
-        assert_eq!(row(grp(&v, 0), 0)["value"], "192.168.1.1, 8.8.8.8");
+        assert_eq!(row(grp(&v, 1), 0)["value"], "192.168.1.1, 8.8.8.8");
 
         // 清空 DNS（交回自动获取）：一行，值非空（本地化的「DHCP 提供」）。
         let cleared = crate::network::NetworkChange {
@@ -3398,7 +3430,7 @@ mod tests {
             None,
         );
         assert_eq!(v2["groups"].as_array().unwrap().len(), 2);
-        assert!(!row(grp(&v2, 0), 0)["value"].as_str().unwrap().is_empty());
+        assert!(!row(grp(&v2, 1), 0)["value"].as_str().unwrap().is_empty());
     }
 
     /// 不带 change 的分支（THEN 缺省 / 系统本就合规跳过下发）：没有网络组，

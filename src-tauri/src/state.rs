@@ -69,6 +69,15 @@ pub struct AppState {
     /// 本标志而不显示窗口；3B1 收尾报告（`Msg::RunDone`）被引擎归因的那一刻清位并显示
     /// （见 `engine::apply_runs`）。动作提交失败（通道缺失）时由提交方清位补显示。
     pub applied_show_pending: AtomicBool,
+    /// 最近一次「配置已应用」的事件载荷（`netsense://applied`）。
+    ///
+    /// 存在的理由是一个**真实的时序洞**：结果弹窗窗口启动即创建，但它的页面要过一会儿
+    /// 才加载完、才注册上监听；而引擎的第一轮 pass 就跑在它之前 —— 那一发全局广播
+    /// 送到一个还没注册监听的页面上就是石沉大海，窗口随后被叫出来时只能显示空占位
+    /// （1.8.6 用户看到的那扇「全黑、没内容也没关闭按钮」的窗就是这么来的）。
+    /// 存下这份载荷后，内容投递不再依赖加载时序：显示窗口时定向重发一次
+    /// （见 `engine::show_applied_window`），页面加载完也会主动来取（`ipc::get_last_applied`）。
+    pub last_applied: Mutex<Option<serde_json::Value>>,
 }
 
 impl AppState {
@@ -110,6 +119,7 @@ impl AppState {
             app: OnceLock::new(),
             watcher: Mutex::new(None),
             applied_show_pending: AtomicBool::new(false),
+            last_applied: Mutex::new(None),
         }
     }
 

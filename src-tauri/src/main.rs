@@ -234,6 +234,22 @@ fn main() {
 
             app.manage(shared.clone());
 
+            // 后台预热三项静态枚举缓存（已装程序 / 打印机 / 已知网络）。
+            //
+            // 它们喂的是编辑器里那三个**必须完整**的下拉 —— 少一项用户就以为软件没扫全，
+            // 所以不能拿「挪出首屏、短暂为空」换速度。托盘常驻给了另一条路：进程一起来
+            // 就在后台采，等用户点开设置界面时这三份已经在 TTL 窗口里，首屏直接命中。
+            // 慢活还是那些慢活，只是换到用户不在等的时候做。
+            //
+            // 与首屏不会各采一遍：`platform::cached_*` 是整段持锁采样的（single-flight）。
+            //  detached 线程，不 join —— 采不完也不该拖住启动。
+            {
+                let warm = shared.clone();
+                std::thread::spawn(move || {
+                    platform::warm_enum_caches(&warm.plat);
+                });
+            }
+
             // 保存 AppHandle 供后续事件广播 / 面板刷新使用
             let _ = shared.app.set(app.handle().clone());
 
@@ -309,6 +325,7 @@ fn main() {
             ipc::get_networks,
             ipc::get_printers,
             ipc::get_installed_apps,
+            ipc::get_editor_enumerations,
             ipc::pick_app,
             ipc::open_logs,
             ipc::get_log_files,
@@ -349,6 +366,7 @@ fn main() {
             ipc::open_editor,
             ipc::close_editor,
             ipc::close_applied,
+            ipc::get_last_applied,
             ipc::quit_app,
             ipc::check_update,
             ipc::run_update,

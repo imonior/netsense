@@ -1563,19 +1563,24 @@
 
   async function loadAllInner(keepSelection) {
     const prevSel = sel && { ...sel };
-    // 这五份**先一起发出去**，但第一帧不等它们（原因见下面第二处注释）。`get_installed_apps`
-    // 故意**不在**这里：它是六份里最慢的（Windows 扫开始菜单 + COM 解析 .lnk 常要 5–15 秒），
-    // 而它只喂「启动程序」那一格的候选下拉 —— 一旦被算进首屏第二帧，整屏状态徽标与
-    // 网卡 / 打印机遇就会跟着它一起等，现场那句「点开空白好几秒」就是这么来的。它改为后台
-    // 补拉（见文末 [`loadInstalledApps`]），到了再单独刷新候选，不再占任何首屏关键路径。
+    // 这份枚举与 `get_status` **先一起发出去**，但第一帧不等它们（原因见下面第二处注释）。
+    // 枚举（网络 / 在用网卡 / 本机网卡 / 打印机）已由后端 `get_editor_enumerations` 合成一条
+    // IPC（见 `ipc::get_editor_enumerations`），省下四趟往返；四条子进程采样在后端内部并发，
+    // 不比原先五条 `Promise.all` 慢。`get_installed_apps` 故意**不在**这里：它是这些里最慢的
+    // （Windows 扫开始菜单 + COM 解析 .lnk 常要 5–15 秒），而它只喂「启动程序」那一格的候选
+    // 下拉 —— 一旦被算进首屏第二帧，整屏状态徽标与网卡 / 打印机遇就会跟着它一起等，现场那句
+    // 「点开空白好几秒」就是这么来的。它改为后台补拉（见文末 [`loadInstalledApps`]），到了再
+    // 单独刷新候选，不再占任何首屏关键路径。
     let nicsFailed = false;
-    const external = Promise.all([
-      invoke("get_networks").catch(() => []),
-      invoke("get_interfaces").catch(() => { nicsFailed = true; return []; }),
-      invoke("get_adapters").catch(() => []),
-      invoke("get_printers").catch(() => []),
-      invoke("get_status"),
-    ]);
+    const external = invoke("get_editor_enumerations")
+      .then((raw) => {
+        const e = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return [e.networks || [], e.interfaces || [], e.adapters || [], e.printers || []];
+      })
+      .catch(() => {
+        nicsFailed = true;
+        return [[], [], [], []];
+      });
     try {
       // 第一帧只等这三份：配置喂整个表单，语言与配色决定它长什么样。它们背后都不拉子进程
       // （配色那一档读的是平台层里带 TTL 的缓存），并发送出去再一起等，代价只是三者最慢的那个。
@@ -1608,13 +1613,13 @@
       loadFailed(e);
       return;
     }
-    // 剩下这五份每一项都要拉起一个系统子进程：Windows 上每一趟是一整条 PowerShell 启动链，
-    // macOS 的降级链里 `get_status` 那一趟可以走到几秒。它们喂的是状态条、徽标与下拉候选，
-    // 不是表单本身 —— 让它们排进首绘的关键路径，就是现场那句「自动化配置点开以后空白好几秒」。
-    // 只有 `get_status` 的失败会落到下面的 catch：它带着「当前网络」那几项地址和引擎视图，
-    // 取不到就等于窗口没起来，不该装作没事。
+    // 剩下这两份（一条枚举 + `get_status`）每一项都要拉起系统子进程：Windows 上每一趟是一整条
+    // PowerShell 启动链，macOS 的降级链里 `get_status` 那一趟可以走到几秒。它们喂的是状态条、
+    // 徽标与下拉候选，不是表单本身 —— 让它们排进首绘的关键路径，就是现场那句「自动化配置点开
+    // 以后空白好几秒」。只有 `get_status` 的失败会落到下面的 catch：它带着「当前网络」那几项
+    // 地址和引擎视图，取不到就等于窗口没起来，不该装作没事。
     try {
-      const [nets, nics, adapters, printers, rawSt] = await external;
+      const [[nets, nics, adapters, printers], rawSt] = await Promise.all([external, invoke("get_status")]);
       wifiList = asArray(nets);
       nicList = asArray(nics);
       adapterList = asArray(adapters);

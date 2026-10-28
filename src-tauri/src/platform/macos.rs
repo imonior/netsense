@@ -14,12 +14,20 @@
 //! | 15.0–15.5 | 已删除 | **恒返回 "You are not associated…"** | SSID（约 46ms） | SSID+RSSI |
 //! | 15.6+ | 已删除 | 同上 | **SSID 被涂成 `<redacted>`** | **SSID 同样被涂黑**（只剩 RSSI） |
 //!
+//! 注：`networksetup -getairportnetwork` 一列是各版本**能力**的史档案。自 1.8.7 起它在
+//! 15.0+ 被移出降级链 —— 那里它恒返回 "You are not associated…"（读到的不是 SSID，是失败
+//! 提示），白付一趟子进程；而 ≤14.3 上它仍是一条真能给到 SSID 的兜底，故**按版本保留**
+//! （判据 [`networksetup_reads_ssid`]，见 [`get_current_ssid`]）：它只在 CoreWLAN 也失手
+//! 时才轮到，保留的成本远小于丢掉一条可用来源。
+//!
 //! 15.6 起 CLI 来源在现连 SSID 上全军覆没，所以这里的第一来源是 **CoreWLAN**
 //! （`CWWiFiClient`，见 `ssid_via_corewlan`）：Sequoia 上它仍然给出真实网络名，
 //! 代价是系统把 SSID 视为位置信息 —— 必须申请定位授权（`request_location_authorization`）
 //! 并在 Info.plist 里声明用途，NetSense 才会出现在「定位服务」授权列表。
-//! 授权没给之前它返回 `None`，降级链照旧走完三个 CLI 来源
-//! （`networksetup` → `ipconfig getsummary` → `system_profiler`，最后那个慢，故带 2s 缓存）。
+//! 授权没给之前它返回 `None`，降级链照旧走完剩余 CLI 来源
+//! （`ipconfig getsummary` → `system_profiler`，最后那个慢，故带 2s 缓存）。
+//! `networksetup -getairportnetwork` 在 15.0+ 恒返回 "You are not associated…"，纯属浪费一趟
+//! 子进程，已于 1.8.7 起在 15.0+ 跳过；≤14.3 仍保留为兜底（见上表注）。
 //!
 //! 提权策略：优先 `/etc/sudoers.d/netsense` 授权的白名单包装脚本（免密、无弹窗）。
 //! 通道还没装上时，**第一次**应用配置的那一个授权框顺手把通道装好（见
@@ -48,15 +56,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use unicode_normalization::UnicodeNormalization;
 
 /// `airport` 的固定路径。macOS 14.4 起 Apple 已删除该工具（再调用只会拿到一条弃用
 /// 警告文本），所以它只是「读得到就赚到」的第一来源，不再是必需路径。
 const AIRPORT: &str =
     "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
 
-/// `system_profiler` 结果缓存 TTL。单次调用 1~4s，而 SSID 监视线程每 2~5s 就会轮询一次、
-/// 面板刷新也会打 `get_status` —— 不缓存会把后台线程长时间钉在等子进程上。
-const SYS_PROFILER_TTL: Duration = Duration::from_secs(2);
+/// `system_profiler` 结果缓存 TTL。
+///
+/// 单次调用 1~4s，而 SSID 监视线程每 2s 轮询一次、面板刷新与 3A 回读也会打 `get_status`
+/// —— 不缓存会把后台线程长时间钉在等子进程上。
+///
+/// ⚠️ 旧值 `Duration::from_secs(2)` 是这里的性能陷阱根因：它和采样间隔（`SAMPLE_INTERVAL`、
+/// 也是 `STATUS_TTL` / `NIC_LIST_TTL`）几乎相等，于是缓存刚写进去、下一轮采样来读时就已
+/// 被判过期 —— 等于没缓存，后台每 ~2s 钉死 1.6s 在等这个子进程。改成 30s 后，SSID/RSSI
+/// 这类展示值在 30s 内不会变到用户能察觉，而采样线程、面板刷新、3A 回读在 30s 窗口里都
+/// 吃到同一份结果，把稳态耗时的「1.6s 每 2s」压成「1.6s 每 30s」。
+const SYS_PROFILER_TTL: Duration = Duration::from_secs(30);
 
 /// 特权包装脚本路径（由 scripts/install-priv-helper.sh 安装）。
 const PRIV_SCRIPT: &str = "/usr/local/libexec/netsense-priv.sh";
@@ -1071,7 +1088,16 @@ fn value_of(out: &str, key: &str) -> Option<String> {
 ///
 /// 只有归一成 `None`，上层才会继续走下一级降级链。
 fn sanitize_ssid(v: &str) -> Option<String> {
-    let t = v.trim();
+    let raw = v.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // 跨来源归一：同一网络从 CoreWLAN / system_profiler / ipconfig 读到的名字可能只是
+    // Unicode 归一化不同（NFD 把重音拆成「基字符 + 组合符」两码点，与 NFC 之间按码点比较
+    // 不相等），或夹了多余空格 —— 而面板显示与 profile 条件匹配都靠 SSID 相等。先收成 NFC、
+    // 再折叠内部连续空白为单空格，不同来源才能比对一致（否则同一网络会被认成两个名字）。
+    let t: String = raw.nfc().collect();
+    let t: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.is_empty() {
         return None;
     }
@@ -1096,7 +1122,7 @@ fn sanitize_ssid(v: &str) -> Option<String> {
     if (t.ends_with('.') || t.ends_with('。')) && t.chars().count() > 24 {
         return None;
     }
-    Some(t.to_string())
+    Some(t)
 }
 
 /// `system_profiler SPAirPortDataType` 提取出的无线信息。
@@ -1121,9 +1147,11 @@ fn airport_info(dev: &str) -> (Option<i32>, Option<String>) {
 
 /// `system_profiler` 结果，带 TTL 缓存（见 `SYS_PROFILER_TTL`）。
 ///
-/// 这是 macOS 14.4 之后唯一持续可用的 SSID/RSSI 来源，但单次调用 1~4s；缓存让
-/// 「面板刷新 + 监视轮询」在同一时间窗内只付一次代价。2s 的窗口短于监视轮的 2~5s
-/// 间隔，因此对「SSID 变化」的判定延迟没有可见影响。
+/// 这是 macOS 14.4 之后唯一持续可用的 SSID/RSSI 来源，但单次调用 1~4s。缓存让
+/// 「面板刷新 + 监视轮询 + 3A 回读」在同一时间窗内只付一次代价。窗口（30s）远大于采样
+/// 间隔（2s），因此每 ~15 轮才真正重新调用一次，稳态下几乎不再为它付时间；SSID/RSSI 在
+/// 30s 内的轻微滞后对面板展示无可察觉影响（切网/应用配置后由 `invalidate_status` 之外的
+/// 周期采样自然刷新，若要更灵敏可调小这个常量）。
 fn system_profiler_info() -> RadioInfo {
     static CACHE: Mutex<Option<(Instant, RadioInfo)>> = Mutex::new(None);
 
@@ -1243,9 +1271,14 @@ fn ssid_via_corewlan() -> Option<String> {
     sanitize_ssid(&ssid.to_string())
 }
 
-/// 来源 1：`networksetup -getairportnetwork <dev>`，输出 `Current Wi-Fi Network: X`。
-/// ≤ macOS 14 可靠；15.0 起恒返回 "You are not associated with an AirPort network."
-/// （被 `sanitize_ssid` 归一成 `None`，从而自动继续降级）。
+/// 来源 1（仅 ≤14.3 排进链）：`networksetup -getairportnetwork <dev>`，输出
+/// `Current Wi-Fi Network: X`。
+///
+/// 15.0 起该命令恒返回 "You are not associated with an AirPort network." —— 读到的不
+/// 是网络名而是失败提示，`sanitize_ssid` 会把它归一成 `None`（不会串味成 SSID），于是
+/// 在 15.0+ 这一趟子进程纯属浪费。故 1.8.7 起**只有 <15.0 的系统才把它放进降级链**
+/// （判据见 [`networksetup_reads_ssid`]）：旧系统上它是一条真能给到 SSID 的兜底，
+/// 留着的代价只在 CoreWLAN 也失手时才付一次，远小于丢掉一条可用来源。
 fn ssid_via_networksetup(dev: &str) -> Option<String> {
     let out = run("networksetup", &["-getairportnetwork", dev]).ok()?;
     value_of(&out, "Current Wi-Fi Network").or_else(|| {
@@ -1262,23 +1295,68 @@ fn ssid_via_networksetup(dev: &str) -> Option<String> {
     })
 }
 
+/// 本机 macOS 版本（`ProductVersion` 的 major/minor），读一次并永久缓存。
+///
+/// 刻意不起子进程：版本号是给**降级链**用的判据，若为判断版本再 spawn 一次
+/// `sw_vers`，就把省下来的那趟子进程原样花回去了。`SystemVersion.plist` 是纯文本
+/// XML，一次读文件即可。
+///
+/// The host macOS version (major/minor of `ProductVersion`), read once and cached
+/// forever. Deliberately spawns no subprocess: the version is an input to the SSID
+/// fallback chain, so paying for `sw_vers` would spend back exactly the subprocess
+/// this optimisation saves. `SystemVersion.plist` is plain-text XML — one file read.
+fn macos_version() -> Option<(u32, u32)> {
+    static CACHE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+            .ok()
+            .and_then(|txt| parse_product_version(&txt))
+    })
+}
+
+/// 从 `SystemVersion.plist` 里取 `ProductVersion`（`14.3.1` → `(14, 3)`）。
+/// 解析不出（文件不在 / 改了格式）时返回 `None`，调用方按「保守保留」处理。
+///
+/// Extracts `ProductVersion` from `SystemVersion.plist` (`14.3.1` → `(14, 3)`).
+/// Returns `None` when it cannot be parsed; callers then fall back to keeping the source.
+fn parse_product_version(plist: &str) -> Option<(u32, u32)> {
+    // 形如 `<key>ProductVersion</key>\n\t<string>14.3.1</string>`：先定位 key，
+    // 再取紧随其后的那一枚 `<string>` —— 不整份当 XML 解析，避免为取一个值引入依赖。
+    let after_key = plist.split("<key>ProductVersion</key>").nth(1)?;
+    let val = after_key.split("<string>").nth(1)?.split("</string>").next()?;
+    let mut parts = val.trim().split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next().unwrap_or("0").parse::<u32>().ok()?;
+    Some((major, minor))
+}
+
+/// `networksetup -getairportnetwork` 在本机还是不是一条能给出 SSID 的来源？
+/// 15.0 起它恒返回失败提示，所以只在 <15.0 的系统上把它排进降级链。
+///
+/// 版本读不出来时**保守地保留**它：在这个判据上，少一条可用兜底（≤14.3 真会用到）
+/// 比多付一趟子进程更糟，宁可照旧排进去。
+fn networksetup_reads_ssid() -> bool {
+    networksetup_reads_ssid_on(macos_version())
+}
+
+/// 上面那条判据的**纯函数**形态：版本由调用方给。
+///
+/// 与「挑平台资产必须把平台提成参数」同一条规矩（见项目约定）：判据若只在内部读
+/// 本机版本，单测就变成「这台机器是什么版本」的断言 —— 在 14.x 上写死的期望值到了
+/// 15.x 的 CI 腿上就是红的。提成参数后测的是逻辑，不是宿主。
+fn networksetup_reads_ssid_on(version: Option<(u32, u32)>) -> bool {
+    match version {
+        Some((major, _minor)) => major < 15,
+        None => true,
+    }
+}
+
 /// 来源 2：`ipconfig getsummary <dev>`，输出 `  SSID : X`。
 /// macOS 15.0–15.5 可用且约 46ms（比 system_profiler 快两个数量级）；
 /// 15.6 起该字段被涂黑，同样由 `sanitize_ssid` 拦下后继续降级。
 fn ssid_via_ipconfig(dev: &str) -> Option<String> {
     let out = run("ipconfig", &["getsummary", dev]).ok()?;
     value_of(&out, "SSID")
-}
-
-/// RSSI/BSSID：`airport`（≤14.3）→ `system_profiler`（14.4 起唯一来源）。
-/// 两者各取所需，任一侧缺失就补另一侧。
-fn radio_info(dev: &str) -> (Option<i32>, Option<String>) {
-    let (rssi, bssid) = airport_info(dev);
-    if rssi.is_some() && bssid.is_some() {
-        return (rssi, bssid);
-    }
-    let sp = system_profiler_info();
-    (rssi.or(sp.rssi), bssid.or(sp.bssid))
 }
 
 /// `networksetup -listallhardwareports` 的一条记录：
@@ -2062,18 +2140,75 @@ fn scutil_match(target: &TunnelTarget) -> NcMatch {
 /// 采一份主无线网卡的状态快照 —— [`NetworkPlatform::get_status`] 的真实工作。
 ///
 /// 单独成函数只为套上 TTL 缓存：一次快照要起 6~7 个子进程（`networksetup` / `ipconfig`
-/// / `route` / `arp`），而面板每刷新一次就要一份。改动网络的路径（[`exec_ops`]）会显式
-/// 丢掉缓存，所以 3A 的「下发 → 读回校验」拿到的始终是下发之后的实况。
+/// / `route` / `arp` / `system_profiler`），而面板每刷新一次就要一份。改动网络的路径
+/// （[`exec_ops`]）会显式丢掉缓存，所以 3A 的「下发 → 读回校验」拿到的始终是下发之后的实况。
+///
+/// 这些子进程彼此独立（只有 DNS / IPv6 读取依赖前面取到的网络服务名），所以用
+/// [`std::thread::scope`] 把它们**并发**拉起，把串行等待压成「最慢那一个」：旧实现里这些
+/// 调用是逐个 `run()` 的，单次快照要 ~0.6s（其中 `arp -n` 取网关 MAC 一项就近 0.45s），
+/// 并发后落到 ~0.45s（被最慢的 `arp` 钳住）；`system_profiler` 的 1.6s 由
+/// [`SYS_PROFILER_TTL`] 单独摊销（见 [`system_profiler_info`]），不在本函数里重复付。
 fn read_status() -> InterfaceStatus {
     let dev = wifi_iface();
-    let ssid = MacPlatform.get_current_ssid();
-    let (rssi, bssid) = radio_info(&dev);
+    // 网关要先取出来：`gateway_mac_for` 依赖它，且 `route -n get default` 本身很快（~16ms），
+    // 先算不影响并发度。
+    // The gateway must be fetched first: `gateway_mac_for` depends on it, and `route` is fast
+    // (~16ms), so computing it up front does not hurt concurrency.
+    let gateway = default_gateway();
+
+    // 第一批：彼此独立，并发执行（见函数头注释）。SSID 与 RSSI/BSSID 都从同一份
+    // `system_profiler_info()` 派生 —— 只调一次，避免 15.6+ 未授权时两条路径各起一次
+    // `system_profiler`（那一下 1~4s）；CoreWLAN / ipconfig / airport 各自独立采样。
+    // First batch: independent reads, run concurrently. SSID and RSSI/BSSID both derive from a
+    // single `system_profiler_info()` call (invoked once) so the two consumers no longer spawn it
+    // twice on 15.6+ without authorization; CoreWLAN / ipconfig / airport sample independently.
+    let (ssid, rssi, bssid, ipv4, netmask, svc, gateway_mac) = std::thread::scope(|s| {
+        let h_corewlan = s.spawn(ssid_via_corewlan);
+        let h_ipconfig = s.spawn(|| ssid_via_ipconfig(&dev));
+        let h_airport = s.spawn(|| airport_info(&dev));
+        let h_sp = s.spawn(system_profiler_info);
+        let h_ipv4 = s.spawn(|| {
+            run("ipconfig", &["getifaddr", dev.as_str()])
+                .ok()
+                .map(|o| o.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+        let h_netmask = s.spawn(|| {
+            run("ipconfig", &["getoption", dev.as_str(), "subnet_mask"])
+                .ok()
+                .map(|o| o.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+        let h_svc = s.spawn(wifi_service);
+        let gw = gateway.clone();
+        let h_mac = s.spawn(move || gw.as_deref().and_then(gateway_mac_for));
+
+        let corewlan = h_corewlan.join().unwrap();
+        let ipconfig_ssid = h_ipconfig.join().unwrap();
+        let (rssi_a, bssid_a) = h_airport.join().unwrap();
+        let sp = h_sp.join().unwrap();
+        let ipv4 = h_ipv4.join().unwrap();
+        let netmask = h_netmask.join().unwrap();
+        let svc = h_svc.join().unwrap();
+        let gateway_mac = h_mac.join().unwrap();
+        // SSID：CoreWLAN 优先（最准、需授权），其次 ipconfig（15.0–15.5 现连），最后 system_profiler 兜底。
+        // RSSI/BSSID：airport（≤14.3）优先，其余由 system_profiler 补 —— 同一份 sp 同时喂 SSID 与信号，
+        // 故 system_profiler 只调一次。
+        let ssid = corewlan.or(ipconfig_ssid).or(sp.ssid);
+        let rssi = rssi_a.or(sp.rssi);
+        let bssid = bssid_a.or(sp.bssid);
+        (ssid, rssi, bssid, ipv4, netmask, svc, gateway_mac)
+    });
 
     let mut st = InterfaceStatus {
         ssid,
         rssi,
         bssid,
         iface: Some(dev.clone()),
+        ipv4,
+        netmask,
+        gateway: gateway.clone(),
+        gateway_mac,
         ..Default::default()
     };
 
@@ -2081,23 +2216,16 @@ fn read_status() -> InterfaceStatus {
     // 若沿用「ssid.is_some()」判连接，整面板会显示离线、按 SSID 的 profile 也永远
     // 匹配不上。接口拿到 IPv4 地址即为已连接。
     //
-    // 注意这两条 ipconfig 不依赖网络服务名，故不再挂在 `wifi_service()` 之下
-    // （服务名只在 DNS / IPv6 查询时才需要）。
-    if let Ok(o) = run("ipconfig", &["getifaddr", &dev]) {
-        let v = o.trim();
-        if !v.is_empty() {
-            st.ipv4 = Some(v.to_string());
-        }
-    }
-    if let Ok(o) = run("ipconfig", &["getoption", &dev, "subnet_mask"]) {
-        let v = o.trim();
-        if !v.is_empty() {
-            st.netmask = Some(v.to_string());
-        }
-    }
+    // Connectivity is judged independently of SSID — macOS 15.6+ or an unauthorized process may
+    // fail to read the SSID, so using `ssid.is_some()` as the online signal would wrongly show
+    // offline and never match SSID-based profiles. An interface that has an IPv4 address is online.
     st.connected = st.ssid.is_some() || st.ipv4.is_some();
 
-    if let Some(svc) = wifi_service() {
+    // DNS / IPv6 读取依赖上面取回的网络服务名，必须在 `svc` 解析之后做（串行，每项 ~25ms，
+    // 两项合计可忽略，且它们本就在并发批之外）。
+    // DNS / IPv6 reads depend on the Wi-Fi service name resolved above, so they run after the
+    // concurrent batch (serial, ~25ms each — negligible, and inherently after `svc`).
+    if let Some(svc) = svc {
         if let Ok(o) = run("networksetup", &["-getdnsservers", &svc]) {
             let dns = o.trim();
             // 「Empty」/「There aren't any DNS Servers set on …」是命令成功执行之后对
@@ -2122,10 +2250,6 @@ fn read_status() -> InterfaceStatus {
             st.v6mode = parse_kv(&o, "IPv6:").map(|s| s.to_ascii_lowercase());
         }
     }
-    if let Some(gw) = default_gateway() {
-        st.gateway = Some(gw.clone());
-        st.gateway_mac = gateway_mac_for(&gw);
-    }
     st
 }
 
@@ -2136,17 +2260,23 @@ impl NetworkPlatform for MacPlatform {
     }
 
     /// 逐级降级取 SSID，顺序 = 由准到糙、由快到慢（版本矩阵见文件头注释）：
-    /// CoreWLAN → `networksetup` → `ipconfig getsummary` → `system_profiler`。
+    /// CoreWLAN →（≤14.3 才插一档 `networksetup`）→ `ipconfig getsummary` → `system_profiler`。
     ///
-    /// 单点取值的代价：只用 `networksetup` 时，macOS 15.0 起
-    /// 会稳定拿到 "You are not associated with an AirPort network."，于是 SSID 区永远空白；
-    /// 而 15.6+ 起三个 CLI 来源一起失效，SSID 必须优先走 CoreWLAN（需定位授权）。
+    /// `networksetup` 那一档是**按版本插进去的**（判据 `networksetup_reads_ssid`）：
+    /// 15.0 起它恒返回 "You are not associated…"（读到的不是 SSID，是失败提示），
+    /// 白付一趟子进程，故 15.0+ 跳过；≤14.3 上它仍是一条真能给到 SSID 的兜底，
+    /// 保留它 —— 保留的代价只在 CoreWLAN 也失手时才付一次，比丢掉一条可用来源划算。
+    /// 15.6+ 起三个 CLI 来源一起被涂黑，SSID 必须优先走 CoreWLAN（需定位授权）。
     fn get_current_ssid(&self) -> Option<String> {
         ssid_via_corewlan().or_else(|| {
             let dev = wifi_iface();
-            ssid_via_networksetup(&dev)
-                .or_else(|| ssid_via_ipconfig(&dev))
-                .or_else(|| system_profiler_info().ssid)
+            let via_cli = || ssid_via_ipconfig(&dev).or_else(|| system_profiler_info().ssid);
+            // ≤14.3 多一档 networksetup 兜底；15.0+ 那一趟恒为失败提示，直接跳过。
+            if networksetup_reads_ssid() {
+                ssid_via_networksetup(&dev).or_else(via_cli)
+            } else {
+                via_cli()
+            }
         })
     }
 
@@ -2607,6 +2737,54 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `networksetup` 那一档兜底必须**按版本分流**：15.0 起它恒返回失败提示，排进去只是
+    /// 白付一趟子进程；≤14.3 上它却是一条真能给到 SSID 的来源，不能丢。判据提成参数后
+    /// 测的是逻辑本身 —— 宿主是什么版本与期望无关。
+    ///
+    /// The `networksetup` rung must branch on version: from 15.0 on it only ever returns
+    /// the failure string, while on ≤14.3 it is a source that really yields an SSID.
+    /// Taking the version as a parameter keeps the assertion about logic, not the host.
+    #[test]
+    fn networksetup_fallback_is_kept_below_15_and_skipped_from_15_on() {
+        // ≤14.3（以及 14.4/14.5 —— 那两档该命令仍可用）：保留兜底。
+        for x in [(10u32, 15u32), (12, 0), (13, 6), (14, 0), (14, 3), (14, 4), (14, 5)] {
+            assert!(networksetup_reads_ssid_on(Some(x)), "should keep on {x:?}");
+        }
+        // 15.0 起恒为失败提示：跳过。
+        for x in [(15u32, 0u32), (15, 6), (26, 1)] {
+            assert!(!networksetup_reads_ssid_on(Some(x)), "should skip on {x:?}");
+        }
+        // 版本读不出来时保守保留：少一条可用兜底比多付一趟子进程更糟。
+        assert!(networksetup_reads_ssid_on(None), "unknown version must keep it");
+    }
+
+    /// `ProductVersion` 只取 major/minor（`14.3.1` → `(14, 3)`）；key 缺失或值不是数字
+    /// 时返回 `None`，由调用方按「保守保留」处理。
+    #[test]
+    fn product_version_parses_major_minor_and_rejects_junk() {
+        let plist = "<dict>\n\t<key>ProductVersion</key>\n\t<string>14.3.1</string>\n</dict>";
+        assert_eq!(parse_product_version(plist), Some((14, 3)));
+        // 第三段（补丁号）不影响判据；两位版本号也要认。
+        assert_eq!(
+            parse_product_version("<key>ProductVersion</key><string>15.6</string>"),
+            Some((15, 6))
+        );
+        assert_eq!(
+            parse_product_version("<key>ProductVersion</key><string>26</string>"),
+            Some((26, 0))
+        );
+        for junk in [
+            "",
+            "<dict></dict>",
+            "<key>ProductVersion</key>",
+            "<key>ProductVersion</key><string></string>",
+            "<key>ProductVersion</key><string>not.a.number</string>",
+            "<key>ProductBuildVersion</key><string>23D60</string>",
+        ] {
+            assert_eq!(parse_product_version(junk), None, "parsed {junk:?}");
+        }
     }
 
     /// sudoers 那一行是按空白切词的，所以用户名只能是一个「合形的 token」。

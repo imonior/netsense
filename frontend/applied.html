@@ -109,10 +109,10 @@
       const ok = !!d.success;
       // 标题三态：成功 / 失败且已回滚 / 失败但快照恢复也失败（写入状态未知）。
       const title = ok
-        ? t("popup.applied_title", "Network configuration is in effect")
+        ? t("popup.applied_title", "Profile applied: Network setting and Actions")
         : d.restored
-          ? t("popup.applied_failed_rb", "Network changes were rolled back")
-          : t("popup.applied_failed_title", "Network configuration did not take effect");
+          ? t("popup.applied_failed_rb", "Profile rolled back: Network setting and Actions")
+          : t("popup.applied_failed_title", "Profile not applied: Network setting and Actions");
       const titleEl = document.getElementById("ap-title");
       titleEl.className = ok ? "ok" : "err";
       titleEl.textContent = title;
@@ -216,29 +216,46 @@
     }
 
     /// 静态占位：真实内容由事件（`netsense://applied`）驱动，在应用外直接查看这份文件
-    /// 时没有 Tauri 桥、事件永远不会来 —— 一只空盒子读作「坏了」。占位文案走 i18n 字典，
-    /// 首次真实渲染会整块替换 ap-body，应用内用户看不到它（窗口在事件到达后才显示）。
+    /// 时没有 Tauri 桥、事件永远不会来 —— 一只空盒子读作「坏了」。占位文案走 i18n 字典。
     /// Static placeholder: the real content is event-driven (`netsense://applied`), and
     /// with no Tauri bridge (viewing this file outside the app) no event ever arrives —
-    /// an empty box reads as "broken". The copy goes through the i18n dictionary; the
-    /// first real render replaces the whole ap-body, and in-app users never see this
-    /// (the window is only shown after the event lands).
+    /// an empty box reads as "broken". The copy goes through the i18n dictionary.
+    ///
+    /// 底部**必须**带「关闭」：这扇窗无边框且常驻置顶，一个没有出口的空态会把用户困住
+    /// （1.8.6 的教训）。应用内走到这里还会顺手把窗口收起来（没有内容可显示就不该占屏）。
     function renderEmpty() {
       if (apState) return;
       document.getElementById("ap-body").innerHTML =
         `<div class="mv" style="padding:4px 2px;">${esc(t("popup.applied_empty",
           "This window lists what NetSense wrote to the network settings the last time a profile was applied. It is filled in by the running app — apply a profile in NetSense and the result appears here."))}</div>`;
+      document.getElementById("ap-foot").innerHTML =
+        `<div class="ap-foot-row"><span class="ap-time"></span>`
+        + `<button id="ap-close">${esc(t("popup.close", "Close"))}</button></div>`;
+      document.getElementById("ap-close").onclick = closeAppliedModal;
     }
 
     (async () => {
       // 文案一次性拉全（5 语）；主题那一档由 `netsense://status` 的 `theme` 字段兜底切换，
       // 不单独问（参考面板窗口的 `applyTheme`）。
-      try {
-        strings = await invoke("get_strings");
-        renderEmpty(); // 字典到位后用当前语言重画占位 / re-draw the placeholder in the active language
-      } catch (e) { /* 浏览器直开：显示 key 本身 */ }
+      try { strings = await invoke("get_strings"); } catch (e) { /* 浏览器直开：显示 key 本身 */ }
+      // 主动取一次最近的应用结果：窗口页面加载可能晚于引擎第一轮 pass 的广播
+      // （冷启动首次应用就是这种情形），那一发事件送不到刚开的页面上。取回来就画，
+      // 取不到说明此刻没有可显示的内容 —— 画占位并把自己收起来，绝不留一扇空窗。
+      let last = null;
+      try { last = await invoke("get_last_applied"); } catch (e) { /* 浏览器直开 */ }
+      if (last) {
+        renderApplied(last);
+      } else {
+        renderEmpty();
+        if (hasTauri()) invoke("close_applied").catch(() => {});
+      }
     })();
     renderEmpty();
+
+    // Esc 关闭：无边框置顶窗没有系统关闭按钮，键盘必须有一条出路。
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeAppliedModal();
+    });
 
     if (window.__TAURI__ && window.__TAURI__.event) {
       // 后端在网络切换 / 配置重载 / 手动应用后广播，弹窗窗口据此对色与对语言。

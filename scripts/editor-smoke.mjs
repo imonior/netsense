@@ -399,8 +399,10 @@ let saveSeq = 0;
 const saves = [];
 /** `saves` 会被各段断言清空以便「看这一次保存发了什么」，交付给 Rust 的那份要一直攒着。 */
 const emitted = [];
-/** 「发出」与「落回」共用一根时钟：开机那几项外部数据若是串行取的，`get_networks`
-    会在 `get_interfaces` 发出之前就落回来 —— 这一位就是并发与否唯一看得见的判据。 */
+/** 「发出」与「落回」共用一根时钟：记录每条命令在开机批次里的先后顺序，用来断言首屏那几份
+    便宜数据不挡在慢子进程（合并枚举 / 状态快照）上 —— 现场那句「点开空白好几秒」的回归就
+    栽在这里。合并枚举取代了旧版的四条独立枚举（get_networks / get_interfaces / get_adapters /
+    get_printers），所以下面按 `get_editor_enumerations` 这一个名字判。 */
 let ipcClock = 0;
 /** @type {{cmd:string,issued:number,resolved:number}[]} */
 const ipcTime = [];
@@ -470,6 +472,25 @@ function answerValue(cmd, args) {
         { name: "Office LaserJet", info: "LaserJet 476 · 3F", is_default: true },
         { name: "Home Inkjet", is_default: false },
       ]));
+    case "get_editor_enumerations":
+      // 后端把四条枚举（已存 SSID / 在用网卡 / 本机网卡 / 打印机）合成一条 IPC
+      // （见 `ipc::get_editor_enumerations`），省下四趟往返；这里返回的就是那条合并命令
+      // 的形状：整包经 serde_json 序列化，所以四项是嵌套数组而非各自再包一层字符串
+      // （与旧版四条独立命令不同 —— 旧版 get_interfaces / get_printers 返回的是 JSON 字符串）。
+      // refreshNics 那条「换口才重取网卡明细」仍走 get_interfaces（仍注册），不在这里。
+      return Promise.resolve(JSON.stringify({
+        networks: ["Office_5G", "Café"],
+        interfaces: nicFixture,
+        adapters: [
+          { name: "en0", label: "Wi-Fi", kind: "wireless", up: true },
+          { name: "en5", label: "USB 10/100/1000 LAN", kind: "wired", up: true },
+          { name: "en7", label: "Thunderbolt Ethernet", kind: "wired", up: false },
+        ],
+        printers: [
+          { name: "Office LaserJet", info: "LaserJet 476 · 3F", is_default: true },
+          { name: "Home Inkjet", is_default: false },
+        ],
+      }));
     case "get_installed_apps":
       // 「启动程序」的候选（macOS 上是 /Applications 里带启动项的那些 .app）。返回 JSON
       // 字符串的理由同上一档。故意夹带一条没有路径的记录：后端本不该给，但界面也不该把它
@@ -607,29 +628,38 @@ eq("语言与配色由首屏那一批便宜取数写上，不等状态快照",
 await releaseHeld();
 check("启动脚本无异常地跑完（顶层 IIFE 已读到配置）", h.cfg.profiles.length === 3);
 eq(
-  "启动时按顺序读了后端：文案 → 五项外部数据（已装程序改后台补拉，不在首屏关键路径）一起发 → 首屏那三份（配置 / 语言 / 配色）→ 已装程序后台补拉",
+  "启动时按顺序读了后端：文案 → 合并枚举（get_editor_enumerations，省下四趟往返）→ 首屏那三份（配置 / 语言 / 配色）→ 状态快照（与枚举同属第二帧，一起 await）→ 已装程序后台补拉",
   invokeLog.map((c) => c.cmd).slice(0, 10),
-  ["get_strings", "get_networks", "get_interfaces", "get_adapters", "get_printers",
-   "get_status", "get_config", "get_language", "get_theme", "get_installed_apps"],
+  ["get_strings", "get_editor_enumerations", "get_config", "get_language", "get_theme",
+   "get_status", "get_installed_apps"],
 );
 eq("已存 SSID、在用网卡、本机网卡、打印机与已装程序各取一份（条件值与动作目标的候选）",
   [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name),
    h.appList.map((a) => a.name)],
   [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"],
    ["Broken", "Firefox", "Keka", "Slack"]]);
-// 上面那条只说得出「读了哪几项」，说不出「是不是排队读的」，而排队读的代价就是现场那句
-// 「自动化管理打开要好几秒空白」：五项外部数据各要拉一次子进程，串起来就是它们之和；
-// 已装程序那一趟最慢（Windows 扫开始菜单 5–15 秒），现在改后台补拉、不在首屏关键路径上，
-// 所以它的发出比首屏三份还晚 —— 下面这条并发判据只数首屏这批，不放它进来。
-// 判据是并发与否唯一看得见的痕迹：最后发出的那一项，早于最早落回的那一项 —— 被按住的那份
-// 落回得最晚，取 min 时自然不会算进最早的那一个，所以它按住的是首绘、压不垮这条判据。
-const bootIpc = ["get_networks", "get_interfaces", "get_adapters", "get_printers",
-                 "get_status", "get_config", "get_language", "get_theme"];
-const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 8);
-eq("开机那八份各发一次（外部五份 + 首屏三份，没有哪一项被读了两遍；已装程序不在此列）", bootBatch.length, 8);
-check("它们是并发发出的：最后发出的那一项，早于最早落回的那一项",
-  Math.min(...bootBatch.map((t) => t.resolved)) > Math.max(...bootBatch.map((t) => t.issued)),
-  `发出 ${bootBatch.map((t) => t.issued)}，落回 ${bootBatch.map((t) => t.resolved)}`);
+// 开机批次：合并枚举 + 状态快照（两者都是子进程采样，同属第二帧、在 `Promise.all([external,
+// get_status])` 里一起 await，所以等的是「最慢那份」而非「两份之和」）+ 首屏三份便宜数据
+// （配置 / 语言 / 配色，背后不拉子进程）。已装程序不在首屏关键路径（后台补拉），不在此列。
+// 旧版是「外部四份 + 状态快照 + 首屏三份」八项一次性并发发出；现在第一帧只等首屏三份、第二帧再
+// 并发枚举与状态快照，第一帧因此完全不碰慢的子进程 —— 这才是现场那句「点开空白好几秒」的根因解法。
+// 下面两条改判「第一帧不挡在慢数据上」与「慢的两份都发了」：旧版时钟式的「全 issued 早于全
+// resolved」已不适用 —— 第二帧的 get_status 在首屏落回之后才发出，而 mock 里枚举瞬时落回，量不出
+// 两者在真机上的重叠（真机上子进程要跑好几秒，发出时枚举仍在飞行中）。结构上的「两者并发」由
+// 编辑器源码里的 `Promise.all` 保证，冒烟测试只能验结构、验不了真机时序。
+const bootIpc = ["get_editor_enumerations", "get_status", "get_config", "get_language", "get_theme"];
+const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 5);
+eq("开机那五份各发一次（合并枚举 + 状态快照 + 首屏三份，没有哪一项被读了两遍；已装程序不在此列）", bootBatch.length, 5);
+const tOf = (c) => ipcTime.find((t) => t.cmd === c) || {};
+const firstScreenMaxResolved = Math.max(
+  tOf("get_config").resolved || 0, tOf("get_language").resolved || 0, tOf("get_theme").resolved || 0);
+check("首屏三份在 get_status 发出之前就已落回：第一帧不挡在状态快照（慢子进程）上",
+  (tOf("get_status").issued || 0) > firstScreenMaxResolved,
+  `get_status 发出 ${tOf("get_status").issued}，首屏最晚落回 ${firstScreenMaxResolved}`);
+check("慢的两份（合并枚举 + 状态快照）都在开机时发出，且枚举不晚于状态快照（两者并发、不串行）",
+  !!tOf("get_editor_enumerations").issued && !!tOf("get_status").issued &&
+  (tOf("get_status").issued >= tOf("get_editor_enumerations").issued),
+  `枚举发出 ${tOf("get_editor_enumerations").issued}，状态发出 ${tOf("get_status").issued}`);
 check("第 1 列渲染出 Profile 列表", findAll((e) => e.dataset?.act === "sel-profile").length === 3);
 // 配色：`theme.css` 只认 `<html data-theme>`，所以这一条断言的是「后端给的那一档真的落地了」，
 // 而不是样式表里写了什么 —— 属性没写上时窗口会安静地停在深色档，谁也不会报错。
