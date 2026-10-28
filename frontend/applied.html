@@ -41,7 +41,7 @@
       background: var(--accent); color: var(--on-accent);
     }
     .mv { font-size: 11px; color: var(--muted); line-height: 1.5; }
-    /* 分组清单（IPv4 / IPv6 / DNS / 动作 / 系统）：标签在左、值右对齐、每行 ✅/❌，
+    /* 分组清单（系统 / IPv4 / IPv6 / DNS / 动作）：标签在左、值右对齐、每行 ✅/❌，
        失败行下有红色明细，底部错误行 + 时间戳。行距按「紧凑」定，一次能看到尽量多的条目。 */
     .ap-g { color: var(--accent); font-size: 11px; font-weight: 600; margin: 4px 0 1px; }
     .ap-g:first-child { margin-top: 0; }
@@ -234,6 +234,78 @@
       document.getElementById("ap-close").onclick = closeAppliedModal;
     }
 
+    /// 预览模式用的示例载荷：形状与后端 `applied_notice` / `applied_groups` 逐字段同构
+    /// （`success` / `restored` / `nochange` / `note` / `groups[{title, rows[{label, value, ok, detail}]}]`），
+    /// 分组顺序也照 `applied_groups` 排（System → IPv4 → IPv6 → DNS）。只有**版式**是这份
+    /// 示例要展示的东西：值是技术记号（地址、接口名），不是编出来的故事。
+    /// Sample payload for preview mode: field-for-field identical to the backend
+    /// `applied_notice` / `applied_groups` shape, in the same group order
+    /// (System → IPv4 → IPv6 → DNS). Only the **layout** is what this sample shows —
+    /// the values are technical tokens (addresses, interface names), not invented stories.
+    ///
+    /// 行标签用后端发的一模一样的 i18n key（`popup.ip` / `popup.row_mode` …），预览里
+    /// 看到的每一行都对应得上真实弹窗的那一行 —— 换一份自造标签就等于画了另一张窗。
+    function apDemo() {
+      // 标签走一遍 `t()`：真实弹窗里后端发的是 i18n key、由页面拿字典翻；预览没有字典可
+      // 加载（`file://` 下取不到 i18n 文件），不翻就会把 `popup.dns` 这样的 key 画到界面上。
+      // Labels go through `t()`: the backend sends i18n keys and the page translates them
+      // with the dictionary; a preview has no dictionary to load (the i18n files are
+      // unreachable under `file://`), so untranslated keys would show up as `popup.dns`.
+      // 每个字面量都坐在 `t()` 的实参位置：校验脚本按「多词字面量是否在 t() 里」判文案有没有
+      // 写死，而这里每一条本来就是要翻的标签。
+      const row = (label, value, ok) => ({ label, value, ok, detail: null });
+      return {
+        success: true,
+        restored: false,
+        nochange: false,
+        // 底部琥珀色附注：预览里也必须说清这是示例，不是这台机器的真实结果。
+        note: t("popup.applied_demo", "Sample data — not from your system"),
+        groups: [
+          {
+            title: t("popup.group_system", "System"),
+            rows: [
+              row(t("popup.profile", "Applied profile"), "home", null),
+              row(t("status.ssid", "SSID"), "Home-5G", null),
+              row(t("popup.interface", "Interface"), "en0", null),
+            ],
+          },
+          {
+            title: t("popup.group_ipv4", "IPv4"),
+            rows: [
+              row(t("popup.row_mode", "Mode"), t("editor.manual", "Manual (Static)"), true),
+              row(t("popup.ip", "IPv4"), "192.168.1.50", true),
+              row(t("popup.netmask", "Netmask"), "255.255.255.0", true),
+              row(t("popup.gateway", "Gateway"), "192.168.1.1", true),
+              row(t("popup.routes_added", "Routes added"), "2", true),
+            ],
+          },
+          {
+            title: t("popup.group_ipv6", "IPv6"),
+            rows: [row(t("popup.row_mode", "Mode"), t("editor.linklocal", "Link-local only"), true)],
+          },
+          {
+            title: t("popup.group_dns", "DNS"),
+            rows: [row(t("popup.dns", "DNS"), "223.5.5.5 119.29.29.29", true)],
+          },
+        ],
+      };
+    }
+
+    /// 预览模式的动作组：3B1 一次性动作两条（一成一败）+ 3B2 常驻动作一条。
+    /// 形状同 `netsense://evaluation` 的 `last_run` / `workers`（见 `apActionsHtml`）。
+    /// Sample actions for preview mode: two 3B1 one-shot actions (one ok, one failed)
+    /// plus one 3B2 persistent worker — same shape as `last_run` / `workers`.
+    const AP_DEMO_ACTIONS = {
+      running: false,
+      total: 3,
+      outcomes: [
+        { label: "WireGuard", ok: true, error: null },
+        { label: "AdGuardHome", ok: true, error: null },
+        { label: "mosdns", ok: false, error: "exit 1" },
+      ],
+    };
+    const AP_DEMO_WORKERS = [{ label: "WireGuard", state: "satisfied", repairs: 1 }];
+
     (async () => {
       // 文案一次性拉全（5 语）；主题那一档由 `netsense://status` 的 `theme` 字段兜底切换，
       // 不单独问（参考面板窗口的 `applyTheme`）。
@@ -245,9 +317,18 @@
       try { last = await invoke("get_last_applied"); } catch (e) { /* 浏览器直开 */ }
       if (last) {
         renderApplied(last);
+      } else if (!hasTauri()) {
+        // 预览模式：这份文件被浏览器直接打开（没有 Tauri 桥，事件永远不会来）。
+        // 从前这里是一片占位文案，被读成「弹窗没做出来」—— 现在渲染一份同构示例，
+        // 版式、分组顺序、✅/❌ 标记都看得见，底部另有琥珀色一行标明这是示例。
+        // 应用内桥必然存在（`tauri://` 下由 Tauri 注入），走不到这条分支。
+        renderApplied(apDemo());
+        apState.actions = AP_DEMO_ACTIONS;
+        apState.workers = AP_DEMO_WORKERS;
+        renderAppliedNow();
       } else {
         renderEmpty();
-        if (hasTauri()) invoke("close_applied").catch(() => {});
+        invoke("close_applied").catch(() => {});
       }
     })();
     renderEmpty();

@@ -45,6 +45,7 @@
   "popup.applied_failed_rb": "プロファイルをロールバックしました：ネットワーク設定とアクション",
   "popup.applied_nochange": "ネットワーク設定は変更されていません",
   "popup.applied_fallback": "フォールバック (一致するプロファイルなし)",
+  "popup.applied_demo": "サンプルデータ — お使いのシステムの実際の結果ではありません",
   "popup.applied_empty": "このウィンドウには、NetSense が最後にプロファイルを適用した際にシステムへ書き込んだネットワーク設定が表示されます。NetSense でプロファイルを適用すると、結果がここに表示されます。",
   "popup.group_ipv4": "IPv4",
   "popup.group_ipv6": "IPv6",

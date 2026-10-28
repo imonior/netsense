@@ -45,6 +45,7 @@
   "popup.applied_failed_rb": "프로필이 롤백됨: 네트워크 설정 및 동작",
   "popup.applied_nochange": "변경된 네트워크 매개변수 없음",
   "popup.applied_fallback": "폴백 (일치하는 프로필 없음)",
+  "popup.applied_demo": "예시 데이터 — 실제 시스템 결과가 아닙니다",
   "popup.applied_empty": "이 창에는 NetSense가 마지막으로 프로필을 적용할 때 시스템에 기록한 네트워크 설정이 표시됩니다. NetSense에서 프로필을 적용하면 결과가 여기에 나타납니다.",
   "popup.group_ipv4": "IPv4",
   "popup.group_ipv6": "IPv6",

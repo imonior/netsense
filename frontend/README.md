@@ -11,7 +11,8 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `editor.html` | `main` | **配置编辑器**：三层 —— 顶部「当前状态」条（生效方案 / 命中它的条件 / 当前网络 / 生效的动作，四格与下面四列一一对应）+ 中部四列（Profile 列表含兜底 · 条件 · 3A 网络 · 3B 动作）+ 底部动作键。THEN 与 ELSE **同时呈现**（THEN 在上、ELSE 在下），校验按钮在「3A 网络」列标题里；兜底那一行是单个区块（没有 ELSE）：网络与 3B 都可配，动作只在零命中期间执行 |
 | `settings.html` | `settings` | **软件设置**：界面语言（默认跟随系统的界面语言）· 界面配色（跟随系统 / 浅色 / 深色）· 开机启动（读系统实况）· 升级代理（直连 / 跟随系统 / 手填一个地址）· 检查更新与就地升级（和面板同一套判定，同三条命令）· 自动化配置与日志的位置（打开文件夹）· 脚本白名单 · 日志保留天数 · 备份（导出一份 / 从列表恢复） · 提权通道/平台/版本（macOS 且通道已装时可在这里撤销免密） |
 | `logs.html` | `logs` | **日志窗口**：按天的日志文件下拉（新→旧）· 只读尾部若干行 · 级别上色 · 子串过滤 · 「跟随」定时刷新（窗口隐藏时不刷） |
-| `theme.css` | —（四座窗口共用） | **唯一的颜色真相来源**：`--t-*` 一套 token 写两遍 —— 深色在 `:root`，浅色在 `html[data-theme="light"]`，加上一条 `color-scheme`；四座窗口的内联样式只引用它，不再各自写字面值 |
+| `applied.html` | `applied` | **「配置已应用」结果弹窗**（独立第五扇窗，常驻置顶、不抢焦点）：标题按成败三态 · 分组清单（系统 / IPv4 / IPv6 / DNS）+ 动作组（3B1 逐条结果、3B2 常驻状态）· 底部失败原因或降级附注 + 时间戳。内容由 `netsense://applied` 驱动，另有两个补洞入口（显示时定向重发、加载完主动 `get_last_applied`）。**脱离应用用浏览器打开这份文件时**（没有 Tauri 桥，事件永远不会来）它渲染一份与后端载荷同构的示例，底部标一行「示例数据」，不至于被读成「弹窗没做出来」 |
+| `theme.css` | —（五座窗口共用） | **唯一的颜色真相来源**：`--t-*` 一套 token 写两遍 —— 深色在 `:root`，浅色在 `html[data-theme="light"]`，加上一条 `color-scheme`；五座窗口的内联样式只引用它，不再各自写字面值 |
 | `serve.sh` | — | 开发期静态服务器（`http://localhost:1420`），对应 `beforeDevCommand` |
 
 编辑器的界面结构是**有意的**，改动前先读 `DEVELOPMENT.md` §5–§8：Rules 之间 OR、Rule 内
@@ -64,7 +65,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
   身份指纹：指纹不动就不取。反过来，每条广播都取一次会把编辑器拖进引擎的节律里 —— 一轮下发
   连发两条事件，界面就跟着每秒拉一次子进程，而这正是「刷新很慢」的来源之一。
 
-配色也同理：四座窗口共用 `theme.css` 那一套 `--t-*` token，**里面没有一个字面颜色** ——
+配色也同理：五座窗口共用 `theme.css` 那一套 `--t-*` token，**里面没有一个字面颜色** ——
 面、字、状态点、徽标、浮层各有一档，深色写在 `:root`，浅色写在 `html[data-theme="light"]`，
 两套各自声明自己的 `color-scheme`（不声明那一句，原生下拉弹层、滚动条、复选框会往深色的窗口里
 嵌一块浅色底，或者反过来，Windows 上最明显）。`editor.html` 的 token **名字**（`--bg-panel`、
@@ -92,7 +93,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 
 改档由后端定：`theme` 存在 `settings.json` 里的是**那一档选择**（`system` / `light` / `dark`），
 而窗口渲染的是**算出来的那一个值** —— 「跟随系统」时由 PAL 现问操作系统（见 `platform.rs` 的
-`ui_prefers_dark`）。四座窗口于是只有两种拿法：随状态广播里的 `theme` 换（面板），或者自己
+`ui_prefers_dark`）。五座窗口于是只有两种拿法：随状态广播里的 `theme` 换（面板），或者自己
 `get_theme` 问一次（软件设置、日志窗口）。编辑器两种都用：广播负责**换档**，`get_theme` 负责
 **首屏那一帧** —— 表单不能等状态快照，而窗口是按 CSS 默认档（深色）建起来的，等快照回来再换色
 就是让浅色档的用户先看一眼深色再被闪一下。
@@ -100,12 +101,12 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 691 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 692 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
 - 首屏文案走 `data-i18n` / `data-i18n-placeholder` / `data-i18n-title` 三个属性：窗口加载完先取词表，
-  再按属性把 textContent / `placeholder` / `title` 覆盖一遍（四座窗口都是 `visible = false` 创建的，
+  再按属性把 textContent / `placeholder` / `title` 覆盖一遍（五座窗口都是 `visible = false` 创建的，
   所以这一遍发生在首次绘制之前，看不到语言跳一下）。属性没覆盖到的静态标记，就按标记里那句英文显示 ——
   **那句英文必须与 `en.json` 逐字相同**，否则同一个界面会在同一个画面上混出两种语言。
   `get_language` 只用来给 `<html lang>` 定值，不参与取词。面板、软件设置、日志窗口各问一次；
@@ -136,14 +137,14 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `netsense://evaluation` | `EngineView` | 引擎刚做完一轮评估（编辑器据此刷新徽标），3B1 每交回**一条**动作结果，以及 3B2 worker 每报出一次**状态变化**（连续两次相同结果不会重发） |
 | `netsense://conflict` | `{ profiles: [name] }` | **每个冲突事件只发一次**（引擎按 Profile 的 **id 集合**签名去重，换了名字也不重发；payload 里给的是展示名），前端弹窗 |
 | `netsense://action` | `{ kind, ok, message }` | `kind` 为 `apply` / `dhcp` / `probe`（这三条来自手动入口 —— 命令本身只是把请求排进队列）、`monitor`（健康度监测自动回落 DHCP，没有人点过任何按钮）或 `network`（**每一次对系统的网络写入**：`apply_3a` 下发的地址/DNS/路由、`set_dhcp` 的回落与 DNS 交回自动）。`kind = network` 的 `message` 说清「改了哪几项」，与日志里那一行是**同一句话**；什么也没改时不发此事件。**逐条动作的进度不在这里**，在 `evaluation` 的 `last_run` |
-| `netsense://applied` | `{ profile, fallback, ssid, iface, success, restored, nochange, groups, note? }` | **自动化应用了一个配置的结果弹窗**（只报最终结果）：首评、网络指纹变化、配置内容变化这三种来路之一，且 3A 有结果。`profile = null` + `fallback = true` 表示零命中兜底。`groups` 是**分组清单**（IPv4 / IPv6 / DNS / 系统），每行 `{ label, value, ok, detail }`：`ok = true|false` 是该项成败，`ok = null` 是系统身份行（没有成败可言）；`detail` 只在失败行上出现（快照恢复成功时写「已回滚，未生效」，恢复失败时**留空** —— 那时写入状态未知，不谎报）。`success` 是整体成败，`restored` 只在失败路径上有意义（快照恢复本身成没成功），`nochange = true` 表示这一轮一分写入都没有（系统本就合规 / THEN 缺省），`note` 是降级附注（成功）或失败原因（失败）。轮询中没有任何规则触发改变时后端**不发**此事件（`decide_plan` 直接返回 `None`），面板据此弹结果模态框，并把自己叫到前台 |
+| `netsense://applied` | `{ profile, fallback, ssid, iface, success, restored, nochange, groups, note? }` | **自动化应用了一个配置的结果弹窗**（只报最终结果）：首评、网络指纹变化、配置内容变化这三种来路之一，且 3A 有结果。`profile = null` + `fallback = true` 表示零命中兜底。`groups` 是**分组清单**（系统 / IPv4 / IPv6 / DNS —— 先说身份再说改了什么），每行 `{ label, value, ok, detail }`：`ok = true|false` 是该项成败，`ok = null` 是系统身份行（没有成败可言）；`detail` 只在失败行上出现（快照恢复成功时写「已回滚，未生效」，恢复失败时**留空** —— 那时写入状态未知，不谎报）。`success` 是整体成败，`restored` 只在失败路径上有意义（快照恢复本身成没成功），`nochange = true` 表示这一轮一分写入都没有（系统本就合规 / THEN 缺省），`note` 是降级附注（成功）或失败原因（失败）。轮询中没有任何规则触发改变时后端**不发**此事件（`decide_plan` 直接返回 `None`）。收到它的是**独立置顶的结果窗口**（label = `applied`，不是面板），常驻置顶且不抢焦点；后端把载荷存一份在 `AppState::last_applied`，显示时定向重发一次，页面加载完也会自己来取（`get_last_applied`）—— 两条路都通向同一份内容，不依赖页面加载时序 |
 | `netsense://update_progress` | `{ phase, percent }` | 在线升级：`download` / `refresh` / `install` |
 
 **广播何时会重建表单。** 编辑器只在**会换掉整片字段**的变化后重建表单：切换选中项、增删条目、
 保存成功，以及改动 `mode` / `v6mode` / 动作类型这几类下拉和 DNS 三态开关（THEN/ELSE 两支同时在场，
 在它们之间来回看并不触发重绘）；广播只换状态条、徽标与第 1 列的行描边，
 从不碰表单 DOM —— 否则用户正在输入的框会被自己填的内容刷掉。唯一的例外是**配置代际号**：
-四座窗口都是开机就建、显示/隐藏不重建页面，编辑器的表单只在首屏与自己的保存后重读；期间
+五座窗口都是开机就建、显示/隐藏不重建页面，编辑器的表单只在首屏与自己的保存后重读；期间
 配置在别处被换掉了（手改文件触发的热重载、导入备份），广播里的 `config_rev` 就比它手上
 那份（`get_config` 同趟带回的同名键）新 —— 此时只要用户没有未保存的改动（`dirty`），
 就整趟重读、按新内容重建，这正是他要的；有未保存改动就让画面旧着，不覆盖他的草稿。
@@ -189,7 +190,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
                                        // outdated 只有 macOS 会报：免密通道装着，但不是这一版
   "theme": "light|dark",               // 配色**当下该渲染**的那一套（`light` / `dark`），
                                        // 不是 `settings.json` 里存的档位（那一档可能是
-                                       // `system`）：四座窗口拿它直接写 `<html data-theme>`，
+                                       // `system`）：五座窗口拿它直接写 `<html data-theme>`，
                                        // 不必各自再问一次系统；「跟随系统」被操作系统自己
                                        // 换档时，这个值最迟一个缓存周期（60s）跟着变
   "config_rev": 7                       // 配置代际号：`state.config` 每被成功替换一次 +1。
@@ -240,7 +241,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `pick_app` | — | 打开系统文件选择器挑一个可启动目标，返回选中路径。**取消回 `null`**（什么都不该发生）；选择器起不来才是错误，且错误原文就是给用户看的话 —— 两者分开报，才能把「用户反悔」与「这台机器没有可用的选择器」（Linux 上 zenity / kdialog 都没有时回 `pal.no_file_dialog`）分清楚 |
 | `set_language` | `code` | 切换 UI 语言并写进**软件配置**；`code` 为 `system` 时是「跟随系统」—— 字段从 `settings.json` 里删掉，本次生效的语言现问操作系统。不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
 | `set_theme` | `code` | 切换界面配色并写进**软件配置**：`system` / `light` / `dark` 三档之一，存的就是用户选的这一档，返回值才是当下生效的那一套（`light`/`dark`）。认不出的 `code` 一律拒绝（`sett.theme_rejected`）而不是退回默认档 —— 界面发出一个后端不认的值说明前端有 bug，静默收下只会把它藏起来。与语言同一条判据：不碰 `config.json`，不触发热重载，只广播一次 `netsense://status`（载荷里的 `theme` 是算出来的那一套），并记一条 `notify.theme_set` |
-| `get_theme` | — | 界面**此刻**该用哪套配色（`light` / `dark`）。给的是算出来的那一套，不是 `settings.json` 里存的那一档：`system` 要说清现在是什么颜色必须问操作系统（`platform::ui_prefers_dark`，答案缓存 60s），而这一句问话属于后端 —— 决定做一次，四座窗口才是同一份答案。软件设置与日志窗口用它；编辑器在首屏那一批里问一次
+| `get_theme` | — | 界面**此刻**该用哪套配色（`light` / `dark`）。给的是算出来的那一套，不是 `settings.json` 里存的那一档：`system` 要说清现在是什么颜色必须问操作系统（`platform::ui_prefers_dark`，答案缓存 60s），而这一句问话属于后端 —— 决定做一次，五座窗口才是同一份答案。软件设置与日志窗口用它；编辑器在首屏那一批里问一次
 （表单不能等状态快照），此后跟着状态广播里的 `theme` 换档；面板只跟着广播走，不单独问 |
 | `get_app_settings` | — | 软件设置窗口的一次性快照（JSON 字符串）：语言（以及它是不是「跟随系统」在起作用）、配色那一档（存的是选择，不是算出来的那一个值 —— 这条命令每次窗口获得焦点都会被调，不在这里问操作系统）、开机启动的**系统实况**（问不出来时 `autostart:false` + `autostart_error`）、三份路径与受信脚本目录、备份目录、日志保留天数及上下限、提权通道、平台、版本 |
 | `set_autostart` | `enable` | 开 / 关「登录时启动」，返回系统里**实际**的状态（写 plist / `.desktop` / 注册表，真相不在本进程里） |

@@ -4,6 +4,12 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.8.8] - 2026-10-29
+
+### 修复
+
+- **结果弹窗不再永远停在那行占位文案上：它的窗口漏登记在 capability 之外，那扇窗里的每一次事件订阅都被拒了。** Tauri v2 是按 capability、按窗口授权的，`v1.8.6` 引入独立结果弹窗时 `applied` 从来没被加进 `capabilities/default.json` —— 那扇窗的 ACL 一直是空的。这事的隐蔽之处在于：应用自定义命令在 local origin 下**不**过 ACL（只有 plugin 命令才过），所以 `get_strings`、`get_last_applied`、`close_applied` 全都照常应答、窗口看着是活的，唯独 `event.listen`（`core:event` 的 plugin 命令）被拒 —— `netsense://applied` 一帧都送不到页面，被叫出来的窗口里只剩启动时画下的那屏占位。自动应用与手动应用两条路都中招，三个平台无一例外。`applied` 现已与另外四扇窗并列登记，`scripts/validate.py` 也会在 `tauri.conf.json` 里声明的窗口无人覆盖时直接判红。（`src-tauri/capabilities/default.json`、`scripts/validate.py`、`DEVELOPMENT.md`）
+
 ## [1.8.7] - 2026-10-28
 
 ### 修复

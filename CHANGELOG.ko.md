@@ -4,6 +4,12 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.8.8] - 2026-10-29
+
+### 수정
+
+- **결과 팝업이 더 이상 안내 문구 한 줄에서 멈춰 있지 않습니다: 이 창이 capability 목록에서 빠져 있어 창 안의 모든 이벤트 구독이 거부되고 있었습니다.** Tauri v2는 권한을 capability 단위·창 단위로 부여하는데, `v1.8.6`에서 독립 결과 창을 도입할 때 `applied`가 `capabilities/default.json`에 한 번도 추가되지 않았습니다 —— 그 창의 ACL이 줄곧 비어 있었다는 뜻입니다. 문제를 숨긴 지점은, 앱이 직접 정의한 명령은 local origin에서 ACL 검사 대상이 아니라는 점입니다(검사 대상은 plugin 명령뿐). 그래서 `get_strings`, `get_last_applied`, `close_applied`는 모두 정상 응답하고 창은 살아 있는 것처럼 보였지만, `event.listen`(`core:event`의 plugin 명령)만 거부되어 `netsense://applied`가 페이지에 한 번도 도달하지 못했고, 창이 떠도 시작 시 그려 둔 안내 문구만 남았습니다. 자동 적용과 수동 적용 모두, 모든 플랫폼에서 발생했습니다. 이제 `applied`를 다른 네 창과 함께 등록했고, `scripts/validate.py`는 `tauri.conf.json`에 선언된 창을 어떤 capability도커버하지 않으면 실패합니다. (`src-tauri/capabilities/default.json`、`scripts/validate.py`、`DEVELOPMENT.md`）
+
 ## [1.8.7] - 2026-10-28
 
 ### 수정

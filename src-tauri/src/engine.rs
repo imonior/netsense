@@ -1673,7 +1673,7 @@ fn publish_view(state: &Arc<AppState>) {
 ///
 /// 只报**最终结果**：这一轮到底往系统里写了哪几项（`change`，来自 3A 下发后的回读记账），
 /// 而不是下发前的计划态、也不是配置文件原文。版式是一份**分组清单**
-/// （IPv4 / IPv6 / DNS / 系统）：每行 = 标签 + 值 + ✅/❌，失败行另带红色明细，
+/// （系统 / IPv4 / IPv6 / DNS）：每行 = 标签 + 值 + ✅/❌，失败行另带红色明细，
 /// 底部是错误行 —— 对照用户给的参考图（hammerspoon 版的「网络配置仅部分生效」弹窗）。
 ///
 /// 「弹窗」与「引擎真的动了手」是同一件事：轮询中没有任何规则触发改变时 [`decide_plan`]
@@ -3310,7 +3310,7 @@ mod tests {
     }
 
     /// 弹窗载荷：分组清单列出这一轮**实际写下的几项**（来自 `NetworkChange`），
-    /// 成功路径每行 ✅；IPv4 / IPv6 / DNS / 系统四组，没写的组不出现。
+    /// 成功路径每行 ✅；系统 / IPv4 / IPv6 / DNS 四组，没写的组不出现。
     #[test]
     fn applied_notice_lists_the_actual_changes_and_the_network() {
         let change = crate::network::NetworkChange {

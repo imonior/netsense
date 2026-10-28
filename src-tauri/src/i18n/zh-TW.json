@@ -45,6 +45,7 @@
   "popup.applied_failed_rb": "設定已回滾：網路設定與動作",
   "popup.applied_nochange": "未變更任何網路參數",
   "popup.applied_fallback": "兜底 (無配置命中)",
+  "popup.applied_demo": "範例資料 —— 不是這台機器的真實結果",
   "popup.applied_empty": "此視窗列出 NetSense 上次套用設定時實際寫入系統的網路設定，由執行中的應用填入：在 NetSense 裡套用一份設定，結果就會顯示在這裡。",
   "popup.group_ipv4": "IPv4",
   "popup.group_ipv6": "IPv6",

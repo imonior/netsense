@@ -358,6 +358,38 @@ def check_tauri_fields() -> None:
     except Exception:  # noqa: BLE001  # 解析失败已在 [1] 报过
         return
     before = len(failures)
+    # 每一扇窗都必须被某份 capability 的 `windows` 覆盖（Tauri v2 的授权单位）。
+    # 为什么单列这一条：ACL 是**按 capability.windows 授权**的，没被任何 capability 列到的
+    # 窗口 ACL 为空 —— 而应用自定义命令（`invoke`）在 local origin 下**不**过 ACL
+    # （`webview/mod.rs` 只在 plugin 命令 / 有 app ACL / 远程源时才查），所以那扇窗看起来
+    # 「能调用」，只有 `event.listen`（`plugin:event|listen`）被拒 —— 于是它永远收不到广播。
+    # 1.8.6 起的「应用结果弹窗」正是这样：窗口被后端叫出来了，内容却一帧都没到，
+    # 只剩一屏占位文案（`applied` 当时漏在 capabilities 之外）。编译期、运行期都不报错。
+    import fnmatch
+
+    labels = [
+        w.get("label")
+        for w in cfg.get("app", {}).get("windows", []) or []
+        if isinstance(w, dict) and w.get("label")
+    ]
+    patterns: list[str] = []
+    for path_cap in sorted(glob.glob(os.path.join(ROOT, "src-tauri", "capabilities", "*.json"))):
+        try:
+            with open(path_cap, encoding="utf-8") as fh:
+                cap = json.load(fh)
+        except Exception:  # noqa: BLE001  # 解析失败已在 [1] 报过
+            continue
+        patterns.extend(str(w) for w in (cap.get("windows") or []))
+    uncovered = [
+        l for l in labels if not any(fnmatch.fnmatchcase(l, p) for p in patterns)
+    ]
+    if uncovered:
+        bad(f"capabilities 没覆盖 {len(uncovered)} 扇窗: {uncovered}（那几扇窗收不到任何事件）")
+    else:
+        ok(f"capabilities 覆盖了全部 {len(labels)} 扇窗（{', '.join(labels)}）")
+    orphan = [p for p in patterns if not any(fnmatch.fnmatchcase(l, p) for l in labels)]
+    if orphan:
+        bad(f"capabilities 列了不存在的窗口: {orphan}")
     bundle = cfg.get("bundle")
     if bundle is None:
         ok("bundle 段缺省（合法）")

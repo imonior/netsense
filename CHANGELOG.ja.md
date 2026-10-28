@@ -4,6 +4,12 @@ NetSense のすべての重要な変更をここに記録する。形式は
 [Keep a Changelog](https://keepachangelog.com/) に基づき、本プロジェクトは
 [セマンティックバージョニング](https://semver.org/) に準拠する。
 
+## [1.8.8] - 2026-10-29
+
+### 修正
+
+- **結果ポップアップがプレースホルダーの行から動かなくなる問題を修正しました：このウィンドウが capability の一覧から漏れており、内部のイベント購読がすべて拒否されていました。** Tauri v2 は権限を capability 単位・ウィンドウ単位で与えますが、`v1.8.6` で独立した結果ウィンドウを導入したとき `applied` は `capabilities/default.json` に一度も追加されていませんでした —— その窓の ACL は空のままだったということです。厄介なのは、アプリ独自のコマンドは local origin では ACL 検査の対象外（対象は plugin コマンドのみ）なので、`get_strings` / `get_last_applied` / `close_applied` は普通に応答し、窓は生きているように見える点です。拒否されたのは `event.listen`（`core:event` の plugin コマンド）だけで、そのため `netsense://applied` はページに一度も届かず、開かれた窓には起動時に描いたプレースホルダーしか残りませんでした。自動適用・手動適用の両方、全プラットフォームで発生していました。`applied` を他の四つの窓と並べて登録し、さらに `scripts/validate.py` が `tauri.conf.json` で宣言された窓をどの capability も覆っていない場合に失敗するようにしました。（`src-tauri/capabilities/default.json`、`scripts/validate.py`、`DEVELOPMENT.md`）
+
 ## [1.8.7] - 2026-10-28
 
 ### 修正

@@ -4,6 +4,12 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.8] - 2026-10-29
+
+### Fixed
+
+- **The result popup no longer stays stuck on its placeholder line: its window was missing from the capability list, so every event subscription inside it was refused.** Tauri v2 grants permissions per capability and per window, and `applied` was never added to `capabilities/default.json` when the standalone result window was introduced in `v1.8.6` — so that one window ran with an empty ACL. What hid the failure is that application commands are *not* ACL-checked on a local origin (only plugin commands are), so `get_strings`, `get_last_applied` and `close_applied` all answered normally and the window looked alive, while `event.listen` — a `core:event` plugin command — was rejected: `netsense://applied` never reached the page, and the window was raised showing nothing but the placeholder it had drawn at startup. Both the automatic path and the manual apply were affected, on every platform. `applied` is now registered next to the other four windows, and `scripts/validate.py` now fails when a window declared in `tauri.conf.json` is covered by no capability. (`src-tauri/capabilities/default.json`, `scripts/validate.py`, `DEVELOPMENT.md`)
+
 ## [1.8.7] - 2026-10-28
 
 ### Fixed

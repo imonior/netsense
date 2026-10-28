@@ -45,6 +45,7 @@
   "popup.applied_failed_rb": "配置已回滚：网络设置与动作",
   "popup.applied_nochange": "未更改任何网络参数",
   "popup.applied_fallback": "兜底 (无配置命中)",
+  "popup.applied_demo": "示例数据 —— 不是本机的真实结果",
   "popup.applied_empty": "此窗口列出 NetSense 上次应用配置时实际写入系统的网络设置，由运行中的应用填入：在 NetSense 里应用一份配置，结果就会显示在这里。",
   "popup.group_ipv4": "IPv4",
   "popup.group_ipv6": "IPv6",

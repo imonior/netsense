@@ -45,6 +45,7 @@
   "popup.applied_failed_rb": "Profile rolled back: Network setting and Actions",
   "popup.applied_nochange": "No network parameters were changed",
   "popup.applied_fallback": "Fallback (no profile matched)",
+  "popup.applied_demo": "Sample data — not from your system",
   "popup.applied_empty": "This window lists what NetSense wrote to the network settings the last time a profile was applied. It is filled in by the running app — apply a profile in NetSense and the result appears here.",
   "popup.group_ipv4": "IPv4",
   "popup.group_ipv6": "IPv6",
