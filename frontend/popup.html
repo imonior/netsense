@@ -169,7 +169,7 @@
   </header>
 
   <div class="section"><span id="sec-info" data-i18n="popup.section_info">Current network</span><span class="dot" id="dot"></span></div>
-  <div class="card">
+  <div class="card" id="net-card">
     <div class="row"><span class="k" id="k-profile" data-i18n="popup.profile">Applied profile</span><span class="v" id="v-profile">—</span></div>
     <div class="row" id="workers-row" hidden><span class="k" id="k-workers" data-i18n="popup.workers">Maintained</span><span class="v" id="v-workers">—</span></div>
     <div class="row"><span class="k" id="k-iface" data-i18n="popup.interface">Interface</span><span class="v" id="v-iface">—</span></div>
@@ -207,6 +207,8 @@
     <div class="modal" id="update-modal"></div>
   </div>
 
+  <!-- 当前网络卡 / 网卡卡与 applied.html 共用同一份渲染（frontend/netinfo.js） -->
+  <script src="netinfo.js"></script>
   <script>
     const hasTauri = () => window.__TAURI__ && window.__TAURI__.core;
     const invoke = (cmd, args) => {
@@ -251,20 +253,10 @@
       syncLang();
     }
 
-    const kindLabel = (kind) => kind === "wireless" ? t("popup.kind_wireless", "Wi-Fi")
-      : kind === "wired" ? t("popup.kind_wired", "Wired")
-      : kind === "vpn" ? t("popup.kind_vpn", "VPN") : t("popup.kind_other", "Other");
-
-    /// 网卡怎么称呼自己：光有设备名不够，`en0` 后面要跟上「这是哪一口」。
-    /// 系统给的设备标签（macOS 的 Hardware Port、Windows 的 InterfaceDescription）本身
-    /// 就带类型信息，优先用它；它已经含设备名时不再重复一遍。隧道口在系统服务表里没有
-    /// 条目（标签为空），这时退回按种类标注。
-    const nicTitle = (n) => {
-      const label = (n.label || "").trim();
-      if (!label) return `${n.name} (${kindLabel(n.kind)})`;
-      return label.toLowerCase().includes(n.name.toLowerCase())
-        ? label : `${n.name} (${label})`;
-    };
+    // 网卡标签 / 标题 / 路由格 / 网卡卡已抽到 frontend/netinfo.js，与 applied.html 共用。
+    const kindLabel = (kind) => NetInfo.kindLabel(kind);
+    const nicTitle = (n) => NetInfo.nicTitle(n);
+    const routeText = (list) => NetInfo.routeText(list);
 
     /// One detail row: the row stays even when the value is missing — "—" marks "no value".
     ///
@@ -281,17 +273,6 @@
       const el = document.getElementById("v-" + id);
       el.textContent = v || "—";
       return el;
-    };
-
-    /// 路由那一格：最多摆三条，剩下的写成「+N」。
-    /// 面板只有几十字宽，而一条隧道的 `allowed-ips` 可以是一片 /32。
-    /// `0.0.0.0/0` / `::/0` 是「一切」而不是一条路由：默认往哪走已由网关行回答，
-    /// 这里只剩真正带信息量的前缀要摆。
-    const routeText = (list) => {
-      const rs = (list || []).filter((r) => r !== "0.0.0.0/0" && r !== "::/0");
-      return rs.length > 3
-        ? rs.slice(0, 3).join(", ") + " +" + (rs.length - 3)
-        : rs.join(", ");
     };
 
     /// 真正能摆出来的下一跳：`0.0.0.0` / `::` 是各平台的 on-link 伪网关，macOS 还把
@@ -336,43 +317,9 @@
     /// 那是用户自己在客户端里取的名字）。
     /// 认不出归属软件时标题退回设备名、标签仍是通用的「VPN」：少一格信息可以，给这条隧道
     /// 安一个错牌子不行（判据见 `platform::macos::attribute_vpn`）。
-    function nicCard(n) {
-      const vpn = n.kind === "vpn";
-      const title = vpn ? (n.app || n.name) : nicTitle(n);
-      const tag = kindLabel(n.kind);
-      const state = vpn
-        ? (n.up ? t("popup.connected", "Connected") : t("popup.disconnected", "Not connected"))
-        : "";
-      const rows = [];
-      if (vpn) {
-        const routes = routeText(n.routes);
-        if (n.up) rows.push([t("popup.vpn_egress", "Interface"), n.name]);
-        if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
-        // 「网关」这一描述不再单列：架构上 Gateway 即 Route 的 Next Hop，VPN 的出口下一跳
-        // 就是它默认路由的下一跳，归进「路由」语义即可；单列反倒让人误以为 VPN 还有一层
-        // 独立的网关。IPv6 地址跟在 IPv4 之下，路由明细直接接在地址下面。
-        if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
-        if (routes) rows.push([t("popup.routes", "Routes"), routes]);
-        if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
-      } else {
-        if (n.ssid) rows.push([t("status.ssid", "SSID"), n.ssid]);
-        if (n.mac) rows.push([t("popup.mac", "MAC"), n.mac]);
-        if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
-        if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
-        if (n.gateway) rows.push([t("popup.gateway", "Gateway"), n.gateway]);
-        if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
-      }
-      return `<div class="nic-card">
-        <div class="nic-head">
-          <span class="nic-name">${esc(title)}</span>
-          <span class="nic-end">
-            <span class="nic-tag${vpn ? " vpn" : ""}">${esc(tag)}</span>
-            ${state ? `<span class="nic-state${n.up ? " on" : ""}">${esc(state)}</span>` : ""}
-          </span>
-        </div>
-        ${rows.map(([k, v]) => `<div class="nic-row"><span class="k">${esc(k)}</span><span class="v${k === t("popup.routes", "Routes") ? " route" : ""}">${esc(v)}</span></div>`).join("")}
-      </div>`;
-    }
+    // 单张网卡卡片（名称 + 类型标签 + 连接状态 + 关键字段）见 frontend/netinfo.js 的
+    // `NetInfo.nicCard`，与 applied.html 共用同一份实现（抽出来避免两套渲染漂移）。
+    const nicCard = (n) => NetInfo.nicCard(n, t, esc);
 
     // 后端 `get_interfaces` 保证列表第一张就是「在用的那张」（判据见 automation::primary_nic），
     // 所以这里不需要在前端再实现一遍选主网卡的规则。
@@ -463,46 +410,25 @@
         wv.title = "\n" + ws.map(w => `${w.label}: ${w.error || workerWord(w.state)}`).join("\n");
       }
 
-      // 「在用的那张网卡」的明细：主网卡由 Rust 侧选定（`automation::primary_nic`）并放在
-      // `get_interfaces` 首位，这里只把它的字段与状态快照合并展示，取不到的字段留「—」
-      // （每个字段都在场，排障时才看得出「是空的」和「没读到」）。
-      // SSID 只属于无线：有线主网卡上 `status` 是历史快照，摆出来会指错网络 —— 那一行
-      // 因此给「—」，而不是把上一次无线环境的旧名字留在上面。
-      const primary = primaryNic();
-      const wireless = !primary || primary.kind === "wireless";
-      setRow("iface", primary ? nicTitle(primary) : st.iface);
-      let ssid = st.ssid || (primary && primary.ssid) || "";
-      // 「已连接但读不到 SSID」（macOS 15.6+ 的系统限制）不能显示成「未连接」——
-      // 那会与同一面板上的绿点、IP / DNS 行自相矛盾。
-      if (!ssid) ssid = connected ? t("status.ssid_unknown", "Unknown") : t("popup.disconnected", "Not connected");
-      setRow("ssid", wireless ? ssid : "");
-      setRow("mac", primary && primary.mac);
-      setRow("ip", st.ipv4 || (primary && primary.ipv4));
-      setRow("netmask", (primary && primary.netmask) || st.netmask);
-      setRow("gateway", st.gateway || (primary && primary.gateway));
-      // —— IPv6 段跟着**设置**走（`v6mode` 是当前生效配置里的设置值，随状态广播）：
-      // off → IPv6 行显示设置值「Off」，前缀 / 网关行整行收起（设置关了它，实测值
-      // 没有意义）；非 off（automatic / manual / linklocal）→ 三行都摆，读不到的给
-      // 红色「—」（配置说它该有而实测没有，值得警惕）；没有生效配置（null）→ 旧行为：
-      // 有值显示、没值灰「—」。
-      const v6mode = data.v6mode || null;
-      const v6off = v6mode === "off";
-      const v6known = v6mode === "automatic" || v6mode === "manual" || v6mode === "linklocal";
-      const setRow6 = (id, v, hide) => {
-        const el = setRow(id, v);
-        el.parentElement.hidden = !!hide;
-        el.className = "v" + (v6known && !v ? " bad" : "");
-      };
-      setRow6("ipv6", v6off ? t("editor.off", "Off") : (primary && primary.ipv6), false);
-      setRow6("prefix6", v6off ? "" : (primary && primary.prefix6), v6off);
-      setRow6("gateway6", v6off ? "" : (st.gateway6 || (primary && primary.gateway6)), v6off);
-      setRow("dns", st.dns || (primary && primary.dns));
+      // 当前网络卡与 applied.html 共用 frontend/netinfo.js 的 NetInfo.fill
+    // （同一份渲染：字段顺序、空值留「—」、v6mode 控制 IPv6 三段可见性都一致）。
+    NetInfo.fill(document.getElementById("net-card"), {
+      st, primary: primaryNic(), v6mode: data.v6mode || null, connected, t, esc,
+    });
       refreshPublicIp();
 
       // 快速切换区只列 Profile 上勾了「放入快速切换区」的那些（`quick`，默认勾选）。
       // 取消勾选只是在面板收起，编辑器里它仍然存在、仍然参与条件匹配。
+      // 唯一的例外：当前正在生效的那一条必须始终出现 —— 否则「生效项被手动收起」时，
+      // 用户既看不到它是不是当前项、也没有入口从别的配置切回它（只能开编辑器）。
+      // 它是例外不是常态：只有「quick 被关掉、却又成了生效项」这一矛盾态，才强制置顶补入。
       const all = data.profiles || [];
-      const rows = all.filter(p => p.quick !== false);
+      const activeId = dec.state === "active" ? dec.id : null;
+      let rows = all.filter(p => p.quick !== false);
+      if (activeId) {
+        const activeP = all.find(p => p.id === activeId);
+        if (activeP && !rows.includes(activeP)) rows = [activeP, ...rows];
+      }
       const list = document.getElementById("switches");
       if (!rows.length) {
         list.innerHTML = `<div class="empty">${esc(t(
@@ -712,12 +638,13 @@
       renderUpdate(d);
     }
 
-    /// 标题上的版本号：与软件设置窗口读同一个来源（`get_app_settings`）。
+    /// 标题上的版本号：走最轻的 `get_app_version`（编译期版本号，几乎不会失败）。
+    /// 不依赖 `get_app_settings` —— 那个命令要读很多路径，任一平台相关的文件操作失败都会被
+    /// 前端 `.catch` 吞掉，结果就是版本号整段空白（v1.8.8 在 Windows 上正是这么没显示出来）。
     /// 排障时「我手上是哪一版」这句话要在开面板的那一刻就能说出口；取不到就整段不显示。
     function showVersion() {
-      invoke("get_app_settings").then((raw) => {
-        const d = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (d && d.version) document.getElementById("ver").textContent = "v" + d.version;
+      invoke("get_app_version").then((v) => {
+        if (v) document.getElementById("ver").textContent = "v" + v;
       }).catch(() => {});
     }
 

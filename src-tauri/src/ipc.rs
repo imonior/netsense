@@ -585,6 +585,18 @@ pub fn set_theme(
     Ok(now.to_string())
 }
 
+/// 当前安装的版本号（编译期写死进二进制的 `CARGO_PKG_VERSION`）。
+///
+/// 单独成一个命令，是有意的：托盘面板标题上的版本号**不该**依赖 [`get_app_settings`]
+/// —— 那个命令要读很多路径（配置 / 日志 / 备份 / 脚本目录），任一平台相关的文件操作
+/// 失败都会被前端 `.catch` 静默吞掉，结果就是标题版本号整段空白（v1.8.8 在 Windows 上
+/// 就是这么没显示出来的）。版本号是该「永远能说出口」的那句话，所以走一条最轻、几乎不会
+/// 失败的路径。
+#[tauri::command(async)]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// 软件配置窗口的一次性快照：能改的、只能看的、以及它们在各平台上的真实位置。
 ///
 /// `autostart` 是**问操作系统**问出来的，不是读配置文件读出来的（见 `appconfig` 模块头）；
@@ -915,7 +927,7 @@ pub fn mirror_speed_test(
                             &crate::appconfig::UpdateMirror::Prefix(prefix.to_string()),
                         )
                     };
-                    json!({ "prefix": prefix, "ms": timed_get(&url, proxy) })
+                    json!({ "prefix": prefix, "ms": timed_get(&url, proxy).ms })
                 })
             })
             .collect();
@@ -1062,7 +1074,7 @@ pub fn proxy_speed_test(urls: Vec<String>) -> Result<String, String> {
         };
         // 每个候选各带自己的代理参数：测的就是「走这个候选」要多久。
         let proxy = ["--proxy".to_string(), url.clone()];
-        out.push(json!({ "url": url, "ms": timed_get(PROBE, &proxy) }));
+        out.push(json!({ "url": url, "ms": timed_get(PROBE, &proxy).ms }));
     }
     Ok(serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()))
 }
@@ -1084,6 +1096,11 @@ pub struct PathSpec {
 /// 组合，而不是把存着的代理硬套到镜像测试上。测的是更新时真会用的那条 URL
 /// （`releases/latest/download/SHA256SUMS`，经镜像时拼前缀），出口用该项自己的选择 ——
 /// 这样每一行显示的数字就是「选这条路去升级实际要多久」。各项并行探测，总时长取最慢的那个。
+///
+/// 返回 JSON 数组，顺序与入参 `paths` 一一对应；每项是 `{"ms": i64|null, "ok": bool, "error": string|null}`：
+/// `ok = true` 时 `ms` 为耗时毫秒、`error` 为 `null`；`ok = false` 时 `ms` 为 `null`、`error`
+/// 为不通的原因（curl 退出信息或防御性的「量不到」）。界面据此把每行画成绿字成功 / 红字失败，
+/// 而不是把「没测」和「测了但不通」都画成一条 `—`。
 #[tauri::command(async)]
 pub fn update_path_speed_test(paths: Vec<PathSpec>) -> Result<String, String> {
     if paths.len() > 16 {
@@ -1112,7 +1129,8 @@ pub fn update_path_speed_test(paths: Vec<PathSpec>) -> Result<String, String> {
                             ),
                         )
                     };
-                    json!({ "ms": timed_get(&url, &proxy) })
+                    let probe = timed_get(&url, &proxy);
+                    json!({ "ms": probe.ms, "ok": probe.ok, "error": probe.error })
                 })
             })
             .collect();
@@ -1125,6 +1143,20 @@ pub fn update_path_speed_test(paths: Vec<PathSpec>) -> Result<String, String> {
 /// 只共用进程号会互相覆盖，量到的就不是自己那一次的时间了。
 static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 一次 GET 的总耗时（curl 的 `time_total`，不是 TCP 握手时间）外加成败与可读错误。
+///
+/// 旧的 `mirror_speed_test` / `proxy_speed_test` 只用 `ms`（`None` = 没量到）；新的
+/// `update_path_speed_test` 额外用 `ok` / `error`，让界面能区分「没测」和「测了但不通」，
+/// 并把不通的原因说出来（而不是把这两种都画成一条 `—`）。
+pub struct ProbeOutcome {
+    /// 成功时为耗时毫秒；失败时为 `None`。
+    pub ms: Option<i64>,
+    /// 这条通路真实走通了没有。
+    pub ok: bool,
+    /// 失败时的可读原因（curl 退出信息，或防御性的「量不到」）；成功时为 `None`。
+    pub error: Option<String>,
+}
+
 /// 发一次 GET，量完整个请求的总耗时（curl 的 `time_total`，不是 TCP 握手时间）。
 ///
 /// `-L` 跟随重定向、且 `--proto =https` 保证跳转落点也必须是 https：一次「只是慢了一点」
@@ -1132,8 +1164,9 @@ static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 /// 上叫 NUL，而这里不该为了丢字节去分叉；body 写走之后 stdout 只剩 `-w` 那一个数，
 /// 读回来不用解析两掺。
 ///
-/// 返回毫秒；连不上 / 超时 / curl 不在 → `None`（界面上是「这个候选现在不通」）。
-fn timed_get(url: &str, proxy_args: &[String]) -> Option<i64> {
+/// 返回 [`ProbeOutcome`]：连不上 / 超时 / curl 不在 → `ok = false`、附 `error`
+/// （界面上是「这个候选现在不通，原因见 error」）。
+fn timed_get(url: &str, proxy_args: &[String]) -> ProbeOutcome {
     let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dest = std::env::temp_dir().join(format!("netsense-probe-{}-{seq}.out", std::process::id()));
     let dest_arg = dest.to_string_lossy().into_owned();
@@ -1152,13 +1185,17 @@ fn timed_get(url: &str, proxy_args: &[String]) -> Option<i64> {
     let mut args: Vec<&str> = base.to_vec();
     args.extend(proxy_args.iter().map(String::as_str));
     args.push(url);
-    let ms = crate::platform::run("curl", &args)
-        .ok()
-        .and_then(|t| t.trim().parse::<f64>().ok())
-        .filter(|s| *s > 0.0)
-        .map(|s| (s * 1000.0).round() as i64);
+    let outcome = match crate::platform::run("curl", &args) {
+        Ok(out) => match out.trim().parse::<f64>().ok().filter(|s| *s > 0.0) {
+            Some(s) => ProbeOutcome { ms: Some((s * 1000.0).round() as i64), ok: true, error: None },
+            // curl 退出 0 却读不到正数耗时：理论上不会发生（`-w` 总会打印一个数），
+            // 但留一句可读的失败原因，界面就不必为「error 为空」单独兜底。
+            None => ProbeOutcome { ms: None, ok: false, error: Some(i18n::t("sett.proxy_test_unreachable")) },
+        },
+        Err(e) => ProbeOutcome { ms: None, ok: false, error: Some(e) },
+    };
     let _ = std::fs::remove_file(&dest);
-    ms
+    outcome
 }
 
 /// 设「升级请求走哪条出口」：`direct` / `system` / `manual` + 一个地址。

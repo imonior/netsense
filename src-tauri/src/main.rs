@@ -306,6 +306,16 @@ fn main() {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            // 关掉结果弹窗（applied）= 收起，而不是销毁：它启动时就建好、靠
+            // `get_webview_window(APPLIED_LABEL)` 复用，`show_applied` 在窗口不存在时
+            // 直接 warn 并放弃 —— 一旦被原生 X 销毁，自动化再触发应用就再也弹不出来了。
+            // 因此这里拦截 CloseRequested，改走 hide（与底部「关闭」按钮的 `close_applied` 一致）。
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if window.label() == popup::APPLIED_LABEL =>
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
@@ -336,6 +346,7 @@ fn main() {
             ipc::get_theme,
             ipc::set_theme,
             ipc::get_app_settings,
+            ipc::get_app_version,
             ipc::set_autostart,
             ipc::set_log_retention,
             ipc::set_log_level,

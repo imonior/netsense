@@ -4,6 +4,20 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.9] - 2026-10-30
+
+### Fixed
+
+- **The tray panel title always shows the version number now.** The panel filled its version from `get_app_settings`, a command that must read the config, log, backup and trusted-script directories before it can answer; any platform-specific failure along that walk was swallowed by the page's `.catch`, leaving the title blank — which is exactly what v1.8.8 shipped on Windows. The version is compiled into the binary (`CARGO_PKG_VERSION`), so it now comes from a dedicated `get_app_version` command that cannot depend on the filesystem: "which build am I looking at" is answerable from the moment the panel opens. (`ipc.rs`, `main.rs`, `frontend/popup.html`)
+- **The ✅/❌ verdicts in the result popup's list can no longer be pushed out of view.** The mark used to live inside the value span, so a long label or value pressed it against the panel edge and clipped it first — the one piece of the row that must never be lost. The mark is now its own fixed column on the right, while the label and the value each shrink with their own ellipsis. (`frontend/applied.html`)
+- **The result popup's "current network" card is translated like the rest of that window now.** v1.8.8 made the popup reuse the tray's card renderer, but the shared renderer wrote English fallback labels with a `data-i18n` attribute and relied on the host page to translate them afterwards — and the result popup runs no translation pass of its own, so its eleven card labels ("Applied profile", "Interface", "MAC", …) stayed English in every other language. The renderer now translates the labels in place, so both windows show the same language-correct card. (`frontend/netinfo.js`)
+- **A profile that is currently in effect can no longer disappear from the tray's Quick Switch list.** Profiles unchecked from the quick switch area are filtered out of the panel — right when switching *to* them, wrong when such a profile is the one currently in effect: it was then absent from the list entirely, so the panel had no row for the live configuration and no way back to it after switching away, short of opening the editor. The active profile is now always present, pinned at the top with its green "current" highlight. (`frontend/popup.html`)
+
+### Changed
+
+- **The settings window is reorganized around a left-hand navigation** with three sections — General, Updates and About — after the same layout as WireGuard Plus. The runtime options that were scattered across cards (privilege channel, silent apply, DNS fallback, the applied-popup toggle) are grouped into a single Behavior card, and the window is wider (720×600) to fit the rail. No control changed its behavior or its stored key. (`frontend/settings.html`, `tauri.conf.json`, `i18n`)
+- **The update-path speed test now tells you how each row did, not just how fast.** The backend returns success and a readable error alongside the milliseconds, each row colors itself green or red and shows the failure reason, the button and every row show a "probing…" state while the test runs instead of a silent gray-out, and the test now runs once automatically when the settings window opens. The two older speed-test commands keep their JSON shape unchanged. (`ipc.rs`, `frontend/settings.html`, `i18n`)
+
 ## [1.8.8] - 2026-10-29
 
 ### Fixed

@@ -79,7 +79,7 @@ netsense/
 │       ├── appconfig.rs       # 软件配置 settings.json（语言 / 界面配色 / 日志保留 / 升级代理）+ 三平台开机启动（问系统，不猜文件）
 │       ├── netproxy.rs        # 升级请求的出口：三态（直连 / 跟随系统 / 手填）+ 现问系统代理（mac scutil、linux gsettings）+ 地址形状校验
 │       ├── backup.rs          # 备份：一份 JSON 装下自动化配置 + 软件配置 + 受信脚本；恢复前先解析 + validate()，落盘前把当前文件另存一份
-│       ├── ipc.rs             # 62 条 Tauri 命令（前端契约见 frontend/README.md）
+│       ├── ipc.rs             # 63 条 Tauri 命令（前端契约见 frontend/README.md）
 │       ├── engine.rs          # ★ 状态机：decide() · reconcile() · execute_branch() · manual_apply()
 │       ├── config/
 │       │   ├── model.rs       # schema 1 数据结构（Profile / Rule / Condition / Branch / 3A / 3B）
@@ -115,6 +115,7 @@ netsense/
 │       └── i18n/              # en/zh/zh-TW/ja/ko.json (embedded at compile time via include_str!)
 ├── frontend/
 │   ├── popup.html             # status-bar popup panel (window label = popup)
+│   ├── netinfo.js             # shared network-info card renderer (popup.html + applied.html both render via NetInfo.*)
 │   ├── editor.html            # config editor (window label = main)
 │   ├── settings.html          # 软件设置窗口（窗口 label = settings）：语言 / 开机启动 / 升级代理 / 检查更新 / 配置与日志位置
 │   ├── logs.html              # 日志窗口（窗口 label = logs）：按天文件下拉 / 尾部行 / 级别上色 / 过滤 / 跟随
@@ -764,11 +765,11 @@ The standard menu-bar app interaction: **click the icon (either button) to toggl
 |-------|------|------------|
 | `popup` | `popup.html` | `360×620`, `decorations: false`, `alwaysOnTop`, `skipTaskbar`, `visible: false` |
 | `main` (editor) | `editor.html` | `1180×700`（`minWidth 980 / minHeight 560`）, `center`, `visible: false`（以隐藏态创建，`setup` 里紧接着 `popup::show_main` 把它显示出来 —— 启动就能看到编辑器） |
-| `settings` | `settings.html` | `620×600`（`minWidth 480 / minHeight 420`）, `center`, `visible: false`（面板的「设置」打开它；关闭 = 隐藏，同编辑器） |
+| `settings` | `settings.html` | `720×600`（`minWidth 540 / minHeight 420`）, `center`, `visible: false`（面板的「设置」打开它；关闭 = 隐藏，同编辑器） |
 | `logs` | `logs.html` | `900×620`（`minWidth 620 / minHeight 420`）, `center`, `visible: false`（面板的「日志」打开它；关闭 = 隐藏，同上） |
-| `applied` | `applied.html` | `340×440`, `decorations: false`, `alwaysOnTop`, `skipTaskbar`, `visible: false`（「配置已应用」结果弹窗，见 §8。它由后端 `emit_applied` 拉起，**不抢焦点**：只 `show()`、绝不 `set_focus()`） |
+| `applied` | `applied.html` | `340×470`, `decorations: true`, `resizable`, `alwaysOnTop`, `skipTaskbar`, `visible: false`（「配置已应用」结果弹窗，见 §8。它由后端 `emit_applied` 拉起，**不抢焦点**：只 `show()`、绝不 `set_focus()`） |
 
-All five windows are created at startup and only shown/hidden — the webview is **not rebuilt on every click** (guarantees instant open). 五个 label 都必须在 `capabilities/default.json` 的 `windows` 里登记：Tauri v2 按 capability 的 `windows` 授权，漏登记的那扇窗 ACL 为空。注意失败的样子很隐蔽 —— 应用自定义命令在 local origin 下**不**过 ACL（Tauri v2 的 `webview` 模块只在 plugin 命令 / 有 app ACL / 远程源时查），所以那扇窗**能调 `invoke`**，只有 `event.listen`（`plugin:event|listen`）被拒：窗口照常被后端叫出来，却一帧内容都收不到，只剩启动那一帧占位。`applied` 就漏过一次（1.8.6 起，1.8.8 修）。`scripts/validate.py` 现在按 `tauri.conf.json` 的窗口清单核对 capability 覆盖，漏一扇就红。
+All five windows are created at startup and only shown/hidden — the webview is **not rebuilt on every click** (guarantees instant open). 只有托盘面板（`popup`）是无边框的：它是贴在托盘图标下方的一块浮层，自己画标题栏；其余四扇窗都要 `decorations: true` —— 用系统标题栏换回「能拖动 + 有最小化/最大化/关闭」三件事，别自己再实现一遍窗口管理。 五个 label 都必须在 `capabilities/default.json` 的 `windows` 里登记：Tauri v2 按 capability 的 `windows` 授权，漏登记的那扇窗 ACL 为空。注意失败的样子很隐蔽 —— 应用自定义命令在 local origin 下**不**过 ACL（Tauri v2 的 `webview` 模块只在 plugin 命令 / 有 app ACL / 远程源时查），所以那扇窗**能调 `invoke`**，只有 `event.listen`（`plugin:event|listen`）被拒：窗口照常被后端叫出来，却一帧内容都收不到，只剩启动那一帧占位。`applied` 就漏过一次（1.8.6 起，1.8.8 修）。`scripts/validate.py` 现在按 `tauri.conf.json` 的窗口清单核对 capability 覆盖，漏一扇就红。
 
 ### Show/hide & positioning (`src-tauri/src/popup.rs`)
 
@@ -968,7 +969,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
 - **The shipped default is "follow the system"** — `settings.json` simply has no `language` key, and startup then asks the OS for its UI language (`ui_language` in the PAL). The same shape holds for colors: the stored value can be `system`, and the palette a window renders is resolved by the backend (`ui_prefers_dark` in the PAL, §10.4). English is what's left when there is nothing to follow: the system tag is unreadable, or names a language this app has no dictionary for. A user who picks a language explicitly stores that code and the system is never consulted again. The four windows, the tray tooltip and the native startup dialogs all read the same dictionary either way.
   The tag shapes differ per platform (macOS `zh-Hans-CN`, Linux `zh_CN.UTF-8`, Windows a numeric LANGID the PAL turns into a tag), so folding a tag into one of the five dictionaries lives in `i18n` (`from_language_tag`), not in the three platform legs. 繁体 only comes from `TW` / `HK` / `MO` / script `Hant`; every other `zh` is 简体.
 - Lookup order: current language → `en` → the key itself (**never panics**). `tf(key, args)` substitutes `{name}` placeholders; a placeholder a translation drops is a bug, not a style choice, so `{placeholder}` parity is checked per key.
-- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **692 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
+- Namespaces are only key prefixes, and the set of them is derived from `en.json` itself (`app`/`editor`/`engine`/`notify`/`popup`/`status`/`tray`/`sett`/`logs`/`cfg`/`backup`/`pal`/`act`/`net`/`upd`/`dlg` today, **700 keys × 5 languages**) — adding one needs no change here. `dlg.*` is the odd one out: those strings go to a Win32 `MessageBox`, which never renders the WebView, so no frontend mechanism can reach them.
 - **Key-parity check** (`check_parity()` returns missing/extra/empty, requiring all three to be 0) runs once at app startup; failure only warns, does not block startup.
   `cargo test` guards the bundle with four cases: `parity_ok_in_bundle` / `fallback_to_en_then_key` / `placeholder_replace` / `every_language_keeps_ens_placeholders`.
 - Language switch: IPC `set_language` → 写 `settings.json`（软件配置，见 §10.4）+ 改进程内的当前语言；它**不**碰 `config.json`，

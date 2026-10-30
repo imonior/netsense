@@ -153,3 +153,39 @@ html[data-theme="light"] {
   background: var(--t-line-hi);
   border-radius: var(--t-r-sm);
 }
+
+/* —— 共享「当前网络」卡 / 网卡卡（popup.html 托盘菜单 与 applied.html 应用结果弹窗共用，
+   渲染逻辑在 frontend/netinfo.js）。抽到主题里，两扇窗的同一张卡长得一样。 —— */
+.card {
+  background: var(--bg-card); border: 1px solid var(--line);
+  border-radius: var(--t-r-md); margin: 10px 12px 0; padding: 9px 10px;
+}
+.row { display: flex; justify-content: space-between; gap: 10px; }
+.row + .row { margin-top: 4px; }
+/* .row 自带 display，会把 [hidden] 的 UA 样式盖掉，这里补回来 */
+.row[hidden] { display: none; }
+.k { color: var(--muted); }
+.v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62%; }
+.v.warn { color: var(--warn); }
+.v.bad { color: var(--t-err); }
+.v.good { color: var(--ok); }
+.nic-card {
+  background: var(--bg-card); border: 1px solid var(--line);
+  border-radius: var(--t-r-md); padding: 7px 9px; margin-bottom: 6px;
+}
+.nic-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 3px; }
+.nic-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nic-tag { font-size: 9px; padding: 1px 5px; border-radius: var(--t-r-pill); background: var(--t-tint-info); color: var(--t-tint-info-fg); white-space: nowrap; }
+.nic-tag.vpn { background: var(--t-tint-vpn); color: var(--t-tint-vpn-fg); }
+.nic-end { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.nic-state { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.nic-state.on { color: var(--t-ok); }
+.nic-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+.nic-row .k { color: var(--muted); }
+.nic-row .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 66%; }
+/* 路由行和 IP / 网关一样右对齐，但允许换行摊开长前缀（routeText 已收成「3 条 +N」）。 */
+.nic-row .v.route {
+  flex: 1 1 auto; min-width: 0; max-width: none; margin-left: 8px; text-align: right;
+  overflow: visible; text-overflow: clip;
+  white-space: normal; word-break: break-word; overflow-wrap: anywhere; line-height: 1.35;
+}

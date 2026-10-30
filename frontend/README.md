@@ -101,7 +101,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 692 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 700 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -216,7 +216,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，62 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，63 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -244,6 +244,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `get_theme` | — | 界面**此刻**该用哪套配色（`light` / `dark`）。给的是算出来的那一套，不是 `settings.json` 里存的那一档：`system` 要说清现在是什么颜色必须问操作系统（`platform::ui_prefers_dark`，答案缓存 60s），而这一句问话属于后端 —— 决定做一次，五座窗口才是同一份答案。软件设置与日志窗口用它；编辑器在首屏那一批里问一次
 （表单不能等状态快照），此后跟着状态广播里的 `theme` 换档；面板只跟着广播走，不单独问 |
 | `get_app_settings` | — | 软件设置窗口的一次性快照（JSON 字符串）：语言（以及它是不是「跟随系统」在起作用）、配色那一档（存的是选择，不是算出来的那一个值 —— 这条命令每次窗口获得焦点都会被调，不在这里问操作系统）、开机启动的**系统实况**（问不出来时 `autostart:false` + `autostart_error`）、三份路径与受信脚本目录、备份目录、日志保留天数及上下限、提权通道、平台、版本 |
+| `get_app_version` | — | 当前安装的版本号（`CARGO_PKG_VERSION`，编译期写进二进制）。单独成命令是为了托盘面板标题上的版本号**不依赖** `get_app_settings` —— 后者要读许多路径（配置 / 日志 / 备份 / 脚本目录），任一平台相关文件操作失败都会被前端 `.catch` 吞掉；版本号是该「永远能说出口」的那句话，所以走一条最轻、几乎不会失败的路径 |
 | `set_autostart` | `enable` | 开 / 关「登录时启动」，返回系统里**实际**的状态（写 plist / `.desktop` / 注册表，真相不在本进程里） |
 | `set_log_retention` | `days` | 设日志保留天数（越界按 1–365 夹紧），落盘 + 立刻按新窗口清一次，返回夹紧后的值 |
 | `set_log_level` | `level` | 设日志级别（`error` / `warn` / `info` / `debug`）并**当场生效**：除了写进 `settings.json`，还立刻翻动内存里的级别闸门（`log::set_min_level`），不用重启 —— 用户在设置里调到 Debug，下一条采样就落盘。认不出的值按 `info`（默认档）收而不是拒绝：设置里那颗下拉只会发出这四个值，收到别的说明前端有 bug，静默按默认档放行比报错更不影响使用；返回归一后的值 |

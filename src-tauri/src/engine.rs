@@ -1851,7 +1851,7 @@ fn applied_groups(
 /// 延迟单击同一个模式（两个 handle：一个借给 `run_on_main_thread` 当 `&self`，
 /// 一个 move 进闭包；同一个 `app` 不能既被借用又被 move 捕获，否则 E0505）。
 fn show_applied_window(state: &Arc<AppState>) {
-    // 没有载荷就不叫窗口：一扇「没内容可显示」的置顶无边框窗是最糟的形态 ——
+    // 没有载荷就不叫窗口：一扇「没内容可显示」的置顶窗是最糟的形态 ——
     // 用户既看不到结果，又得去别处找怎么关掉它（1.8.6 那扇黑窗的教训）。
     let payload = state
         .last_applied

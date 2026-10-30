@@ -25,12 +25,27 @@
       font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
       display: flex; flex-direction: column;
     }
-    header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 12px 16px 10px; border-bottom: 1px solid var(--line);
+    /* WireGuard Plus 风格：左侧固定导航栏 + 右侧内容区。导航切换 section 显隐，
+       所有卡片与控件 ID 保持不变，只换布局外壳。 */
+    .app { display: flex; height: 100%; min-height: 0; }
+    .sidenav {
+      flex: none; width: 184px; padding: 14px 10px; border-right: 1px solid var(--line);
+      background: var(--t-sunken); display: flex; flex-direction: column; gap: 2px;
     }
-    header b { font-size: 14px; letter-spacing: .2px; }
-    main { flex: 1; overflow-y: auto; padding: 0 16px 16px; }
+    .nav-brand { font-size: 14px; font-weight: 600; letter-spacing: .2px; padding: 4px 8px 12px; }
+    .nav-ver { font-size: 11px; color: var(--muted); margin-left: 5px; font-weight: 400; }
+    .nav-item {
+      display: block; width: 100%; text-align: left; padding: 7px 10px; font-size: 12px;
+      border-radius: var(--t-r-sm); cursor: pointer; border: 1px solid transparent;
+      background: transparent; color: var(--fg); font-family: inherit;
+    }
+    .nav-item:hover { background: var(--bg-card); }
+    .nav-item.active { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
+    .nav-item.active:hover { background: var(--accent); }
+    .nav-spacer { flex: 1; }
+    .nav-close { color: var(--muted); border-color: var(--line); margin-top: 6px; }
+    .nav-close:hover { color: var(--fg); }
+    .content { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
     .card {
       background: var(--bg-card); border: 1px solid var(--line);
       border-radius: var(--t-r-md); margin-top: 12px; padding: 12px 14px;
@@ -103,6 +118,12 @@
     .progress .bar.indeterminate { width: 35% !important; animation: indet 1s ease-in-out infinite; }
     @keyframes indet { 0% { margin-left: 0; } 100% { margin-left: 65%; } }
     .mv { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    /* 升级通路每行后面的测速结果：成功绿、失败红、「测速中…」灰。与 WireGuard Plus 同款语义，
+       让「没测」和「测了但不通」一眼可分，而不是都挤成一条 `—`。 */
+    .path-ms { min-width: 66px; text-align: right; }
+    .path-ms.ok { color: var(--ok); }
+    .path-ms.bad { color: var(--t-err); }
+    .path-ms.scan { color: var(--muted); }
     /* 报错回执（代理地址不合法、还原失败）比窗口还长时，`nowrap` 会把两头切到窗口外：限宽截断。 */
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -116,12 +137,17 @@
   </style>
 </head>
 <body>
-  <header>
-    <b id="hd-title" data-i18n="sett.title">Settings</b>
-    <button class="tiny" id="btn-close" data-i18n="sett.close">Close</button>
-  </header>
-
-  <main>
+  <div class="app">
+    <nav class="sidenav">
+      <div class="nav-brand">NetSense <span class="nav-ver" id="nav-ver"></span></div>
+      <button class="nav-item active" data-nav="general" data-i18n="sett.nav_general">General</button>
+      <button class="nav-item" data-nav="updates" data-i18n="sett.nav_updates">Updates</button>
+      <button class="nav-item" data-nav="about" data-i18n="sett.nav_about">About</button>
+      <div class="nav-spacer"></div>
+      <button class="nav-item nav-close" id="btn-close" data-i18n="sett.close">Close</button>
+    </nav>
+    <main class="content">
+      <section data-section="general">
     <div class="card">
       <h3 id="sec-language" data-i18n="sett.section_language">Language</h3>
       <div class="row">
@@ -234,6 +260,30 @@
       </div>
     </div>
 
+      <div class="card">
+        <h3 id="sec-behavior" data-i18n="sett.section_behavior">Behavior</h3>
+        <div class="row"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
+        <div class="row" id="row-priv-remove" hidden><span class="k"></span><button class="tiny" id="btn-priv-remove" data-i18n="sett.priv_remove">Remove password-free changes</button></div>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="chk-silent"><span id="k-silent" data-i18n="sett.silent_execution">Silent execution</span></label>
+        </div>
+        <div class="hint" id="hint-silent" data-i18n="sett.silent_hint">Apply network changes without repeatedly asking for authorization. The first time you turn this on, the app requests one authorization to set up a password-free channel; after that everything is silent.</div>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="chk-dnsfb"><span id="k-dnsfb" data-i18n="sett.dns_fallback">DNS fallback</span></label>
+        </div>
+        <div class="hint" id="hint-dnsfb" data-i18n="sett.dns_fallback_hint">If a profile asks for automatic DNS on a static address and the system ends up with no name server at all, these servers are applied instead. Off by default, and the app ships no public resolver of its own: you fill in the servers yourself.</div>
+        <div class="row">
+          <span class="k" id="k-dnsfb-servers" data-i18n="sett.dns_fallback_servers">Servers</span>
+          <input type="text" id="in-dnsfb" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.dns_fallback_placeholder" placeholder="1.1.1.1, 8.8.8.8">
+        </div>
+        <div class="err" id="err-dnsfb" hidden></div>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="chk-applied-popup"><span id="k-applied-popup" data-i18n="sett.show_applied_popup">Show the "applied" result popup</span></label>
+        </div>
+        <div class="hint" id="hint-applied-popup" data-i18n="sett.show_applied_hint">After a profile is applied (automatically or by hand), show a popup listing exactly which settings were written. Off: only a toast is shown.</div>
+      </div>
+      </section>
+      <section data-section="updates" hidden>
     <div class="card">
       <h3 id="sec-update" data-i18n="sett.section_update">Updates</h3>
       <div class="hint" id="hint-update-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
@@ -292,30 +342,15 @@
       <div class="err" id="err-mirror" hidden></div>
     </div>
 
+      </section>
+      <section data-section="about" hidden>
     <div class="card">
-      <h3 id="sec-about" data-i18n="sett.section_about">Runtime</h3>
+      <h3 id="sec-about" data-i18n="sett.section_about">About</h3>
       <div class="row"><span class="k" id="k-platform" data-i18n="sett.platform">Platform</span><span class="val" id="v-platform">—</span></div>
-      <div class="row"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
-      <div class="row" id="row-priv-remove" hidden><span class="k"></span><button class="tiny" id="btn-priv-remove" data-i18n="sett.priv_remove">Remove password-free changes</button></div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="chk-silent"><span id="k-silent" data-i18n="sett.silent_execution">Silent execution</span></label>
-      </div>
-      <div class="hint" id="hint-silent" data-i18n="sett.silent_hint">Apply network changes without repeatedly asking for authorization. The first time you turn this on, the app requests one authorization to set up a password-free channel; after that everything is silent.</div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="chk-dnsfb"><span id="k-dnsfb" data-i18n="sett.dns_fallback">DNS fallback</span></label>
-      </div>
-      <div class="hint" id="hint-dnsfb" data-i18n="sett.dns_fallback_hint">If a profile asks for automatic DNS on a static address and the system ends up with no name server at all, these servers are applied instead. Off by default, and the app ships no public resolver of its own: you fill in the servers yourself.</div>
-      <div class="row">
-        <span class="k" id="k-dnsfb-servers" data-i18n="sett.dns_fallback_servers">Servers</span>
-        <input type="text" id="in-dnsfb" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.dns_fallback_placeholder" placeholder="1.1.1.1, 8.8.8.8">
-      </div>
-      <div class="err" id="err-dnsfb" hidden></div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="chk-applied-popup"><span id="k-applied-popup" data-i18n="sett.show_applied_popup">Show the "applied" result popup</span></label>
-      </div>
-      <div class="hint" id="hint-applied-popup" data-i18n="sett.show_applied_hint">After a profile is applied (automatically or by hand), show a popup listing exactly which settings were written. Off: only a toast is shown.</div>
       <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
+      <div class="mv" data-i18n="sett.about_desc">Network automation that watches where you are and applies the right configuration.</div>
     </div>
+      </section>
   </main>
 
   <div class="toast" id="toast"></div>
@@ -406,6 +441,10 @@
       // 用户正在手填服务器时不许被焦点刷新覆盖（见 in-dnsfb 的 oninput 把 dnsfbDirty 置真）。
       if (!dnsfbDirty) el("in-dnsfb").value = d.dns_fallback_servers || "";
       el("v-version").textContent = d.version || "—";
+      // 侧栏品牌后的版本号：与托盘面板同一来源（`get_app_version`），「我手上是哪一版」
+      // 在设置窗口也一眼能看到。取不到就整段不显示。
+      const navVer = document.getElementById("nav-ver");
+      if (navVer) navVer.textContent = d.version ? "v" + d.version : "";
       // 升级通路：预置镜像来自磁盘（常量减去用户删掉的），代理三态也一起回来。
       // 列表在 render 末尾统一重建，所以这里只把磁盘真值收进变量，不必逐项操作控件。
       mirrorList = d.mirror_presets || [];
@@ -563,7 +602,8 @@
     let presetAll = [];        // 完整的预置镜像清单（不受删除影响）：区分预置与自定义
     let ipIsMainland = false;  // 当前公网 IP 归属地是否大陆：决定是否摆出预置镜像
     let paths = [];            // 当前渲染的升级通路行
-    let pathSpeed = {};        // id -> ms（测速结果，不随聚焦刷新清空）
+    let pathSpeed = {};        // id -> { ms, ok, error }（测速结果，不随聚焦刷新清空）
+    let pathScanning = false;  // 是否正在跑测速：按钮变「测速中…」、每行也显示「测速中…」
 
     // 把磁盘上的设置翻成一行行的列表。镜像行用直连出口；代理行用直连 GitHub（无镜像）。
     function buildPaths() {
@@ -601,7 +641,16 @@
       return "system";
     }
 
-    const speedText = (ms) => (ms == null ? "—" : ms + " ms");
+    // 每行测速结果怎么显示：正在测 → 灰字「测速中…」；成功 → 绿字「{n} 毫秒」；
+    // 失败 → 红字（后端给的原因，拿不到时用本地化的「不可达」兜底）。
+    function pathRowState(p) {
+      if (pathScanning) return { cls: "scan", text: t("sett.proxy_scanning", "Probing…") };
+      const r = pathSpeed[p.id];
+      if (!r) return { cls: "", text: "" };
+      if (r.ok) return { cls: "ok", text: tf("sett.proxy_test_ok", "{n} ms", { n: r.ms }) };
+      const errText = r.error || t("sett.proxy_test_unreachable", "Unreachable");
+      return { cls: "bad", text: tf("sett.proxy_test_fail", "{err}", { err: errText }) };
+    }
 
     function renderPaths() {
       paths = buildPaths();
@@ -621,10 +670,11 @@
         lab.className = "k";
         lab.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, monospace";
         lab.textContent = p.label;   // 地址/前缀是事实，不翻译
+        const st = pathRowState(p);
         const sp = document.createElement("span");
-        sp.className = "mv";
+        sp.className = "mv path-ms " + st.cls;
         sp.style.minWidth = "66px";
-        sp.textContent = (p.id in pathSpeed) ? speedText(pathSpeed[p.id]) : "";
+        sp.textContent = st.text;
         row.appendChild(radio);
         row.appendChild(lab);
         row.appendChild(sp);
@@ -637,6 +687,12 @@
         }
         box.appendChild(row);
       }
+      // 测速按钮的标签跟着扫描态走：测速中显示「测速中…」并置灰，否则恢复「测速」。
+      const btn = el("btn-path-test");
+      btn.disabled = pathScanning;
+      btn.textContent = pathScanning
+        ? t("sett.proxy_scanning", "Probing…")
+        : t("sett.speed_test", "Test speed");
     }
 
     async function selectPath(p) {
@@ -718,11 +774,16 @@
     el("btn-proxy-ip").onclick = () => loadPublicIp();
 
     // 测速：列表每一项各发一次更新时真会用的真实请求（经镜像时拼前缀、出口用该项自己的选择），
-    // 并行探测。显示的每一行数字就是「选这条路去升级实际要多久」。
-    el("btn-path-test").onclick = async () => {
-      if (!hasTauri())return;
-      const btn = el("btn-path-test");
-      btn.disabled = true;
+    // 并行探测。显示的每一行数字就是「选这条路去升级实际要多久」；成败与原因分行着色，
+    // 让「选哪条最快」和「哪条现在不通」一眼可见（参考 WireGuard Plus 的 proxy 测速）。
+    el("btn-path-test").onclick = () => runPathScan();
+
+    // 跑测速：手动按与开窗口自动跑都走这里。扫描态期间按钮与每行都显示「测速中…」；
+    // 结果按 id 收进 `pathSpeed`（存全字段，不随聚焦刷新清空），再重绘每行着色。
+    async function runPathScan() {
+      if (!hasTauri() || pathScanning) return;
+      pathScanning = true;
+      renderPaths();          // 立刻把所有行与按钮刷成「测速中…」
       show("err-path", "");
       try {
         const specs = paths.map((p) => ({
@@ -731,11 +792,13 @@
         const raw = await invoke("update_path_speed_test", { paths: specs });
         const rows = typeof raw === "string" ? JSON.parse(raw) : raw;
         pathSpeed = {};
-        (rows || []).forEach((r, i) => { if (paths[i]) pathSpeed[paths[i].id] = r.ms; });
+        (rows || []).forEach((r, i) => {
+          if (paths[i]) pathSpeed[paths[i].id] = { ms: r.ms ?? null, ok: !!r.ok, error: r.error || "" };
+        });
         renderPaths();
       } catch (e) { show("err-path", String(e)); }
-      finally { btn.disabled = false; }
-    };
+      finally { pathScanning = false; renderPaths(); }
+    }
 
     // 手动添加：代理或镜像，填了即持久化保存（写进 settings.json）。
     el("btn-add-proxy").onclick = async () => {
@@ -1044,7 +1107,25 @@
     const refresh = () => { load(); loadScripts(); loadBackups(); syncTheme(); };
     window.addEventListener("focus", refresh);
 
+    /// 左侧导航：点击切到对应 section，其余收起；当前项高亮。所有卡片与控件 ID 不变，
+    /// 只是显隐分组 —— 设置项散在多屏、导航把它们收进三个分区，参考 WireGuard Plus 的布局。
+    function initNav() {
+      const items = document.querySelectorAll(".nav-item[data-nav]");
+      for (const it of items) {
+        it.onclick = () => {
+          const nav = it.dataset.nav;
+          for (const s of document.querySelectorAll(".content" + " section[data-section]"))
+            s.hidden = s.dataset.section !== nav;
+          for (const n of items) n.classList.toggle("active", n === it);
+        };
+      }
+      // 侧栏的关闭按钮：没有原生标题栏可点（窗口无边框），这里接到后端的 close_settings。
+      const c = document.getElementById("btn-close");
+      if (c) c.onclick = () => invoke("close_settings").catch(() => { try { window.close(); } catch (e) {} });
+    }
+
     applyI18n();
+    initNav();
     (async () => {
       try { strings = await invoke("get_strings"); } catch (e) {}
       applyI18n();
@@ -1052,9 +1133,11 @@
       // 而 load() 是异步的（refresh 那一趟不等它）。
       await load();
       loadScripts(); loadBackups(); syncTheme();
-      // 打开时探一次出口 IP（含归属地）。测速不跟着聚焦重跑 —— 切窗口不该再打一堆请求，
-      // 用户想看实时快慢时按一下 Test speed 即可。
+      // 打开时探一次出口 IP（含归属地），并自动跑一次升级通路测速 —— 让窗口一开就看到
+      // 哪条路现在通、哪条不通（参考 WireGuard Plus 的 proxy 测速）。只在此处跑一次：
+      // 下面的 focus 刷新只重拉设置、不重跑测速，避免切窗口时狂打请求。
       loadPublicIp();
+      runPathScan();
     })();
   </script>
 </body>
