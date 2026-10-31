@@ -4,6 +4,19 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.9.0] - 2026-10-31
+
+### 新增
+
+- **Settings → About 页现在列出作者并链接项目 GitHub 主页。** 该卡片此前只有平台与版本。现在列出作者（`imonior`）与 `github.com/imonior/netsense` 链接，点击经既有 `open_url` 命令用系统浏览器打开（并 `preventDefault`，防止 WebView 自己导航走）。新增两个 i18n 键（`sett.author`、`sett.github`），五语同步，词表达到 702 键。（`frontend/settings.html`、`src-tauri/src/i18n/`）
+- **每个窗口现在会在页面初始化完成后向後端报到。** 五个窗口都在 init 尾部调用新的 `frontend_ready` 命令（带上各自的窗口标签），后端记一条 `frontend ready: <win>`。再遇「窗口全白」，只看日志就能二分：ready 齐全 = 脚本跑了、故障在渲染层；一条都没有 = WebView 根本没执行脚本。冒烟测试的首屏命令契约也把这条心跳钉住了。（`frontend/*.html`、`ipc.rs`、`main.rs`、`scripts/editor-smoke.mjs`）
+- **应用内升级的安装步骤现在会写进应用日志 —— 成功时也记。** macOS 安装脚本每步都 echo（删除旧 bundle、复制新 bundle、以登录用户重新拉起），`install_macos` 即使全部成功也把脚本输出写进日志；此前成功路径一行不记，升级一旦出问题，可查的只有一条校验记录。（`src-tauri/src/update.rs`）
+
+### 修复
+
+- **托盘面板的「接口」行重新有人填了。** v1.8.9 的回归：卡片标记移入页面、渲染交给共享的 `NetInfo.fill` 后，这一行的 id 仍是 `v-iface`，而共享渲染器找的是 `#v-interface` —— 静默失配，接口行从 v1.8.9 起就停在 `—`。现已对齐 id；冒烟测试新增回归组：从 `netinfo.js` 抽出渲染器的行 id 表，逐个断言页面标记里有 `id="v-<id>"`，这类静默失配从此上不了版。（`frontend/popup.html`、`scripts/editor-smoke.mjs`）
+- **macOS 上 `ipconfig getoption` 给不出答案时，子网掩码也能解析出来。** `list_interfaces` 此前只有一条来源 `ipconfig getoption <dev> subnet_mask`，它读的是 DHCP 租约/配置存档，部分接口会落空。`ifconfig` 快照现在同时解析 `inet` 行里的十六进制掩码（`netmask 0xffffff00` → `255.255.255.0`）作兜底 —— 凡有 IPv4 地址的接口，`ifconfig` 一定带掩码，这一格从此不会再空着。（`src-tauri/src/platform/macos.rs`）
+
 ## [1.8.10] - 2026-10-31
 
 ### 修复

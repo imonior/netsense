@@ -4,6 +4,19 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-10-31
+
+### Added
+
+- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 702 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
+- **Every window now reports to the backend once its page has finished initializing.** All five windows call the new `frontend_ready` command (with their window label) at the end of init, and the backend logs `frontend ready: <win>`. A blank-window report can now be bisected from the log alone: ready lines present means the scripts ran and the failure is in the rendering layer; no ready lines at all means the WebView never executed them. The smoke test's first-paint command contract pins the heartbeat in place. (`frontend/*.html`, `ipc.rs`, `main.rs`, `scripts/editor-smoke.mjs`)
+- **The in-app upgrade's installation steps are now audited in the app log — including on success.** The macOS installer script echoes each step (removing the old bundle, copying the new one, relaunching as the logged-in user), and `install_macos` writes the script output to the log even when everything succeeds; previously the success path logged nothing at all, so a broken upgrade left a single verification line to investigate. (`src-tauri/src/update.rs`)
+
+### Fixed
+
+- **The tray panel's Interface row is filled again.** A v1.8.9 regression: when the card markup moved into the page and its rendering was handed to the shared `NetInfo.fill` helper, the row kept the id `v-iface` while the helper looks up `#v-interface` — a silent mismatch, so the row had sat at `—` ever since v1.8.9. The id is aligned now, and the smoke test gained a regression group that extracts the helper's row-id table from `netinfo.js` and asserts every `id="v-<id>"` exists in the page markup, so this class of silent mismatch can no longer ship. (`frontend/popup.html`, `scripts/editor-smoke.mjs`)
+- **The subnet mask resolves on macOS even when `ipconfig getoption` has no answer.** `list_interfaces` relied on a single source, `ipconfig getoption <dev> subnet_mask`, which reads the DHCP lease/config store and comes up empty on some interfaces. The `ifconfig` snapshot now also parses the hexadecimal netmask from the `inet` line (`netmask 0xffffff00` → `255.255.255.0`) as the fallback — every interface that has an IPv4 address carries a mask in `ifconfig`, so the field can no longer stay empty. (`src-tauri/src/platform/macos.rs`)
+
 ## [1.8.10] - 2026-10-31
 
 ### Fixed

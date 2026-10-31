@@ -973,6 +973,17 @@ fn install_macos(asset_path: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(&script_path);
     let out = out?;
     if out.status.success() {
+        // 安装成功也要留痕：脚本每步的 echo 原样进日志。「升级后界面全白」那次的
+        // 日志里只有一行「SHA256 verified」就开始跑新版本了 —— rm/ditto/open 到底
+        // 各自成没成功、open 用的是哪个用户，全靠猜。这些行让下一次排障有据可查。
+        // Log the script's step echoes on success too. The all-blank-windows incident
+        // after an in-app upgrade left nothing between "SHA256 verified" and the new
+        // version starting — whether rm/ditto/open each succeeded and which user open
+        // ran as was pure guesswork. These lines make the next investigation concrete.
+        let so = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !so.is_empty() {
+            crate::log::info(&so);
+        }
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -1127,12 +1138,19 @@ fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
         "/usr/bin/killall netsense 2>/dev/null || true".to_string(),
         "/bin/sleep 1".to_string(),
         format!("/bin/rm -rf {}", q(target_app)),
+        // 每步留一行 echo：输出会随 Command::output() 回到 install_macos，成功也写进
+        // 应用日志 ——「升级后界面全白」那次的日志在安装期间只有一行校验记录，无从排查。
+        // One echo per step: output flows back through Command::output() into the app
+        // log even on success (the all-blank-windows incident had only a checksum line).
+        "echo \"install: old bundle removed\"".to_string(),
         format!("/usr/bin/ditto {} {}", q(new), q(target_app)),
+        "echo \"install: new bundle copied\"".to_string(),
         // 下载来的包没有 quarantine（非浏览器下载），但剥除是幂等的，
         // 与 brew cask postflight 一致，防止新副本被 Gatekeeper 拦。
         format!("/usr/bin/xattr -dr com.apple.quarantine {} 2>/dev/null || true", q(target_app)),
         // 以登录用户（非 root）重新打开：脚本若被 osascript 提权，裸 open 会成 root。
         "OPEN_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || /usr/bin/whoami)".to_string(),
+        "echo \"install: relaunch as user $OPEN_USER\"".to_string(),
         "if [ -n \"$OPEN_USER\" ] && [ \"$OPEN_USER\" != \"root\" ]; then".to_string(),
         format!(
             "  /bin/launchctl asuser \"$(/usr/bin/id -u \"$OPEN_USER\")\" /usr/bin/open {}",

@@ -632,10 +632,10 @@ eq("语言与配色由首屏那一批便宜取数写上，不等状态快照",
 await releaseHeld();
 check("启动脚本无异常地跑完（顶层 IIFE 已读到配置）", h.cfg.profiles.length === 3);
 eq(
-  "启动时按顺序读了后端：文案 → 合并枚举（get_editor_enumerations，省下四趟往返）→ 首屏那三份（配置 / 语言 / 配色）→ 状态快照（与枚举同属第二帧，一起 await）→ 已装程序后台补拉",
+  "启动时按顺序读了后端：文案 → 合并枚举（get_editor_enumerations，省下四趟往返）→ 首屏那三份（配置 / 语言 / 配色）→ 状态快照（与枚举同属第二帧，一起 await）→ 已装程序后台补拉 → 就绪心跳（init 完成的标记，排最后）",
   invokeLog.map((c) => c.cmd).slice(0, 10),
   ["get_strings", "get_editor_enumerations", "get_config", "get_language", "get_theme",
-   "get_status", "get_installed_apps"],
+   "get_status", "get_installed_apps", "frontend_ready"],
 );
 eq("已存 SSID、在用网卡、本机网卡、打印机与已装程序各取一份（条件值与动作目标的候选）",
   [h.wifiList, h.nicList.map((n) => n.name), h.adapterList.map((n) => n.name), h.printerList.map((p) => p.name),
@@ -1707,8 +1707,6 @@ nicFixture = [
   { name: "en0", label: "Wi-Fi", kind: "wireless", ipv4: "192.168.1.100/24", netmask: "255.255.255.0", dns: "192.168.1.1" },
   { name: "en5", label: "USB 10/100/1000 LAN", kind: "wired", mac: "aa:00:00:00:00:05" },
 ];
-console.log("DEBUG pollNet type:", typeof h.pollNet);
-console.log("DEBUG st-net BEFORE:", JSON.stringify(h.$("st-net") && h.$("st-net").textContent.slice(0, 80)));
 try {
   await h.pollNet();
 } catch (e) {
@@ -1716,13 +1714,37 @@ try {
 }
 await settle();
 const netText = h.$("st-net").textContent;
-console.log("DEBUG st-net AFTER pollNet:", JSON.stringify(netText.slice(0, 120)));
 // pollNet 把上一条广播留下的陈旧值（10.20.30.x / 有线口）覆盖成最新采样：
 check("pollNet 后 st-net 含当前 SSID Office_5G", netText.includes("Office_5G"),
   `st-net=${netText.slice(0, 120)}`);
 check("pollNet 后 st-net 含当前 IPv4 192.168.1.100", netText.includes("192.168.1.100"));
 check("pollNet 后 st-net 含当前 DNS 192.168.1.1", netText.includes("192.168.1.1"));
 check("pollNet 后 st-net 不再冻在换口用例的 10.20.30.40", !netText.includes("10.20.30.40"));
+
+group("托盘弹窗静态卡的行 id 与 NetInfo.ROWS 一一对应");
+// NetInfo.fill 按 `#v-<id>` 找行；托盘弹窗的卡是**手写静态标记**，id 打错字
+// fill 会静默跳过（v1.8.9/1.8.10 的「Interface 永远是 —」正是 v-iface/v-interface
+// 这种失配：不报错、只是那一格没人填）。这里从 netinfo.js 里抽出 ROWS 的 id 表，
+// 逐个断言 popup.html 里有对应的 `id="v-<id>"`，把这类失配钉死在冒烟层。
+// NetInfo.fill addresses rows by `#v-<id>`; the tray popup's card is hand-written
+// static markup, so a mistyped id makes fill skip it silently (the eternal "—"
+// Interface cell in v1.8.9/1.8.10 was exactly such a v-iface/v-interface mismatch).
+// This extracts the ROWS ids from netinfo.js and asserts each has a matching
+// `id="v-<id>"` in popup.html, pinning the mismatch class at the smoke level.
+{
+  const netinfoSrc = readFileSync(join(ROOT, "frontend/netinfo.js"), "utf8");
+  const popupSrc = readFileSync(join(ROOT, "frontend/popup.html"), "utf8");
+  const rowsBlock = netinfoSrc.match(/const ROWS = \[([\s\S]*?)\];/);
+  check("netinfo.js 里能定位 ROWS 表", !!rowsBlock);
+  if (rowsBlock) {
+    const ids = [...rowsBlock[1].matchAll(/\["([a-z0-9]+)",\s*"/g)].map(m => m[1]);
+    check("ROWS 至少列出 11 行（profile/interface/ssid/mac/ip/netmask/gateway/ipv6/prefix6/gateway6/dns）", ids.length >= 11,
+      `实际 ${ids.length} 行：${ids.join(",")}`);
+    for (const id of ids) {
+      check(`popup.html 含 id="v-${id}"`, popupSrc.includes(`id="v-${id}"`));
+    }
+  }
+}
 
 console.log(
   `\n${"=".repeat(58)}\n检查 ${checks} 项，失败 ${failures} 项` +

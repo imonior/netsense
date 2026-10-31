@@ -381,7 +381,8 @@ fn main() {
             ipc::quit_app,
             ipc::check_update,
             ipc::run_update,
-            ipc::open_url
+            ipc::open_url,
+            ipc::frontend_ready
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

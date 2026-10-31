@@ -389,6 +389,8 @@
   "sett.section_update": "업데이트",
   "sett.update_note": "패널은 시작 후 한 번 조용히 확인했습니다. 이 단추는 지금 다시 물어 봅니다.",
   "sett.section_about": "정보",
+  "sett.author": "개발자",
+  "sett.github": "GitHub",
   "sett.platform": "플랫폼",
   "sett.privilege": "권한 상승 경로",
   "sett.priv_direct": "권한 상승이 설정됨: 시스템 확인 없이 변경이 적용됩니다",

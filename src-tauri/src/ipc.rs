@@ -1385,6 +1385,25 @@ pub fn open_url(url: String) -> Result<(), String> {
     crate::platform::open_path(&url)
 }
 
+/// 前端页面加载完成的心跳：每扇窗口的 init 流程跑通后调一次，后端原样写一条日志。
+///
+/// 「界面全白」这类纯 WebView 层故障在文件日志里是隐形的 —— 引擎照常跑、进程照常在，
+/// 日志里却一个字都没有（v1.8.9 应用内升级后全白那次，只能靠用户肉眼描述）。有了这条
+/// 心跳，下一次白屏时看日志就能一步二分：**各窗口的 ready 一条不缺 = JS 全跑了，
+/// 白在渲染层；一条都没有 = WebView 根本没执行脚本（白在加载层）**。
+/// A readiness heartbeat from the frontend: each window calls this once its init flow
+/// completes, and the backend logs it verbatim. A blank-WebView failure is invisible in
+/// the file log today (engine keeps running, process alive, not a single clue), so on
+/// the next occurrence the presence/absence of these lines splits the fault in one step:
+/// all lines present = JS ran, blank at the render layer; none = the WebView never ran
+/// the scripts at all.
+#[tauri::command]
+pub fn frontend_ready(win: String) {
+    // i18n-exempt: 技术诊断行（给日志读的，不是给界面读的），任何语言下都写作英文。
+    // i18n-exempt: a technical diagnostic line for the log, intentionally not localized.
+    crate::log::info(&format!("frontend ready: {}", win));
+}
+
 /// 检查 GitHub 上的最新发布版本，与本地版本比较，挑出当前平台最佳安装包，并判断渠道。
 ///
 /// 后端用系统自带的 `curl`（macOS / Linux）或 PowerShell（Windows）拉取

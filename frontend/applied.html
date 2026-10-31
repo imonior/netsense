@@ -397,6 +397,12 @@
         renderEmpty();
         invoke("close_applied").catch(() => {});
       }
+      // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
+      // 下一次白屏能用「日志里有没有 ready」一步分辨 JS 没跑还是画不出来。
+      // Readiness heartbeat, sent only after init fully completes: blank-window
+      // failures are invisible in the file log, and this line splits the next one
+      // into "scripts never ran" vs "ran but failed to paint" in a single step.
+      invoke("frontend_ready", { win: "applied" }).catch(() => {});
     })();
     renderEmpty();
 

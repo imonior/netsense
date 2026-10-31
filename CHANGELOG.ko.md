@@ -4,6 +4,19 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.9.0] - 2026-10-31
+
+### 추가
+
+- **설정의 About 페이지에 작성자와 프로젝트 GitHub 페이지 링크를 표시했습니다.** 이 카드에는 지금까지 플랫폼과 버전만 있었습니다. 이제 작성자(`imonior`)와 `github.com/imonior/netsense` 링크를 표시하며, 클릭하면 기존 `open_url` 명령을 통해 시스템 브라우저로 열립니다(`preventDefault`를 붙여 WebView가 직접 페이지를 이동하는 것을 막습니다). i18n 키 2개(`sett.author`, `sett.github`)를 추가해 5개 언어에 모두 반영했으며, 단어표가 702키가 되었습니다. (`frontend/settings.html`, `src-tauri/src/i18n/`)
+- **모든 창이 페이지 초기화 완료 시 백엔드에 보고합니다.** 다섯 창 모두 init 마지막에 새 `frontend_ready` 명령을 호출하고(자신의 창 라벨과 함께), 백엔드는 `frontend ready: <win>`을 기록합니다. 다시 "창이 하얗게" 나오는 경우 로그만으로 이분할할 수 있습니다: ready가 모두 있으면 스크립트는 실행된 것이고 고장은 렌더링 층에 있으며, 한 줄도 없으면 WebView가 스크립트를 아예 실행하지 않은 것입니다. 스모크 테스트의 첫 화면 명령 계약에도 이 하트비트를 못박았습니다. (`frontend/*.html`, `ipc.rs`, `main.rs`, `scripts/editor-smoke.mjs`)
+- **앱 내 업그레이드의 설치 단계가 이제 앱 로그에 기록됩니다 — 성공 시에도요.** macOS 설치 스크립트는 각 단계에서 echo하고(이전 bundle 삭제, 새 bundle 복사, 로그인 사용자로 재실행), `install_macos`는 모두 성공했을 때도 스크립트 출력을 로그에 씁니다. 이전에는 성공 경로에 한 줄도 기록하지 않아, 업그레이드에 문제가 생기면 확인할 수 있는 것이 검증 기록 한 줄뿐이었습니다. (`src-tauri/src/update.rs`)
+
+### 수정
+
+- **트레이 패널의 "인터페이스" 행이 다시 채워집니다.** v1.8.9의 리그레션입니다: 카드 마크업을 페이지로 옮기고 렌더링을 공용 `NetInfo.fill`에 맡기면서, 이 행의 id는 `v-iface`로 남아 있었는데 공용 렌더러가 찾는 것은 `#v-interface`였습니다 — 조용한 불일치로, 이 행은 v1.8.9부터 `—`에 머물러 있었습니다. id를 일치시켰고, 스모크 테스트에 회귀 그룹을 추가했습니다: `netinfo.js`에서 렌더러의 행 id 표를 추출해 페이지 마크업에 `id="v-<id>"`가 하나씩 존재하는지 단언하여, 이런 종류의 조용한 불일치는 다시는 출시될 수 없습니다. (`frontend/popup.html`, `scripts/editor-smoke.mjs`)
+- **macOS에서 `ipconfig getoption`이 답을 주지 않을 때도 서브넷 마스크를 해석할 수 있습니다.** `list_interfaces`는 이전까지 `ipconfig getoption <dev> subnet_mask` 한 줄기였는데, 이것은 DHCP 임대/설정 저장소를 읽기 때문에 일부 인터페이스에서는 비어 있습니다. `ifconfig` 스냅샷이 이제 `inet` 행의 16진수 마스크(`netmask 0xffffff00` → `255.255.255.0`)도 해석하여 폴백으로 사용합니다 — IPv4 주소를 가진 인터페이스는 반드시 `ifconfig`에 마스크를 갖고 있으므로, 이 칸이 빈 채로 남는 일은 더 이상 없습니다. (`src-tauri/src/platform/macos.rs`)
+
 ## [1.8.10] - 2026-10-31
 
 ### 수정

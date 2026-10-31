@@ -118,6 +118,12 @@
     .progress .bar.indeterminate { width: 35% !important; animation: indet 1s ease-in-out infinite; }
     @keyframes indet { 0% { margin-left: 0; } 100% { margin-left: 65%; } }
     .mv { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    /* About 卡里指向 GitHub 的外链：跟正文同字号，强调色 + 悬停下划线，
+       别做成大按钮 —— 这一格要的是一行能点的字。
+       External GitHub link in the About card: same size as body text, accent
+       color + hover underline. A big button would be out of place here. */
+    .ext-link { color: var(--t-fg-accent); text-decoration: none; }
+    .ext-link:hover { text-decoration: underline; }
     /* 升级通路每行后面的测速结果：成功绿、失败红、「测速中…」灰。与 WireGuard Plus 同款语义，
        让「没测」和「测了但不通」一眼可分，而不是都挤成一条 `—`。 */
     .path-ms { min-width: 66px; text-align: right; }
@@ -348,6 +354,10 @@
       <h3 id="sec-about" data-i18n="sett.section_about">About</h3>
       <div class="row"><span class="k" id="k-platform" data-i18n="sett.platform">Platform</span><span class="val" id="v-platform">—</span></div>
       <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
+      <!-- i18n-exempt：作者名是专有名词，任何语言下都写作 imonior，不进词表。 -->
+      <!-- i18n-exempt: the author handle is a proper noun, spelled "imonior" in every language. -->
+      <div class="row"><span class="k" id="k-author" data-i18n="sett.author">Author</span><span class="val">imonior</span></div>
+      <div class="row"><span class="k" id="k-github" data-i18n="sett.github">GitHub</span><span class="val"><a href="#" class="ext-link" id="link-github">github.com/imonior/netsense</a></span></div>
       <div class="mv" data-i18n="sett.about_desc">Network automation that watches where you are and applies the right configuration.</div>
     </div>
       </section>
@@ -1098,6 +1108,15 @@
     el("btn-view-logs").onclick = () => invoke("open_log_viewer").catch(e => toast(String(e)));
     el("btn-editor").onclick = () => invoke("open_editor").catch(e => toast(String(e)));
     el("btn-close").onclick = () => invoke("close_settings").catch(() => {});
+    // About 卡的 GitHub 外链：交给系统默认浏览器开（open_url 与 Release 页同一条路），
+    // 阻止默认跳转 —— WebView 自己导航走就回不来了。
+    // The GitHub link in the About card opens in the system browser via open_url
+    // (same path as the Release page); default navigation must be suppressed or
+    // the WebView itself would navigate away with no way back.
+    el("link-github").addEventListener("click", (e) => {
+      e.preventDefault();
+      invoke("open_url", { url: "https://github.com/imonior/netsense" }).catch(() => {});
+    });
 
     // 每次获得焦点都重问一遍：开机启动的真相在操作系统里，用户可能刚从
     // 系统设置 / 注册表里动过它，读缓存会让这个勾选框说谎。备份清单同理 ——
@@ -1138,6 +1157,12 @@
       // 下面的 focus 刷新只重拉设置、不重跑测速，避免切窗口时狂打请求。
       loadPublicIp();
       runPathScan();
+      // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
+      // 下一次白屏能用「日志里有没有 ready」一步分辨 JS 没跑还是画不出来。
+      // Readiness heartbeat, sent only after init fully completes: blank-window
+      // failures are invisible in the file log, and this line splits the next one
+      // into "scripts never ran" vs "ran but failed to paint" in a single step.
+      invoke("frontend_ready", { win: "settings" }).catch(() => {});
     })();
   </script>
 </body>

@@ -2392,6 +2392,12 @@
     await loadAll();
     // 顶部「当前网络」每 3s 自拉一次：补上引擎在稳定网络下不发广播时缺失的实时性。
     setInterval(pollNet, 3000);
+    // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
+    // 下一次白屏能用「日志里有没有 ready」一步分辨 JS 没跑还是画不出来。
+    // Readiness heartbeat, sent only after init fully completes: blank-window
+    // failures are invisible in the file log, and this line splits the next one
+    // into "scripts never ran" vs "ran but failed to paint" in a single step.
+    invoke("frontend_ready", { win: "editor" }).catch(() => {});
   })();
 </script>
 </body>

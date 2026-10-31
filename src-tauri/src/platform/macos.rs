@@ -1482,11 +1482,35 @@ struct IfaceSnap {
     running: bool,
     /// `inet` 地址。`ipconfig getifaddr` 只认得部分接口，隧道上要靠这里兜住。
     inet: Option<String>,
+    /// 子网掩码（点分十进制），出自 `inet` 行尾的 `netmask 0xffffff00`。
+    /// `ipconfig getoption <dev> subnet_mask` 在部分接口上拿不到这一项
+    /// （该命令依赖接口的 DHCP 租约 / 配置存档，不是所有在用接口都有）；
+    /// `ifconfig` 的输出里这条证据对任何配了 IPv4 的接口都在，是免费的兜底。
+    /// Dotted-decimal subnet mask parsed from the trailing `netmask 0xffffff00` of the
+    /// `inet` line. `ipconfig getoption <dev> subnet_mask` does not answer for every
+    /// interface (it reads the DHCP lease / config archive), while `ifconfig` always
+    /// prints the mask for any interface that has an IPv4 address — a free fallback.
+    netmask: Option<String>,
     /// 非 link-local 的 `inet6` 地址（有些 VPN 隧道只在 v6 上有地址）。
     ///
     /// 留着地址本身而不只是「有没有」：`fd7a:115c:a1e0::/48` 这类写死在客户端源码里的
     /// 段，只有拿到地址才认得出来（见 [`product_from_address`]）。
     v6: Vec<String>,
+}
+
+/// `ifconfig` 的 `netmask 0xffffff00`（十六进制掩码，本机字节序的大端书写）
+/// → 点分十进制 `255.255.255.0`。解析不了返回 `None`，调用方留空即可。
+/// Converts `ifconfig`'s hex `netmask 0xffffff00` into dotted-decimal
+/// `255.255.255.0`; unparseable input yields `None`.
+fn netmask_hex_to_dotted(tok: &str) -> Option<String> {
+    let v = u32::from_str_radix(tok.trim_start_matches("0x"), 16).ok()?;
+    Some(format!(
+        "{}.{}.{}.{}",
+        (v >> 24) & 0xff,
+        (v >> 16) & 0xff,
+        (v >> 8) & 0xff,
+        v & 0xff
+    ))
 }
 
 /// 一次 `ifconfig` 取回所有接口的状态，替代逐条 `ifconfig <dev>`。
@@ -1514,6 +1538,7 @@ fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSna
                     IfaceSnap {
                         running: line.contains("RUNNING"),
                         inet: None,
+                        netmask: None,
                         v6: Vec::new(),
                     },
                 );
@@ -1525,7 +1550,16 @@ fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSna
         let Some(e) = map.get_mut(dev) else { continue };
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("inet ") {
-            e.inet = rest.split_whitespace().next().map(|s| s.to_string());
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            e.inet = toks.first().map(|s| s.to_string());
+            // `inet 10.20.20.168 netmask 0xffffff00 broadcast …`：掩码跟在 `netmask`
+            // 关键字后面，是十六进制；`ipconfig getoption … subnet_mask` 不作数时
+            // 这里就是 netmask 的唯一来源。
+            // The mask follows the `netmask` keyword as a hex literal; when
+            // `ipconfig getoption … subnet_mask` comes up empty this is the only source.
+            if let Some(p) = toks.iter().position(|&w| w == "netmask") {
+                e.netmask = toks.get(p + 1).and_then(|h| netmask_hex_to_dotted(h));
+            }
         } else if let Some(rest) = t.strip_prefix("inet6 ") {
             let a = rest.split_whitespace().next().unwrap_or("");
             if !a.is_empty() && !a.starts_with("fe80") {
@@ -2401,7 +2435,12 @@ impl NetworkPlatform for MacPlatform {
                 let netmask = run("ipconfig", &["getoption", &dev, "subnet_mask"])
                     .ok()
                     .map(|o| o.trim().to_string())
-                    .filter(|s| !s.is_empty());
+                    .filter(|s| !s.is_empty())
+                    // `ipconfig` 读不到（部分接口没有可读的配置存档）就用 `ifconfig`
+                    // 同一次快照里解析出的掩码顶上，别让面板的「Netmask」格说谎。
+                    // When `ipconfig` has no answer, fall back to the mask parsed from
+                    // the same `ifconfig` snapshot instead of leaving the cell empty.
+                    .or_else(|| snap.and_then(|s| s.netmask.clone()));
                 let ssid = if kind == super::NicKind::Wireless && dev == wifi_dev {
                     self.get_current_ssid()
                 } else {
@@ -3264,7 +3303,7 @@ mod tests {
         // 建了但没起来的隧道：RUNNING 为真、地址为空 → 枚举时被丢掉的正是这种
         assert_eq!(
             m.get("utun3"),
-            Some(&IfaceSnap { running: true, inet: None, v6: Vec::new() })
+            Some(&IfaceSnap { running: true, inet: None, netmask: None, v6: Vec::new() })
         );
         // 只有 IPv6 地址的隧道必须留下，否则用户的 VPN 在面板上凭空消失
         assert_eq!(m.get("utun4").unwrap().v6, vec!["fd1c:b7b7:1::2".to_string()]);
@@ -3274,6 +3313,30 @@ mod tests {
         // 隧道行的 `inet A --> B` 取本端地址
         assert_eq!(m.get("ppp0").unwrap().inet.as_deref(), Some("192.0.2.7"));
         assert_eq!(m.len(), 7);
+    }
+
+    /// 面板的「Netmask」格不能只有 `ipconfig getoption` 一条腿：部分接口上那条命令
+    /// 给不出答案，而 `ifconfig` 的 `inet` 行永远带着十六进制掩码。解析层要把
+    /// `netmask 0xffffff00` 变成点分十进制，`ipconfig` 失败时枚举才有东西可兜底。
+    #[test]
+    fn iface_snapshot_parses_netmask_and_the_enum_falls_back_to_it() {
+        // 十六进制 → 点分十进制
+        assert_eq!(netmask_hex_to_dotted("0xffffff00").as_deref(), Some("255.255.255.0"));
+        assert_eq!(netmask_hex_to_dotted("0xffff0000").as_deref(), Some("255.255.0.0"));
+        assert_eq!(netmask_hex_to_dotted("0xffffffff").as_deref(), Some("255.255.255.255"));
+        assert_eq!(netmask_hex_to_dotted("0x0").as_deref(), Some("0.0.0.0"));
+        assert_eq!(netmask_hex_to_dotted("zz"), None);
+        // `ifconfig` 快照里掩码随 `inet` 行一起解析出来；没有 IPv4 的口自然没有掩码
+        let out = concat!(
+            "en5: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n",
+            "\tinet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255\n",
+            "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n",
+        );
+        let m = parse_iface_snapshot(out);
+        let en5 = m.get("en5").unwrap();
+        assert_eq!(en5.inet.as_deref(), Some("192.168.1.100"));
+        assert_eq!(en5.netmask.as_deref(), Some("255.255.255.0"));
+        assert_eq!(m.get("utun3").unwrap().netmask, None);
     }
 
     #[test]

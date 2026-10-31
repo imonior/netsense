@@ -389,6 +389,8 @@
   "sett.section_update": "更新",
   "sett.update_note": "面板在启动后静默检查过一次；这颗按钮是现在就再问一次。",
   "sett.section_about": "关于",
+  "sett.author": "作者",
+  "sett.github": "GitHub",
   "sett.platform": "平台",
   "sett.privilege": "提权通道",
   "sett.priv_direct": "已配置免授权提权：改动无需系统弹窗",

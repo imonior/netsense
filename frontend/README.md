@@ -101,7 +101,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 700 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 702 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -216,10 +216,11 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，63 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，64 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
+| `frontend_ready` | `win` | 就绪心跳：窗口 init 跑完后前端调一次，后端原样写一条日志（`frontend ready: <win>`）。白屏这类 WebView 层故障在文件日志里是隐形的，下次再用「各窗口 ready 齐不齐」一步分辨 JS 没跑还是画不出来。 |
 | `get_status` | — | 上面的 `status_payload`（JSON 字符串） |
 | `get_engine_status` | — | 只取 `EngineView`（JSON 字符串），**不**重新采样，补齐广播漏掉的窗口 |
 | `preview_match` | `payload: Profile[]`（JSON 字符串，**表单当前内容**，含未保存的草稿） | 用引擎**已采到**的那份快照把这批 Profile 跑一遍 `conditions::eval_profile`，回 `ProfileEvaluation[]`（JSON 字符串），让第 2 列的三态徽标即时跟上，不必等引擎那一轮（采样节律 + `change_delay_secs` 去抖，最坏 8 秒以上）。**不**在这里再采一次样：一次采样要拉若干子进程，那样「即时预览」反而成了最慢的一条。引擎还没跑完第一轮时答不了（快照是全空的默认值，算出来的「都不匹配」只是没测过）→ 返回 `[]`，界面继续用引擎广播的那份徽标。**只回答「条件命中」**：`active`/`conflict`/`error`/`disabled` 与行的绿框仍然只由引擎说 |

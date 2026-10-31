@@ -172,7 +172,7 @@
   <div class="card" id="net-card">
     <div class="row"><span class="k" id="k-profile" data-i18n="popup.profile">Applied profile</span><span class="v" id="v-profile">—</span></div>
     <div class="row" id="workers-row" hidden><span class="k" id="k-workers" data-i18n="popup.workers">Maintained</span><span class="v" id="v-workers">—</span></div>
-    <div class="row"><span class="k" id="k-iface" data-i18n="popup.interface">Interface</span><span class="v" id="v-iface">—</span></div>
+    <div class="row"><span class="k" id="k-interface" data-i18n="popup.interface">Interface</span><span class="v" id="v-interface">—</span></div>
     <div class="row"><span class="k" id="k-ssid" data-i18n="status.ssid">SSID</span><span class="v" id="v-ssid">—</span></div>
     <div class="row"><span class="k" id="k-mac" data-i18n="popup.mac">MAC</span><span class="v" id="v-mac">—</span></div>
     <div class="row"><span class="k" id="k-ip" data-i18n="popup.ip">IPv4</span><span class="v" id="v-ip">—</span></div>
@@ -772,6 +772,12 @@
           }
         }).catch(() => {});
       }, 4000);
+      // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
+      // 下一次白屏能用「日志里有没有 ready」一步分辨 JS 没跑还是画不出来。
+      // Readiness heartbeat, sent only after init fully completes: blank-window
+      // failures are invisible in the file log, and this line splits the next one
+      // into "scripts never ran" vs "ran but failed to paint" in a single step.
+      invoke("frontend_ready", { win: "popup" }).catch(() => {});
     })();
   </script>
 </body>

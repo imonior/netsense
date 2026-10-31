@@ -389,6 +389,8 @@
   "sett.section_update": "Updates",
   "sett.update_note": "The panel checks quietly once after start-up; this button asks again, right now.",
   "sett.section_about": "About",
+  "sett.author": "Author",
+  "sett.github": "GitHub",
   "sett.platform": "Platform",
   "sett.privilege": "Privilege channel",
   "sett.priv_direct": "Elevated access configured: changes apply without a system prompt",
