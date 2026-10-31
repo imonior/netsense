@@ -4,6 +4,14 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [1.9.2] - 2026-11-01
+
+### 修正
+
+- **macOS 應用程式內升級不再會「解除安裝了卻沒裝上」。** 安裝腳本先 `rm -rf` 刪舊包、再 `ditto` 拷新包，且依賴 `set -e`——只要 `ditto` 任一原因失敗（在上一版還被「舊程序仍在跑」觸發，因為殺程序那步漏掉了大寫的 `NetSense` 二進位），腳本就立刻退出：舊包已刪、新包沒拷上，使用者磁碟上什麼都不剩。現改為先把新包暫存到暫存目錄、校驗它是完整的 `.app`，**通過後才刪舊包並把已校驗的新包移入**；若新包缺失／損壞則在校驗階段就退出、**絕不碰已安裝的舊 app**，升級失敗也不可能再把 app 刪掉。殺程序迴圈還排除腳本自身 PID。 (`src-tauri/src/update.rs`)
+
+- **macOS 上自動化編輯器開屏不再卡幾秒。** 開屏呼叫的 `get_status` 以前無條件拉起 `system_profiler SPAirPortDataType`，在 macOS 15.6+ 上要 1–4 秒，而它只提供介面從不展示的 RSSI 與僅引擎指紋使用的 BSSID。`get_status` 現在帶 `needs_bssid` 開關：編輯器與面板傳 `false` 直接跳過這次呼叫，引擎指紋取樣仍傳 `true` 走完整讀取。編輯器的 SSID 顯示不受影響 —— 它來自 `netsense://status` 廣播與 `get_interfaces` 的主網卡兜底，兩者都不依賴 `system_profiler`。（`frontend/editor.html`、`frontend/popup.html`、`frontend/applied.html`、`src-tauri/src/platform/macos.rs`、`src-tauri/src/platform.rs`、`src-tauri/src/ipc.rs`、`src-tauri/src/conditions/identity.rs`、`src-tauri/src/state.rs`、`src-tauri/src/network/mod.rs`、`src-tauri/src/network/readback.rs`）
+
 ## [1.9.1] - 2026-10-31
 
 ### 修正

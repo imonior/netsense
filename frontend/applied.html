@@ -372,7 +372,7 @@
       // 播种一份网络状态：这扇窗在启动时就建好了，第一轮 `netsense://status` 完全可能
       // 早于页面监听完成 —— 等到真有应用发生再取，第一轮就白等了。
       try {
-        const s = JSON.parse((await invoke("get_status")) || "{}");
+        const s = JSON.parse((await invoke("get_status", { needs_bssid: true })) || "{}");
         if (s.status) { netInfo = s.status; netV6 = s.v6mode === undefined ? null : s.v6mode; }
       } catch (e) { /* 浏览器直开 / 取不到：清单退回只显示改动项 */ }
       // 当前网络卡要 mac / ipv6 / prefix6 / gateway6，这些在 `get_interfaces` 里 —— 与托盘菜单同来源。

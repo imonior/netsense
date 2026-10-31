@@ -4,6 +4,14 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.2] - 2026-11-01
+
+### Fixed
+
+- **The macOS in-app upgrade can no longer uninstall the app without reinstalling it.** The installer script removed the old bundle (`rm -rf`) *before* copying the new one and relied on `set -e`, so whenever `ditto` failed for any reason (which on the previous build was also triggered by the still-running old process, since the kill step missed the uppercase `NetSense` binary) the script aborted with the old app already deleted and the new one never copied — leaving the user with nothing installed. The script now stages the new bundle into a temp dir, verifies it is a complete `.app`, and only then removes the old install and moves the verified copy into place; a missing or broken new bundle bails out *before* touching the installed app, so a failed upgrade can never delete it. The kill loop also excludes the installer's own PID. (`src-tauri/src/update.rs`)
+
+- **The automation editor opens instantly again on macOS.** Its open-screen `get_status` unconditionally spawned `system_profiler SPAirPortDataType`, which on macOS 15.6+ takes 1–4 s and only supplies RSSI (never displayed) and BSSID (used solely by the engine fingerprint). `get_status` now takes a `needs_bssid` flag: the editor and panel pass `false` and skip that call, while the engine fingerprint path still passes `true` for the full sample. The editor's SSID readout is unaffected — it comes from the `netsense://status` broadcast and the `get_interfaces` primary fallback, neither of which depends on `system_profiler`. (`frontend/editor.html`, `frontend/popup.html`, `frontend/applied.html`, `src-tauri/src/platform/macos.rs`, `src-tauri/src/platform.rs`, `src-tauri/src/ipc.rs`, `src-tauri/src/conditions/identity.rs`, `src-tauri/src/state.rs`, `src-tauri/src/network/mod.rs`, `src-tauri/src/network/readback.rs`)
+
 ## [1.9.1] - 2026-10-31
 
 ### Fixed

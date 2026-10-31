@@ -824,7 +824,7 @@ impl NetworkPlatform for LinuxPlatform {
         ssid.filter(|s| !s.is_empty())
     }
 
-    fn get_status(&self) -> InterfaceStatus {
+    fn get_status(&self, _needs_bssid: bool) -> InterfaceStatus {
         let mut st = InterfaceStatus::default();
         let Some(dev) = wifi_iface() else {
             return st;
@@ -885,8 +885,8 @@ impl NetworkPlatform for LinuxPlatform {
     /// 这一腿的快照从来不留缓存（上面每次都是现场 `nmcli`），所以「新鲜的」与「现在这份」
     /// 是同一个东西。写出来而不是省略，是因为契约要求三份实现各自表态：哪天这一腿也加了
     /// 缓存，这一行就是必须跟着改的地方，而继承默认实现不会留下任何提醒。
-    fn fresh_status(&self) -> InterfaceStatus {
-        self.get_status()
+    fn fresh_status(&self, _needs_bssid: bool) -> InterfaceStatus {
+        self.get_status(_needs_bssid)
     }
 
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {

@@ -254,7 +254,7 @@ pub fn apply_3a<P: NetworkPlatform>(
     // 1. 快照当前网络状态（含目标网卡与已存在路由，用于失败时按同一张网卡、连同旧路由回滚）
     // 1. Snapshot current state (including target NIC and pre-existing routes) so a failed
     //    apply can roll back on the same interface and restore the original routes.
-    let mut before = plat.get_status();
+    let mut before = plat.get_status(false);
     before.target = cfg.target;
     before.routes = plat.get_routes();
 

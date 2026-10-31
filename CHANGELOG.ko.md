@@ -4,6 +4,14 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.9.2] - 2026-11-01
+
+### 수정
+
+- **macOS 앱 내 업데이트에서 "삭제만 되고 재설치는 안 되는" 일이 더 이상 없습니다.** 설치 스크립트는 먼저 `rm -rf`로 이전 번들을 삭제한 뒤 `ditto`로 새 번들을 복사했고 `set -e`에 의존했습니다. 그래서 `ditto`가 어떤 이유로든 실패하면(이전 빌드에서는 kill 단계가 대문자 `NetSense` 바이너리를 놓쳐 이전 프로세스가 살아남으면서 유발되기도 함) 스크립트가 즉시 종료되어, 이전 번들은 사라지고 새 번들은 복사되지 않은 채로 남아 사용자 디스크에는 아무것도 남지 않았습니다. 이제는 새 번들을 임시 디렉터리에 스테이징하고 그것이 완전한 `.app`인지 검증한 다음에야 이전 설치를 제거하고 검증된 복사를 배치합니다. 새 번들이 누락/손상됐으면 검증 단계에서 바로 빠져나가므로 설치된 이전 app에는 절대 손대지 않으며, 실패한 업데이트가 app을 삭제하는 일은 다시는 없습니다. kill 루프는 스크립트 자신의 PID도 제외합니다. (`src-tauri/src/update.rs`)
+
+- **macOS에서 자동화 편집기 열기가 다시 즉시 되었습니다.** 열기 시 호출하던 `get_status`는 이전까지 무조건 `system_profiler SPAirPortDataType`를 실행했고, macOS 15.6+에서는 1–4초가 걸리지만 그것이 제공하는 것은 화면에 표시되지 않는 RSSI와 엔진 지문만이 사용하는 BSSID뿐이었습니다. `get_status`는 이제 `needs_bssid` 플래그를 받습니다. 편집기와 패널은 `false`를 넘겨 이 호출을 통째로 건너뛰고, 엔진 지문 채택은 계속 `true`를 넘겨 전체 읽기를 수행합니다. 편집기의 SSID 표시에는 영향이 없습니다 —— 그것은 `netsense://status` 브로드캐스트와 `get_interfaces`의 주 NIC 폴백에서 오며, 둘 다 `system_profiler`에 의존하지 않습니다. (`frontend/editor.html`, `frontend/popup.html`, `frontend/applied.html`, `src-tauri/src/platform/macos.rs`, `src-tauri/src/platform.rs`, `src-tauri/src/ipc.rs`, `src-tauri/src/conditions/identity.rs`, `src-tauri/src/state.rs`, `src-tauri/src/network/mod.rs`, `src-tauri/src/network/readback.rs`)
+
 ## [1.9.1] - 2026-10-31
 
 ### 수정

@@ -1432,7 +1432,7 @@
     if (netPolling || cfgFetching || !cfgLoaded) return;
     netPolling = true;
     try {
-      const rawSt = await invoke("get_status");
+      const rawSt = await invoke("get_status", { needs_bssid: false });
       const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
       if (st && st.status) {
         statusSnap = st.status;
@@ -1647,7 +1647,7 @@
     // 以后空白好几秒」。只有 `get_status` 的失败会落到下面的 catch：它带着「当前网络」那几项
     // 地址和引擎视图，取不到就等于窗口没起来，不该装作没事。
     try {
-      const [[nets, nics, adapters, printers], rawSt] = await Promise.all([external, invoke("get_status")]);
+      const [[nets, nics, adapters, printers], rawSt] = await Promise.all([external, invoke("get_status", { needs_bssid: false })]);
       wifiList = asArray(nets);
       nicList = asArray(nics);
       adapterList = asArray(adapters);

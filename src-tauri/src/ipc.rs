@@ -27,8 +27,8 @@ use crate::state::{self, AppState};
 /// `async` 是必需的，不是风格偏好：本命令要采样网络状态（macOS 15.6+ 的降级链里含一次
 /// 1~4s 的 `system_profiler`）。
 #[tauri::command(async)]
-pub fn get_status(state: State<'_, std::sync::Arc<AppState>>) -> String {
-    let st = state.plat.get_status();
+pub fn get_status(state: State<'_, std::sync::Arc<AppState>>, needs_bssid: bool) -> String {
+    let st = state.plat.get_status(needs_bssid);
     let payload = state::status_payload(&state, &st);
     serde_json::to_string(&payload).unwrap_or_default()
 }

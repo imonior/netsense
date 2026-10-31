@@ -45,7 +45,7 @@ pub fn readback_match<P: NetworkPlatform>(
 ) -> Result<(), VerifyFailure> {
     // `fresh_status` 而不是 `get_status`：校验循环靠的是「每次采样都真的去问一次系统」，
     // 拿到一份 TTL 内的旧快照等于少一次重试机会。
-    let mut st = plat.fresh_status();
+    let mut st = plat.fresh_status(false);
     // 路由表不在 `get_status` 里（多一次子进程，面板用不到）：只有这份 profile 真的配了
     // 路由时才去采，没配路由的配置不多付这次开销。
     if !want.routes.is_empty() {

@@ -4,6 +4,14 @@ NetSense のすべての重要な変更をここに記録する。形式は
 [Keep a Changelog](https://keepachangelog.com/) に基づき、本プロジェクトは
 [セマンティックバージョニング](https://semver.org/) に準拠する。
 
+## [1.9.2] - 2026-11-01
+
+### 修正
+
+- **macOS のアプリ内アップデートで「アンインストールされただけで再インストールされない」ことがなくなりました。** インストールスクリプトは先に `rm -rf` で旧バンドルを削除し、その後 `ditto` で新バンドルをコピーし、`set -e` に依存していました。そのため `ditto` が何らかの理由で失敗すると（前のビルドでは大文字の `NetSense` バイナリを kill 処理が見逃して旧プロセスが残っていたことでも誘発）、スクリプトは即座に終了し、旧バンドルは消え新バンドルは未コピーのままになり、ユーザーのディスクには何も残りませんでした。現在は新バンドルを一時ディレクトリにステージングし、それが完全な `.app` であることを検証してから初めて旧インストールを削除して検証済みのコピーを配置します。新バンドルが欠落／破損していた場合は検証段階で脱出するため、インストール済みの旧 app には一切触らず、失敗したアップデートが app を削除することは二度とありません。kill ループはスクリプト自身の PID も除外します。 (`src-tauri/src/update.rs`)
+
+- **macOS で自動化エディタの起動が再び瞬時に。** 起動時に呼ぶ `get_status` はこれまで無条件に `system_profiler SPAirPortDataType` を起動し、macOS 15.6+ では 1–4 秒かかっていましたが、それが供給するのは UI に表示されない RSSI とエンジンの指紋のみが使う BSSID だけでした。`get_status` は今、`needs_bssid` フラグを持ちます。エディタとパネルは `false` を渡してこの呼び出しを丸ごと省略し、エンジンの指紋採取は引き続き `true` を渡して完全な読み取りを行います。エディタの SSID 表示には影響しません —— それは `netsense://status` ブロードキャストと `get_interfaces` の主 NIC フォールバックから来ており、どちらも `system_profiler` に依存しないためです。（`frontend/editor.html`、`frontend/popup.html`、`frontend/applied.html`、`src-tauri/src/platform/macos.rs`、`src-tauri/src/platform.rs`、`src-tauri/src/ipc.rs`、`src-tauri/src/conditions/identity.rs`、`src-tauri/src/state.rs`、`src-tauri/src/network/mod.rs`、`src-tauri/src/network/readback.rs`）
+
 ## [1.9.1] - 2026-10-31
 
 ### 修正

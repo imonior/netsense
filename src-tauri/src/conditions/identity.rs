@@ -61,7 +61,7 @@ pub struct NetworkSnapshot {
 impl NetworkSnapshot {
     /// 从平台层采一份快照。
     pub fn sample<P: NetworkPlatform>(plat: &P) -> Self {
-        let st = plat.get_status();
+        let st = plat.get_status(true);
         let nics = plat.list_interfaces();
         let mut interfaces = Vec::new();
         let mut tunnels = Vec::new();

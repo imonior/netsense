@@ -328,6 +328,6 @@ pub fn publish_status(state: &Arc<AppState>) {
     let Some(app) = state.app.get().cloned() else {
         return;
     };
-    let st = state.plat.get_status();
+    let st = state.plat.get_status(true);
     let _ = app.emit("netsense://status", status_payload(state, &st));
 }

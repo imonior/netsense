@@ -2198,7 +2198,7 @@ fn scutil_match(target: &TunnelTarget) -> NcMatch {
 /// 调用是逐个 `run()` 的，单次快照要 ~0.6s（其中 `arp -n` 取网关 MAC 一项就近 0.45s），
 /// 并发后落到 ~0.45s（被最慢的 `arp` 钳住）；`system_profiler` 的 1.6s 由
 /// [`SYS_PROFILER_TTL`] 单独摊销（见 [`system_profiler_info`]），不在本函数里重复付。
-fn read_status() -> InterfaceStatus {
+fn read_status(needs_bssid: bool) -> InterfaceStatus {
     let dev = wifi_iface();
     // 网关要先取出来：`gateway_mac_for` 依赖它，且 `route -n get default` 本身很快（~16ms），
     // 先算不影响并发度。
@@ -2216,7 +2216,18 @@ fn read_status() -> InterfaceStatus {
         let h_corewlan = s.spawn(ssid_via_corewlan);
         let h_ipconfig = s.spawn(|| ssid_via_ipconfig(&dev));
         let h_airport = s.spawn(|| airport_info(&dev));
-        let h_sp = s.spawn(system_profiler_info);
+        // `system_profiler` 单次 1~4s，仅供给界面从不展示的 RSSI 与仅引擎指纹用的 BSSID。
+        // 展示路径（面板 / 编辑器开屏）传 `needs_bssid = false`，跳过这一趟 —— 地址 / 网关 /
+        // 连通性 / SSID（corewlan·ipconfig 已覆盖）都不依赖它，省下首屏那几秒。引擎指纹
+        // 路径传 `true`，仍走完整采样。
+        // `system_profiler` costs 1~4s per call and only feeds RSSI (never shown) and BSSID
+        // (engine fingerprint only). Display paths pass `needs_bssid = false` to skip it; the
+        // engine fingerprint path passes `true` for the full sample.
+        let h_sp = if needs_bssid {
+            Some(s.spawn(system_profiler_info))
+        } else {
+            None
+        };
         let h_ipv4 = s.spawn(|| {
             run("ipconfig", &["getifaddr", dev.as_str()])
                 .ok()
@@ -2250,7 +2261,10 @@ fn read_status() -> InterfaceStatus {
         let corewlan = h_corewlan.join().unwrap();
         let ipconfig_ssid = h_ipconfig.join().unwrap();
         let (rssi_a, bssid_a) = h_airport.join().unwrap();
-        let sp = h_sp.join().unwrap();
+        let sp = match h_sp {
+            Some(h) => h.join().unwrap(),
+            None => RadioInfo::default(),
+        };
         let ipv4 = h_ipv4.join().unwrap();
         let netmask = h_netmask.join().unwrap();
         let svc = h_svc.join().unwrap();
@@ -2344,12 +2358,12 @@ impl NetworkPlatform for MacPlatform {
         })
     }
 
-    fn get_status(&self) -> InterfaceStatus {
-        super::cached_status(read_status)
+    fn get_status(&self, needs_bssid: bool) -> InterfaceStatus {
+        super::cached_status(needs_bssid, || read_status(needs_bssid))
     }
 
-    fn fresh_status(&self) -> InterfaceStatus {
-        read_status()
+    fn fresh_status(&self, needs_bssid: bool) -> InterfaceStatus {
+        read_status(needs_bssid)
     }
 
     fn apply_network(&self, p: &NetworkConfig) -> Result<(), String> {

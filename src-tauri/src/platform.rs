@@ -511,12 +511,21 @@ pub(crate) fn cached_adapters<F: FnOnce() -> Vec<NicInfo>>(sample: F) -> Vec<Nic
 /// [`cached_status`] 的 TTL，取值与 [`NIC_LIST_TTL`] 一致（同一类快照、同一类刷新频率）。
 const STATUS_TTL: Duration = Duration::from_secs(2);
 
-/// [`cached_status`] 与 [`invalidate_status`] 共用的那一个缓存。
+/// [`cached_status`] 与 [`invalidate_status`] 共用的两份缓存，按 `needs_bssid` 分槽。
 ///
 /// 必须是**模块级** static：函数内各自 `static C` 是两个互不相干的存储，
 /// 那样 `invalidate_status()` 会清掉一份没人读的空缓存，而下发后读回校验照旧读到
 /// 旧快照 —— 3A 屏障静默失效，这比不加缓存更糟。
-static STATUS_CACHE: OnceLock<Mutex<Option<(Instant, InterfaceStatus)>>> = OnceLock::new();
+///
+/// 为什么分两槽：面板 / 编辑器开屏走 `false`（跳过 1~4s 的 `system_profiler`），引擎指纹
+/// 走 `true`（要那份带 BSSID 的采样）。若共用一个槽，编辑器先采的「无 BSSID」快照会把引擎
+/// 的「带 BSSID」快照顶掉，或反过来 —— 两者口径不同，必须各存各的，否则要么编辑器白白等
+/// 那几秒，要么引擎指纹丢掉 BSSID。
+/// Two slots keyed by `needs_bssid`. The display path (panel / editor open) uses `false`
+/// (skipping the 1~4s `system_profiler`); the engine fingerprint path uses `true` (it needs
+/// the BSSID). A shared slot would let one evict the other's snapshot, so they are kept apart.
+static STATUS_CACHE_NO_BSSID: OnceLock<Mutex<Option<(Instant, InterfaceStatus)>>> = OnceLock::new();
+static STATUS_CACHE_BSSID: OnceLock<Mutex<Option<(Instant, InterfaceStatus)>>> = OnceLock::new();
 
 /// [`NetworkPlatform::get_status`] 结果的进程级 TTL 缓存，理由与 [`cached_nics`] 相同：
 /// 一次快照要拉起若干系统子进程，而面板每次刷新、SSID 监视每一轮都要一份。
@@ -525,8 +534,15 @@ static STATUS_CACHE: OnceLock<Mutex<Option<(Instant, InterfaceStatus)>>> = OnceL
 /// 「下发 → 读回校验」会读到下发之前那份快照 —— 校验屏障会当场失效（读回的值永远是
 /// 旧的那份，既可能假通过，也可能假失败）。
 #[allow(dead_code)] // 目前只有 macOS 走它；Windows 有自己的 status_cached
-pub(crate) fn cached_status<F: FnOnce() -> InterfaceStatus>(sample: F) -> InterfaceStatus {
-    let cell = STATUS_CACHE.get_or_init(|| Mutex::new(None));
+pub(crate) fn cached_status<F: FnOnce() -> InterfaceStatus>(
+    needs_bssid: bool,
+    sample: F,
+) -> InterfaceStatus {
+    let cell = if needs_bssid {
+        STATUS_CACHE_BSSID.get_or_init(|| Mutex::new(None))
+    } else {
+        STATUS_CACHE_NO_BSSID.get_or_init(|| Mutex::new(None))
+    };
     {
         let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, st)) = guard.as_ref() {
@@ -547,7 +563,10 @@ pub(crate) fn cached_status<F: FnOnce() -> InterfaceStatus>(sample: F) -> Interf
 /// [`NIC_LIST_TTL`] 内用旧的，于是 3A 读回、主网卡判据都对着过时的接口做决定。
 #[allow(dead_code)] // 调用方同上
 pub(crate) fn invalidate_status() {
-    if let Some(cell) = STATUS_CACHE.get() {
+    if let Some(cell) = STATUS_CACHE_NO_BSSID.get() {
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    if let Some(cell) = STATUS_CACHE_BSSID.get() {
         *cell.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
     invalidate_nics();
@@ -863,7 +882,16 @@ pub struct EditorEnumerations {
 pub trait NetworkPlatform: Send + Sync {
     fn watch_ssid(&self, cb: Box<dyn Fn(Option<String>) + Send + Sync>) -> WatcherHandle;
     fn get_current_ssid(&self) -> Option<String>;
-    fn get_status(&self) -> InterfaceStatus;
+    /// 采一份主无线网卡状态快照。**展示路径（面板 / 编辑器开屏）传 `needs_bssid = false`**，
+    /// 跳过 macOS 上单次 1~4s 的 `system_profiler`（它只供给界面从不展示的 RSSI 与仅引擎
+    /// 指纹用的 BSSID；地址 / 网关 / 连通性 / SSID 都由更快的来源覆盖）。**引擎指纹路径传
+    /// `true`**，仍走完整采样。三平台实现里只有 macOS 真正消费这个开关；其余平台忽略它。
+    /// Sample the primary Wi-Fi interface. Display paths (panel / editor open) pass
+    /// `needs_bssid = false` to skip macOS's 1~4s `system_profiler` (it only feeds RSSI,
+    /// never shown, and BSSID, used only by the engine fingerprint; address / gateway /
+    /// connectivity / SSID all come from cheaper sources). The engine fingerprint path passes
+    /// `true` for the full sample. Only the macOS implementation consumes the flag.
+    fn get_status(&self, needs_bssid: bool) -> InterfaceStatus;
 
     /// 供 3A 读回校验使用的快照：必须是**这一秒**的实际情况，不能是缓存。
     ///
@@ -871,8 +899,8 @@ pub trait NetworkPlatform: Send + Sync {
     /// 必须覆盖它 —— 校验循环每 800ms 采样一次，而快照的 TTL 比这个间隔长，不覆盖的话
     /// 四次采样里会有两次拿到同一份快照，屏障还在（值确实是下发之后的），只是网卡慢慢
     /// 稳定下来的情形会更早被判成失败。
-    fn fresh_status(&self) -> InterfaceStatus {
-        self.get_status()
+    fn fresh_status(&self, needs_bssid: bool) -> InterfaceStatus {
+        self.get_status(needs_bssid)
     }
 
     /// 下发网络配置（IP/掩码/网关/DNS/IPv6）。
@@ -2219,7 +2247,7 @@ mod mock_tests {
     #[test]
     fn mock_platform_records_calls() {
         let m = MockPlatform::new();
-        m.get_status();
+        m.get_status(false);
         m.set_dhcp().unwrap();
         let calls = m.calls();
         assert_eq!(calls.len(), 2);
@@ -2239,7 +2267,7 @@ mod mock_tests {
             ..Default::default()
         };
         m.apply_network(&cfg).unwrap();
-        let status = m.get_status();
+        let status = m.get_status(false);
         assert_eq!(status.ipv4, Some("192.168.1.100".into()));
         assert_eq!(status.gateway, Some("192.168.1.1".into()));
     }
@@ -2271,7 +2299,7 @@ mod mock_tests {
     #[test]
     fn mock_platform_clear_calls() {
         let m = MockPlatform::new();
-        m.get_status();
+        m.get_status(false);
         m.set_dhcp().unwrap();
         assert_eq!(m.calls().len(), 2);
         m.clear_calls();

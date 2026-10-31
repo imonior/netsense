@@ -650,7 +650,7 @@
 
     async function refresh() {
       try {
-        const raw = await invoke("get_status");
+        const raw = await invoke("get_status", { needs_bssid: true });
         const data = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (data.language && data.language !== langShown) {
           // 语言是在软件设置窗口里改的，这里只是跟着换词表。按「变了没有」判断，
@@ -683,7 +683,7 @@
       if (netRefreshing) return;
       netRefreshing = true;
       try {
-        const raw = await invoke("get_status");
+        const raw = await invoke("get_status", { needs_bssid: true });
         const data = typeof raw === "string" ? JSON.parse(raw) : raw;
         const rawNics = await invoke("get_interfaces");
         nics = typeof rawNics === "string" ? JSON.parse(rawNics) : (rawNics || []);

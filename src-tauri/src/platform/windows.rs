@@ -1495,11 +1495,11 @@ impl NetworkPlatform for WindowsPlatform {
         status_cached().ssid
     }
 
-    fn get_status(&self) -> InterfaceStatus {
+    fn get_status(&self, _needs_bssid: bool) -> InterfaceStatus {
         status_cached()
     }
 
-    fn fresh_status(&self) -> InterfaceStatus {
+    fn fresh_status(&self, _needs_bssid: bool) -> InterfaceStatus {
         read_status()
     }
 

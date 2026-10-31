@@ -180,7 +180,7 @@ impl MockPlatform {
 }
 
 impl NetworkPlatform for MockPlatform {
-    fn get_status(&self) -> InterfaceStatus {
+    fn get_status(&self, _needs_bssid: bool) -> InterfaceStatus {
         self.record(Call::GetStatus);
         INNER.with(|i| i.borrow().state.clone())
     }

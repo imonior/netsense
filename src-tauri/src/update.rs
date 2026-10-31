@@ -1132,74 +1132,81 @@ fn find_app_bundle(dir: &Path) -> PathBuf {
 fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
     let q = shell_quote;
     let new = new_app.to_str().unwrap_or_default();
+    // 失败安全安装：先把新包拷到临时目录并校验，**校验通过后才把已安装的旧 app 改名挪到
+    // 一旁、移入新包**，旧备份只有在新包确认落位后才删除 —— 任何失败路径都绝不会销毁
+    // 已安装的 app，杜绝「升级把软件卸载了却没装上」这类数据丢失。v1.9.1 的结构是 `set -e` + 先 `rm -rf`
+    // 旧包、后 `ditto` 新包，一旦 ditto 失败脚本立即退出，旧包已删、新包没装上。
+    // Fail-safe install: stage the new bundle into a temp dir and verify it BEFORE
+    // touching the installed app. A missing/broken new bundle therefore never destroys
+    // the working install. The v1.9.1 shape was `set -e` + `rm -rf` the old app followed
+    // by `ditto` the new one, so any ditto failure aborted the script with the old app
+    // already gone and the new one never copied — exactly "uninstalled but not reinstalled".
     let lines = [
         "#!/bin/sh".to_string(),
-        "set -e".to_string(),
-        // 用真实路径而非进程名杀：Tauri 二进制名随 productName 走（「NetSense」/「netsense」
-        // 皆可能，取决于构建期），而 macOS 的 `killall` 区分大小写 —— 写死小写会匹配不到、
-        // 旧实例残留。旧实例残留时 `open` 只会把仍在跑的旧进程提到前台（LaunchServices 不会
-        // 起第二份同 bundle），而它发起升级后窗口已被拆除 → 升级后界面全白。这正是 1.8.9
-        // 应用内升级白屏的根因。
-        // Kill by the real bundle path, not the process name: Tauri's binary name follows
-        // productName (case varies) and macOS `killall` is case-sensitive, so a hard-coded
-        // lowercase name can miss and leave the old instance alive. A surviving old instance
-        // is merely brought to front by `open` (LaunchServices won't launch a second copy of
-        // the same bundle), and since it tore its windows down after starting the update the
-        // user sees a blank window — the 1.8.9 in-app-upgrade white-screen root cause.
+        // 不依赖 `set -e`：每个破坏性步骤都用显式守卫，失败即保留旧 app 退出。
+        // No `set -e`: every destructive step is explicitly guarded so a failure preserves
+        // the current install instead of aborting mid-removal.
+        format!("TARGET={}", q(target_app)),
+        // 杀旧进程：按真实 bundle 路径（macOS `killall` 大小写敏感，写死小写会漏掉大写的
+        // `NetSense`，导致旧实例残留、活包被 `rm`、新包拷贝失败）。排除本脚本 PID，避免误杀。
+        // Kill the old process by its real bundle path (killall is case-sensitive on macOS,
+        // so a hard-coded lowercase name misses the uppercase `NetSense` binary and leaves
+        // the live bundle to be removed mid-copy). Exclude our own PID.
+        "BIN=$(/usr/bin/basename \"$TARGET\" .app)".to_string(),
         format!(
-            "for p in $(pgrep -f {}/Contents/MacOS/ 2>/dev/null); do kill -9 \"$p\" 2>/dev/null || true; done",
+            "for p in $(pgrep -f {}/Contents/MacOS/ 2>/dev/null); do [ \"$p\" = \"$$\" ] && continue; kill -9 \"$p\" 2>/dev/null || true; done",
             q(target_app)
         ),
         // 兜底：再按进程名（大小写不敏感）补一刀，覆盖 pgrep 没列全的边界。
         // Fallback: also try the process name case-insensitively for any edge pgrep missed.
         "killall -I netsense 2>/dev/null || true".to_string(),
-        "/bin/sleep 1".to_string(),
-        format!("/bin/rm -rf {}", q(target_app)),
-        // 每步留一行 echo：输出会随 Command::output() 回到 install_macos，成功也写进
-        // 应用日志 ——「升级后界面全白」那次的日志在安装期间只有一行校验记录，无从排查。
-        // One echo per step: output flows back through Command::output() into the app
-        // log even on success (the all-blank-windows incident had only a checksum line).
-        "echo \"install: old bundle removed\"".to_string(),
-        format!("/usr/bin/ditto {} {}", q(new), q(target_app)),
-        "echo \"install: new bundle copied\"".to_string(),
-        // 下载来的包没有 quarantine（非浏览器下载），但剥除是幂等的，
-        // 与 brew cask postflight 一致，防止新副本被 Gatekeeper 拦。
-        format!("/usr/bin/xattr -dr com.apple.quarantine {} 2>/dev/null || true", q(target_app)),
-        // 剥完再查一遍是否还有残留 quarantine：有则记下来，供下次白屏定位
-        // （被 Gatekeeper 拦的 app 启动后 WebView 会直接失败、界面空白）。
-        // Re-check quarantine after stripping: if any remains, log it so a future blank
-        // launch can be traced to Gatekeeper (a quarantined app's WebView fails to start).
+        "/bin/sleep 2".to_string(),
+        // 新包先拷到临时目录（不动已安装的旧 app）。
+        // Stage the new bundle into a temp dir without touching the installed app yet.
+        "WORK=$(/usr/bin/mktemp -d \"${TMPDIR:-/tmp}/netsense-update.XXXXXX\")".to_string(),
+        format!("/usr/bin/ditto {} \"$WORK/$BIN.app\"", q(new)),
+        // 校验拷出来的新包是完整的 .app（含可执行文件）；不完整就保留旧 app 退出。
+        // Verify the staged copy is a complete .app (with its executable); if not, keep the
+        // old install and bail — the installed app is never touched on this path.
+        "if [ ! -f \"$WORK/$BIN.app/Contents/MacOS/$BIN\" ]; then echo \"install: FAILED to stage new bundle — keeping current install\"; rm -rf \"$WORK\"; exit 1; fi".to_string(),
+        // 剥除 quarantine（下载来的包本就没有，但幂等剥除防止 Gatekeeper 拦新副本）。
+        // Strip quarantine (idempotent; prevents Gatekeeper from blocking the new copy).
+        "/usr/bin/xattr -dr com.apple.quarantine \"$WORK/$BIN.app\" 2>/dev/null || true".to_string(),
+        "echo \"install: new bundle staged\"".to_string(),
+        // 把已安装的旧 app **改名挪到一旁**（重命名而非删除），新包确认落位后才删备份；
+        // 万一新包放置失败，把旧 app 改名回来即可恢复 —— 已安装的 app 绝不会被销毁。
+        // Rename the installed app ASIDE (a rename, not a delete). The backup is only removed
+        // once the new bundle is confirmed in place; if placement fails we rename the old app
+        // back, so the working install is never destroyed.
+        "test -e \"$TARGET.bak\" && rm -rf \"$TARGET.bak\"".to_string(),
+        "mv \"$TARGET\" \"$TARGET.bak\" 2>/dev/null || true".to_string(),
+        "mv \"$WORK/$BIN.app\" \"$TARGET\"".to_string(),
+        // 新包是否真落位：否 → 清掉残缺新包、恢复旧 app、退出（绝不谎报成功，
+        // 也绝不留下「旧删了新没装上」的半途状态）。这是失败安全闭环。
+        // Did the new bundle actually land? If not, drop the broken copy, restore the old app,
+        // and exit — never claim success, never leave the "old gone, new missing" half-state.
+        // This closes the fail-safe loop.
         format!(
-            "if /usr/bin/xattr -l {} 2>/dev/null | /usr/bin/grep -q quarantine; then echo \"install: WARN quarantine still present\"; else echo \"install: quarantine cleared\"; fi",
-            q(target_app)
+            "if [ ! -f \"$TARGET/Contents/MacOS/$BIN\" ]; then rm -rf \"$TARGET\"; mv \"$TARGET.bak\" \"$TARGET\"; echo \"install: FAILED to place new bundle — restored previous install\"; rm -rf \"$WORK\"; exit 1; fi"
         ),
-        // 装后校验：读出刚落地的版本号，确认「新版本真的在盘上」——半途失败的 ditto 可能
-        // 留下旧 / 残缺 bundle，这一步把这种情形暴露出来。
-        // Post-install check: read the just-copied bundle's version to confirm the NEW
-        // version is actually on disk; a half-finished ditto can leave a stale/broken
-        // bundle, and this surfaces it.
-        format!(
-            "echo \"install: installed version = $(/usr/bin/defaults read {}/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo UNKNOWN)\"",
-            q(target_app)
-        ),
-        // codesign 自检：落地的二进制若损坏 / 签名不符，open 起来也是坏的（白屏或崩）。
-        // 仅记录不阻断（adhoc 签名本就 verify 不过，参见 verify_codesign 的放行策略）。
-        // Self codesign check: a corrupted/mismatched binary would launch broken. Log only,
-        // never block (ad-hoc signatures fail --verify by design; see verify_codesign).
-        format!(
-            "if /usr/bin/codesign --verify --deep --strict {} >/dev/null 2>&1; then echo \"install: codesign OK\"; else echo \"install: codesign WARN ($(/usr/bin/codesign -v {} 2>&1 | head -1))\"; fi",
-            q(target_app), q(target_app)
-        ),
+        // 新包确认落位 → 删除旧备份。失败安全到此闭环。
+        // New bundle confirmed in place → delete the old backup. Fail-safe closed.
+        "rm -rf \"$TARGET.bak\"".to_string(),
+        "rm -rf \"$WORK\"".to_string(),
+        "echo \"install: new bundle in place\"".to_string(),
+        // 装后校验：版本号 / quarantine / codesign 回显，供白屏事后定位。
+        // Post-install checks echoed for later blank-launch diagnosis.
+        "echo \"install: installed version = $(/usr/bin/defaults read \"$TARGET\"/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo UNKNOWN)\"".to_string(),
+        "if /usr/bin/xattr -l \"$TARGET\" 2>/dev/null | /usr/bin/grep -q quarantine; then echo \"install: WARN quarantine still present\"; else echo \"install: quarantine cleared\"; fi".to_string(),
+        "if /usr/bin/codesign --verify --deep --strict \"$TARGET\" >/dev/null 2>&1; then echo \"install: codesign OK\"; else echo \"install: codesign WARN ($(/usr/bin/codesign -v \"$TARGET\" 2>&1 | head -1))\"; fi".to_string(),
         // 以登录用户（非 root）重新打开：脚本若被 osascript 提权，裸 open 会成 root。
+        // Relaunch as the console user (avoid launching as root if elevated).
         "OPEN_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || /usr/bin/whoami)".to_string(),
         "echo \"install: relaunch as user $OPEN_USER\"".to_string(),
         "if [ -n \"$OPEN_USER\" ] && [ \"$OPEN_USER\" != \"root\" ]; then".to_string(),
-        format!(
-            "  /bin/launchctl asuser \"$(/usr/bin/id -u \"$OPEN_USER\")\" /usr/bin/open {}",
-            q(target_app)
-        ),
+        "  /bin/launchctl asuser \"$(/usr/bin/id -u \"$OPEN_USER\")\" /usr/bin/open \"$TARGET\"".to_string(),
         "else".to_string(),
-        format!("/usr/bin/open {}", q(target_app)),
+        "  /usr/bin/open \"$TARGET\"".to_string(),
         "fi".to_string(),
     ];
     lines.join("\n") + "\n"
@@ -1626,13 +1633,152 @@ mod tests {
             "install script is not valid shell:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        // 按真实路径杀（而非写死小写进程名），size 不敏感兜底。
+        // 按真实路径杀（而非写死小写进程名，且排除本脚本 PID）。
+        // Kill by real bundle path (not a hard-coded lowercase name) and never our own PID.
         assert!(script.contains("pgrep -f '/Applications/NetSense.app'/Contents/MacOS/"));
+        assert!(script.contains("[ \"$p\" = \"$$\" ] && continue"));
         assert!(script.contains("killall -I netsense"));
+        // 失败安全：先 mktemp 暂存新包，再校验，最后才删旧包。
+        // Fail-safe: stage to a temp dir, verify, only then remove the installed app.
+        assert!(script.contains("mktemp"));
+        let stage_guard = script
+            .find("FAILED to stage new bundle")
+            .expect("preserve-old guard (stage) must exist");
+        // 旧 app 必须先改名挪到一旁（而非删除），新包校验通过后才动它。
+        // The installed app must first be renamed aside (not deleted); it is only touched once
+        // the new bundle is verified.
+        let rename_aside = script
+            .find("mv \"$TARGET\" \"$TARGET.bak\"")
+            .expect("old install must be renamed aside, never deleted before verification");
+        let restore = script
+            .find("restored previous install")
+            .expect("placement failure must restore the previous install");
+        let rm_backup = script
+            .rfind("rm -rf \"$TARGET.bak\"")
+            .expect("old backup must be removable only after verification");
+        assert!(
+            stage_guard < rename_aside,
+            "must verify the staged new bundle BEFORE touching the installed app"
+        );
+        assert!(
+            rename_aside < restore,
+            "restore-on-failure must come after renaming the old install aside"
+        );
+        assert!(
+            restore < rm_backup,
+            "old backup is only removed AFTER the failure-restore branch (never before verification)"
+        );
+        // 替换完成后有明确落位确认。
+        // Explicit confirmation once the replacement is in place.
+        assert!(script.contains("new bundle in place"));
         // 装后校验：版本号 / quarantine / codesign 都要回显，供白屏事后定位。
         assert!(script.contains("installed version ="));
         assert!(script.contains("quarantine still present"));
         assert!(script.contains("codesign"));
+    }
+
+    /// 真正执行安装脚本（不只是语法检查），防止「字符串看着对、真跑就失败」的回归。
+    /// 例如：暂存校验写成 `-d`（判断目录）去检查可执行文件 —— 真实 app 里它是文件，
+    /// 于是每次升级都在暂存阶段误判失败、新版本永远装不上。本测试用 fake .app 实跑，
+    /// 断言新包真的落位、旧 app 在失败时完整保留。
+    /// Actually execute the install script (not just a syntax check) to catch regressions
+    /// like the staging-verify written as `-d` (directory) against an executable file — which
+    /// makes every real upgrade fail at the staging step. We run it against fake .app bundles
+    /// and assert the new bundle actually lands, and the old app is preserved on failure.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_install_script_executes_and_replaces() {
+        use std::fs;
+        use std::process::Command;
+
+        let base = std::env::temp_dir().join(format!("netsense-install-func-{}", std::process::id()));
+        // 唯一子目录，避免并行测试互相干扰。
+        // Unique subdir to avoid cross-talk between parallel test runs.
+        let root = base.join("r");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // 二进制名取自 target 的 basename（与 `darwin_install_script` 里的 `basename "$TARGET" .app`
+        // 一致），所以 fake 包内的可执行文件必须叫 `inst`。
+        // The binary name follows the target's basename (matching `basename "$TARGET" .app` in the
+        // script), so the fake bundle's executable must be named `inst`.
+        let mk_bundle = |name: &str, bin: &[u8], sentinel: &str| -> std::path::PathBuf {
+            let app = root.join(name);
+            let macos = app.join("Contents/MacOS");
+            fs::create_dir_all(&macos).unwrap();
+            fs::write(macos.join("inst"), bin).unwrap();
+            fs::write(app.join("SENTINEL"), sentinel).unwrap();
+            app
+        };
+
+        let new = mk_bundle("new.app", b"NEW-BINARY", "NEW");
+        let inst = mk_bundle("inst.app", b"OLD-BINARY", "OLD");
+
+        let script = darwin_install_script(&new, inst.to_str().unwrap());
+        let sp = root.join("install.sh");
+        fs::write(&sp, &script).unwrap();
+
+        // 成功路径：新包应落位，旧哨兵被替换为 NEW。
+        // Happy path: new bundle lands, old sentinel replaced with NEW.
+        let out = Command::new("sh").arg(&sp).output().unwrap();
+        let so = String::from_utf8_lossy(&out.stdout);
+        // `open` 在测试里打不开 fake .app（"incorrect executable format"）会返回非零，
+        // 但那只是测试环境产物；真实签名 app 能正常打开。升级是否成功看文件是否真落位，
+        // 不看 `open` 的退出码。
+        // `open` can't launch the fake .app in tests ("incorrect executable format") and returns
+        // non-zero, but that is only a test artifact; a real signed app opens fine. Upgrade
+        // success is judged by whether the files actually landed, not by `open`'s exit code.
+        assert!(
+            so.contains("new bundle in place"),
+            "install script did not report a successful place; stdout={}\nstderr={}",
+            so,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            fs::read(inst.join("Contents/MacOS/inst")).unwrap(),
+            b"NEW-BINARY",
+            "new binary did not land"
+        );
+        assert_eq!(
+            fs::read_to_string(inst.join("SENTINEL")).unwrap(),
+            "NEW",
+            "old sentinel not replaced"
+        );
+        assert!(
+            !root.join("inst.app.bak").exists(),
+            "old backup must be cleaned up after a successful install"
+        );
+
+        // 失败路径：新包损坏（缺可执行文件）→ 脚本非零退出，旧 app 完整保留。
+        // Failure path: a broken new bundle (missing executable) must make the script exit
+        // non-zero while leaving the old install fully intact.
+        let broken = root.join("broken.app");
+        fs::create_dir_all(broken.join("Contents")).unwrap();
+        let inst2 = mk_bundle("inst2.app", b"ORIG-BINARY", "ORIG");
+        let script2 = darwin_install_script(&broken, inst2.to_str().unwrap());
+        let sp2 = root.join("install2.sh");
+        fs::write(&sp2, &script2).unwrap();
+        let out2 = Command::new("sh").arg(&sp2).output().unwrap();
+        assert!(
+            !out2.status.success(),
+            "install script must fail (non-zero) when the new bundle is broken"
+        );
+        assert_eq!(
+            fs::read(inst2.join("Contents/MacOS/inst")).unwrap(),
+            b"ORIG-BINARY",
+            "old app must survive a broken new bundle"
+        );
+        assert_eq!(
+            fs::read_to_string(inst2.join("SENTINEL")).unwrap(),
+            "ORIG",
+            "old app must survive a broken new bundle"
+        );
+        assert!(
+            !root.join("inst2.app.bak").exists(),
+            "no backup should be created when staging fails"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
