@@ -1186,9 +1186,7 @@ fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
         // Did the new bundle actually land? If not, drop the broken copy, restore the old app,
         // and exit — never claim success, never leave the "old gone, new missing" half-state.
         // This closes the fail-safe loop.
-        format!(
-            "if [ ! -f \"$TARGET/Contents/MacOS/$BIN\" ]; then rm -rf \"$TARGET\"; mv \"$TARGET.bak\" \"$TARGET\"; echo \"install: FAILED to place new bundle — restored previous install\"; rm -rf \"$WORK\"; exit 1; fi"
-        ),
+        "if [ ! -f \"$TARGET/Contents/MacOS/$BIN\" ]; then rm -rf \"$TARGET\"; mv \"$TARGET.bak\" \"$TARGET\"; echo \"install: FAILED to place new bundle — restored previous install\"; rm -rf \"$WORK\"; exit 1; fi".to_string(),
         // 新包确认落位 → 删除旧备份。失败安全到此闭环。
         // New bundle confirmed in place → delete the old backup. Fail-safe closed.
         "rm -rf \"$TARGET.bak\"".to_string(),
