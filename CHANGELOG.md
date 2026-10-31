@@ -4,6 +4,13 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.10] - 2026-10-31
+
+### Fixed
+
+- **The tray panel's "current network" card no longer freezes on `-`.** It used to be filled only from the `netsense://status` broadcast and the window's `focus` event, and the backend emits that broadcast only when the engine re-evaluates or the network actually changes — so on a steady network the card was left showing the last sample it ever received. When the network was not yet ready at first paint, that sample was the placeholder `-`, and there it stayed. The panel now polls `get_status` and `get_interfaces` every 3 seconds and repaints only the network card, the interface list and the public-IP line (the quick-switch buttons are never rebuilt, so a tick can't swallow a click in progress). The backend caches both reads for 2 seconds, so the polling costs essentially nothing. (`frontend/popup.html`)
+- **The automation editor's "current network" cell (top strip, third column) updates live now.** It depended on the same stale broadcast as the tray card, so it lagged and never caught up after the first paint. The editor now polls `get_status` / `get_interfaces` on the same 3-second cadence and repaints only the top strip — never the form, the draft or the focus — keeping `statusSnap` and `view.snapshot` in lock-step so the merged source can't pin an old value over the new sample. (`frontend/editor.html`)
+
 ## [1.8.9] - 2026-10-30
 
 ### Fixed

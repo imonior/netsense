@@ -1418,6 +1418,34 @@
     refreshNics();
   }
 
+  /// 顶部第三列「当前网络」的实时轮询：引擎只在「判定 / 网络变更」时才广播
+  /// `netsense://status`，网络稳定时不再广播，这一格就被冻在最后一次广播的值
+  /// （现场「严重滞后 / 显示为 -」的根因）。后端 `get_status` / `get_interfaces` 各带
+  /// 2s TTL，每 3s 拉一次成本极低。这里把 `statusSnap` 与 `view.snapshot` 都换成最新
+  /// 采样（后者决定 `renderStrip` 里两源的覆盖结果，不换它则旧快照仍压住新值），再只重画
+  /// 状态条（`renderStrip`）—— 不动表单、不碰草稿、不抢焦点。
+  /// Live poll for the "Current network" strip cell: the engine only broadcasts on
+  /// decision/network change, so on a stable network this cell froze at the last broadcast.
+  /// We re-pull every 3s (backend cache is 2s) and repaint just the strip with fresh data.
+  let netPolling = false;
+  async function pollNet() {
+    if (netPolling || cfgFetching || !cfgLoaded) return;
+    netPolling = true;
+    try {
+      const rawSt = await invoke("get_status");
+      const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
+      if (st && st.status) {
+        statusSnap = st.status;
+        if (view) view.snapshot = st.status; // 让两源合并时覆盖方也用最新采样
+      }
+      const rawNics = await invoke("get_interfaces");
+      const list = asArray(rawNics);
+      if (list.length) nicList = list;
+      renderStrip();
+    } catch (e) { /* 桥未就绪 / 后端正忙：下一轮再试 */ }
+    finally { netPolling = false; }
+  }
+
   /// 「当前网络」那一格里属于**网卡**的那几项（接口标签、这张口自己的 MAC）来自 [`nicList`]，
   /// 而它过去只在开窗时取一次：换卡、扩展坞拔插之后再开着的编辑器看一眼，接口名还是改之前的
   /// （Windows 现场报的「信息延迟」就是这个）。后端每轮都会广播，所以跟着广播取新即可 ——
@@ -2362,6 +2390,8 @@
   (async () => {
     try { strings = await invoke("get_strings"); } catch (e) { /* 浏览器直开：显示 key 本身 */ }
     await loadAll();
+    // 顶部「当前网络」每 3s 自拉一次：补上引擎在稳定网络下不发广播时缺失的实时性。
+    setInterval(pollNet, 3000);
   })();
 </script>
 </body>

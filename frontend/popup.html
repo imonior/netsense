@@ -669,6 +669,37 @@
       } catch (e) { /* 非 Tauri 环境（浏览器直接打开）时静默 */ }
     }
 
+    /// 轻量轮询：只刷「当前网络」卡 + 网卡明细 + 公网 IP，**不**重建快速切换区，
+    /// 避免 3s 一次的 innerHTML 重画吞掉用户正在点的那一枚按钮。后端 `get_status` /
+    /// `get_interfaces` 各自带 2s TTL 缓存，每 3s 拉一次代价极低，却能让托盘菜单在网络
+    /// 变化后几秒内跟上 —— 原来只靠 `focus` + `netsense://status` 广播，而网络稳定时引擎
+    /// 不再广播，菜单就被冻在最后一次广播的值（现场「显示为 - / 不及时更新」的根因）。
+    /// Lightweight poll: refresh only the current-network card + NIC list + public IP,
+    /// without rebuilding the Quick Switch list (a 3s innerHTML rewrite would swallow a
+    /// click in progress). Backend caches are 2s, so polling every 3s is cheap yet keeps
+    /// the tray menu within a few seconds of reality instead of frozen at the last broadcast.
+    let netRefreshing = false;
+    async function refreshNet() {
+      if (netRefreshing) return;
+      netRefreshing = true;
+      try {
+        const raw = await invoke("get_status");
+        const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const rawNics = await invoke("get_interfaces");
+        nics = typeof rawNics === "string" ? JSON.parse(rawNics) : (rawNics || []);
+        NetInfo.fill(document.getElementById("net-card"), {
+          st: (data && data.status) || {},
+          primary: primaryNic(),
+          v6mode: (data && data.v6mode) || null,
+          connected: !!(data && data.status && data.status.connected),
+          t, esc,
+        });
+        renderNics();
+        refreshPublicIp();
+      } catch (e) { /* 非 Tauri / 桥未就绪：下一轮再试 */ }
+      finally { netRefreshing = false; }
+    }
+
     async function apply(id, name) {
       if (!id) return;
       try {
@@ -728,6 +759,9 @@
       refresh();
       // 公网 IP 现探现回，本端已做 2 分钟节流；再补一个同间隔的定时器，面板长时间开着时也保鲜。
       setInterval(refreshPublicIp, 120000);
+      // 当前网络信息每 3s 自拉一次：后端只在实际网络变更 / 判定时才广播，稳定网络下不广播，
+      // 菜单会被冻在旧值；这个定时器补齐实时性，且 2s 缓存让每趟几乎零成本。
+      setInterval(refreshNet, 3000);
       // 启动后静默检查一次：发现新版本才弹窗，且本次会话只提示一次
       setTimeout(() => {
         invoke("check_update").then(r => {

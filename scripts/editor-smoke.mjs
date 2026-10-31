@@ -576,6 +576,10 @@ const sandbox = {
   console: { log: () => {}, warn: () => {}, error: (...a) => console.error("editor console.error:", ...a) },
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (id) => clearTimeout(id),
+  // 前端用 `setInterval` 做当前网络信息的轻量轮询；沙箱里它不需要真正触发（冒烟测试不依赖
+  // 轮询，且 `get_status` 被故意 hold 住），给个 no-op 桩让脚本能正常装载即可。
+  setInterval: (fn, ms) => 0,
+  clearInterval: (id) => {},
   confirm: () => true,
   alert: () => {},
 };
@@ -592,7 +596,7 @@ const code =
   " get printerList() { return printerList }," +
   " get appList() { return appList }, set appList(v) { appList = v }," +
   " get langShown() { return langShown }, get dirty() { return dirty }," +
-  " get globalDraft() { return globalDraft } };";
+  " get globalDraft() { return globalDraft }, get pollNet() { return pollNet } };";
 // 按住最慢的那一份外部数据。现场那句「自动化配置点开以后空白好几秒」在真机上就是这几趟子进程
 // （Windows 上每趟是一整条 PowerShell 启动链），替身只有让它停在半路，才看得出来首绘等不等它。
 holdCmd("get_status");
@@ -1688,6 +1692,37 @@ if (wf >= 0) {
   writeFileSync(out, JSON.stringify({ fixtures }, null, 2) + "\n");
   console.log(`\n  已写出 ${fixtures.length} 条 payload → ${out}`);
 }
+
+// —————————————————————— 当前网络实时轮询 ——————————————————————
+// 顶部第三列「当前网络」过去只靠 `netsense://status` 广播刷新；引擎只在「判定 / 网络变更」
+// 时才广播，稳定网络下不再广播，这一格就被冻在最后一次广播的值（现场「严重滞后 / 显示 -」）。
+// pollNet 每 3s 重新拉 `get_status` / `get_interfaces` 并只重画状态条。这里直接调它，
+// 断言状态条确实被最新采样填上（而不是停在过去的值）。
+group("顶部第三列「当前网络」随 pollNet 实时刷新");
+// 注意：harness 的 innerHTML getter 故意返回空串（断言不走序列化结果），读渲染内容用 textContent。
+// 前面的「换口」用例把模块级 nicFixture 改成了 en5（有线）优先、且没还原，于是 nicList[0] 是有线口、
+// 无线 SSID 行按设计留空。这里先还原成「无线口优先」的网卡表，让 pollNet 真实走一遍
+// 「主网卡是 Wi-Fi → SSID 行显示具体值」这条路径（正是用户报「SSID 冻在 -」的那条）。
+nicFixture = [
+  { name: "en0", label: "Wi-Fi", kind: "wireless", ipv4: "192.168.1.100/24", netmask: "255.255.255.0", dns: "192.168.1.1" },
+  { name: "en5", label: "USB 10/100/1000 LAN", kind: "wired", mac: "aa:00:00:00:00:05" },
+];
+console.log("DEBUG pollNet type:", typeof h.pollNet);
+console.log("DEBUG st-net BEFORE:", JSON.stringify(h.$("st-net") && h.$("st-net").textContent.slice(0, 80)));
+try {
+  await h.pollNet();
+} catch (e) {
+  console.log("DEBUG pollNet threw:", e && e.message);
+}
+await settle();
+const netText = h.$("st-net").textContent;
+console.log("DEBUG st-net AFTER pollNet:", JSON.stringify(netText.slice(0, 120)));
+// pollNet 把上一条广播留下的陈旧值（10.20.30.x / 有线口）覆盖成最新采样：
+check("pollNet 后 st-net 含当前 SSID Office_5G", netText.includes("Office_5G"),
+  `st-net=${netText.slice(0, 120)}`);
+check("pollNet 后 st-net 含当前 IPv4 192.168.1.100", netText.includes("192.168.1.100"));
+check("pollNet 后 st-net 含当前 DNS 192.168.1.1", netText.includes("192.168.1.1"));
+check("pollNet 后 st-net 不再冻在换口用例的 10.20.30.40", !netText.includes("10.20.30.40"));
 
 console.log(
   `\n${"=".repeat(58)}\n检查 ${checks} 项，失败 ${failures} 项` +
