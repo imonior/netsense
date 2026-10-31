@@ -258,9 +258,18 @@
     /// 当前网络卡要这些字段，而 `get_status` 的 `InterfaceStatus` 只给 ipv4 / netmask /
     /// gateway / dns / v6mode，没有 mac 也没有 ipv6 —— 所以从 `get_interfaces` 补。
     /// kind!=="vpn" 的第一张即主网卡（判据同 `automation::primary_nic`）。
+    ///
+    /// ⚠️ **后端回的是 JSON 字符串，不是已解析的数组**：必须按 `popup.html` 同一套先
+    /// `JSON.parse` 再判 `Array.isArray`。漏掉解析会让这里永远走到 else、`netPrimary` 恒为
+    /// `null` —— 于是上半张卡的 MAC（没有 `get_status` 兜底）与 netmask（主网卡兜底为 null、
+    /// 本机 `ipconfig getoption` 又取不到掩码）一起显示「—」（v1.9.0 那一轮修 `popup.html`
+    /// 时漏了这里的解析）。
+    /// The backend returns a JSON **string**, not a parsed array: parse it like
+    /// `popup.html` does, or `Array.isArray` fails and `netPrimary` stays null.
     async function refreshPrimary() {
       try {
-        const nics = await invoke("get_interfaces");
+        const raw = await invoke("get_interfaces");
+        const nics = typeof raw === "string" ? JSON.parse(raw) : (raw || []);
         if (Array.isArray(nics)) netPrimary = nics.find((n) => n.kind !== "vpn") || null;
       } catch (e) { /* 取不到就只靠 status */ }
     }

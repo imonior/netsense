@@ -4,6 +4,14 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] - 2026-10-31
+
+### Fixed
+
+- **The result popup's "current network" card now shows the real MAC address and subnet mask.** `refreshPrimary()` compared `get_interfaces`'s return against `Array.isArray`, but the IPC command returns a **JSON string**, not a parsed array — so the primary interface was always `null` and both fields fell back to `—` (the tray panel worked only because it parses the string first). The popup now parses the string before matching the array. Separately, the macOS `read_status` netmask fallback that `list_interfaces` gained in v1.9.0 was missing on this path, so that secondary source also returned `None`; `read_status` now parses the `ifconfig` hexadecimal mask too. (`frontend/applied.html`, `src-tauri/src/platform/macos.rs`)
+- **The MAC address shown is now the one actually seen on the network.** It used to come from `networksetup`'s factory `Ethernet Address`, which on macOS Wi‑Fi private-addressing is not the address peers observe. `IfaceSnap` gained a `mac` field parsed from `ifconfig`'s `ether` line, and `list_interfaces` now prefers that; the factory address is still used as a fallback when an interface has no link-layer address. (`src-tauri/src/platform/macos.rs`)
+- **The macOS in-app upgrade no longer leaves every window blank.** The installer script killed the old app with `killall netsense` (lowercase), but `tauri.conf.json`'s `productName` is `NetSense` and the binary is therefore named `NetSense` — `killall` is case-sensitive, so the old process was never terminated and `open` only raised the already-running, post-upgrade (window-stripped) instance to the front. The script now kills by the real bundle path via `pgrep -f '<target>/Contents/MacOS/'` + `kill -9` (independent of the binary's letter case), with `killall -I netsense` as a backstop, and it verifies after install that the quarantine `xattr` is gone, the installed `CFBundleShortVersionString` matches, and a self `codesign` check passes — each step echoed to the app log. A unit test (`darwin_install_script_is_valid_shell_and_kills_by_path`) asserts the generated script is valid shell and kills by path. (`src-tauri/src/update.rs`)
+
 ## [1.9.0] - 2026-10-31
 
 ### Added

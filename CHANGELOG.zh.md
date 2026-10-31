@@ -4,6 +4,14 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.9.1] - 2026-10-31
+
+### 修复
+
+- **结果弹窗的「当前网络」卡片现在显示真实的 MAC 地址与子网掩码。** `refreshPrimary()` 把 `get_interfaces` 的返回值拿去和 `Array.isArray` 比较，但 IPC 命令返回的是 **JSON 字符串**而非已解析的数组 —— 于是主网卡永远是 `null`，这两个字段都回退成了 `—`（托盘面板之所以正常，是因为它先把字符串 `JSON.parse` 了）。弹窗现在先解析字符串再匹配数组。另外，`list_interfaces` 在 v1.9.0 才补上的 macOS `read_status` 子网掩码兜底在这条路径上漏了，那条后备来源也一直返回 `None`；`read_status` 现在同样会解析 `ifconfig` 的十六进制掩码。（`frontend/applied.html`、`src-tauri/src/platform/macos.rs`）
+- **现在显示的 MAC 地址是网络上真正被看到的那个。** 它此前来自 `networksetup` 的出厂 `Ethernet Address`，而在 macOS Wi‑Fi 私有地址机制下，那并不是对端观察到的地址。`IfaceSnap` 新增 `mac` 字段，解析自 `ifconfig` 的 `ether` 行，`list_interfaces` 现在优先取它；接口没有链路层地址时仍回退到出厂地址。（`src-tauri/src/platform/macos.rs`）
+- **macOS 应用内升级不再让所有窗口变白。** 安装脚本此前用 `killall netsense`（小写）杀旧进程，但 `tauri.conf.json` 的 `productName` 是 `NetSense`，二进制因此名为 `NetSense` —— `killall` 区分大小写，旧进程从未被终止，`open` 只把那个已运行、升级后（窗口已拆除）的实例提到前台。脚本现在按真实 bundle 路径 `pgrep -f '<target>/Contents/MacOS/'` + `kill -9` 杀进程（与二进制名大小写无关），并以 `killall -I netsense` 兜底；装后还会校验 quarantine `xattr` 已清除、已安装的 `CFBundleShortVersionString` 一致、自身 `codesign` 自检通过 —— 每一步都 echo 进应用日志。新增单元测试 `darwin_install_script_is_valid_shell_and_kills_by_path` 断言生成的脚本是合法 shell 且按路径杀进程。（`src-tauri/src/update.rs`）
+
 ## [1.9.0] - 2026-10-31
 
 ### 新增

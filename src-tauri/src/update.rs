@@ -1135,7 +1135,24 @@ fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
     let lines = [
         "#!/bin/sh".to_string(),
         "set -e".to_string(),
-        "/usr/bin/killall netsense 2>/dev/null || true".to_string(),
+        // 用真实路径而非进程名杀：Tauri 二进制名随 productName 走（「NetSense」/「netsense」
+        // 皆可能，取决于构建期），而 macOS 的 `killall` 区分大小写 —— 写死小写会匹配不到、
+        // 旧实例残留。旧实例残留时 `open` 只会把仍在跑的旧进程提到前台（LaunchServices 不会
+        // 起第二份同 bundle），而它发起升级后窗口已被拆除 → 升级后界面全白。这正是 1.8.9
+        // 应用内升级白屏的根因。
+        // Kill by the real bundle path, not the process name: Tauri's binary name follows
+        // productName (case varies) and macOS `killall` is case-sensitive, so a hard-coded
+        // lowercase name can miss and leave the old instance alive. A surviving old instance
+        // is merely brought to front by `open` (LaunchServices won't launch a second copy of
+        // the same bundle), and since it tore its windows down after starting the update the
+        // user sees a blank window — the 1.8.9 in-app-upgrade white-screen root cause.
+        format!(
+            "for p in $(pgrep -f {}/Contents/MacOS/ 2>/dev/null); do kill -9 \"$p\" 2>/dev/null || true; done",
+            q(target_app)
+        ),
+        // 兜底：再按进程名（大小写不敏感）补一刀，覆盖 pgrep 没列全的边界。
+        // Fallback: also try the process name case-insensitively for any edge pgrep missed.
+        "killall -I netsense 2>/dev/null || true".to_string(),
         "/bin/sleep 1".to_string(),
         format!("/bin/rm -rf {}", q(target_app)),
         // 每步留一行 echo：输出会随 Command::output() 回到 install_macos，成功也写进
@@ -1148,6 +1165,31 @@ fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
         // 下载来的包没有 quarantine（非浏览器下载），但剥除是幂等的，
         // 与 brew cask postflight 一致，防止新副本被 Gatekeeper 拦。
         format!("/usr/bin/xattr -dr com.apple.quarantine {} 2>/dev/null || true", q(target_app)),
+        // 剥完再查一遍是否还有残留 quarantine：有则记下来，供下次白屏定位
+        // （被 Gatekeeper 拦的 app 启动后 WebView 会直接失败、界面空白）。
+        // Re-check quarantine after stripping: if any remains, log it so a future blank
+        // launch can be traced to Gatekeeper (a quarantined app's WebView fails to start).
+        format!(
+            "if /usr/bin/xattr -l {} 2>/dev/null | /usr/bin/grep -q quarantine; then echo \"install: WARN quarantine still present\"; else echo \"install: quarantine cleared\"; fi",
+            q(target_app)
+        ),
+        // 装后校验：读出刚落地的版本号，确认「新版本真的在盘上」——半途失败的 ditto 可能
+        // 留下旧 / 残缺 bundle，这一步把这种情形暴露出来。
+        // Post-install check: read the just-copied bundle's version to confirm the NEW
+        // version is actually on disk; a half-finished ditto can leave a stale/broken
+        // bundle, and this surfaces it.
+        format!(
+            "echo \"install: installed version = $(/usr/bin/defaults read {}/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo UNKNOWN)\"",
+            q(target_app)
+        ),
+        // codesign 自检：落地的二进制若损坏 / 签名不符，open 起来也是坏的（白屏或崩）。
+        // 仅记录不阻断（adhoc 签名本就 verify 不过，参见 verify_codesign 的放行策略）。
+        // Self codesign check: a corrupted/mismatched binary would launch broken. Log only,
+        // never block (ad-hoc signatures fail --verify by design; see verify_codesign).
+        format!(
+            "if /usr/bin/codesign --verify --deep --strict {} >/dev/null 2>&1; then echo \"install: codesign OK\"; else echo \"install: codesign WARN ($(/usr/bin/codesign -v {} 2>&1 | head -1))\"; fi",
+            q(target_app), q(target_app)
+        ),
         // 以登录用户（非 root）重新打开：脚本若被 osascript 提权，裸 open 会成 root。
         "OPEN_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || /usr/bin/whoami)".to_string(),
         "echo \"install: relaunch as user $OPEN_USER\"".to_string(),
@@ -1558,6 +1600,39 @@ mod tests {
         }
         // 非 ASCII 前缀必须是 Err，而不是切片 panic。
         assert!(require_https("～https://a").is_err());
+    }
+
+    /// 升级安装脚本必须是合法 shell，且包含「按真实路径杀旧进程 + 装后校验」三处关键行。
+    /// 1.8.9 应用内升级白屏的根因就是 `killall netsense`（小写）大小写敏感匹配不到
+    /// `NetSense` 进程、旧实例残留——脚本本身若非法 shell 更会让升级直接半途而废。
+    /// The install script must be valid shell and must kill the old process by real path
+    /// plus verify the new bundle after copy. The 1.8.9 white-screen root cause was
+    /// `killall netsense` (lowercase) missing the `NetSense` process under case-sensitive
+    /// `killall`; an invalid script would abort the upgrade midway.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_install_script_is_valid_shell_and_kills_by_path() {
+        let script = darwin_install_script(
+            Path::new("/tmp/netsense-update-staging/NetSense.app"),
+            "/Applications/NetSense.app",
+        );
+        let dir = std::env::temp_dir();
+        let p = dir.join("netsense-install-script.sh");
+        std::fs::write(&p, &script).unwrap();
+        // `sh -n` 只做语法检查、不执行，安全。
+        let out = std::process::Command::new("sh").arg("-n").arg(&p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "install script is not valid shell:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // 按真实路径杀（而非写死小写进程名），size 不敏感兜底。
+        assert!(script.contains("pgrep -f '/Applications/NetSense.app'/Contents/MacOS/"));
+        assert!(script.contains("killall -I netsense"));
+        // 装后校验：版本号 / quarantine / codesign 都要回显，供白屏事后定位。
+        assert!(script.contains("installed version ="));
+        assert!(script.contains("quarantine still present"));
+        assert!(script.contains("codesign"));
     }
 
     #[test]

@@ -4,6 +4,14 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.9.1] - 2026-10-31
+
+### 수정
+
+- **결과 팝업의 "현재 네트워크" 카드에 이제 실제 MAC 주소와 서브넷 마스크가 표시됩니다.** `refreshPrimary()`는 `get_interfaces`의 반환값을 `Array.isArray`와 비교했지만, IPC 명령이 반환하는 것은 파싱된 배열이 아닌 **JSON 문자열**입니다 —— 그래서 주 인터페이스는 항상 `null`이었고, 두 필드 모두 `—`로 폴백했습니다(트레이 패널이 정상이었던 것은 문자열을 먼저 `JSON.parse`했기 때문입니다). 팝업은 이제 배열을 대조하기 전에 문자열을 파싱합니다. 별도로, v1.9.0에서 `list_interfaces`에 추가된 macOS `read_status` 서브넷 마스크 폴백이 이 경로에서 빠져 있어 그 예비 소스도 항상 `None`을 반환했습니다. `read_status`는 이제 `ifconfig`의 16진수 마스크도 파싱합니다. (`frontend/applied.html`, `src-tauri/src/platform/macos.rs`)
+- **표시되는 MAC 주소는 이제 네트워크상에서 실제로 관측되는 것입니다.** 이전에는 `networksetup`의 출고 시 `Ethernet Address`를 사용했는데, macOS Wi‑Fi 개인 주소 기능에서는 그것이 상대방이 관측하는 주소가 아닙니다. `IfaceSnap`에 `mac` 필드를 추가해 `ifconfig`의 `ether` 행에서 파싱하고, `list_interfaces`는 이를 우선합니다. 인터페이스에 링크 계층 주소가 없으면 여전히 출고 시 주소로 폴백합니다. (`src-tauri/src/platform/macos.rs`)
+- **macOS 앱 내 업그레이드에서 더 이상 모든 창이 하얗게 되지 않습니다.** 설치 스크립트는 이전에 `killall netsense`(소문자)로 이전 프로세스를 종료했지만, `tauri.conf.json`의 `productName`은 `NetSense`이고 바이너리 이름도 `NetSense`입니다 —— `killall`은 대소문자를 구분하므로 이전 프로세스는 종료된 적 없었고, `open`은 이미 실행 중이고 업그레이드 후(창이 제거된) 인스턴스만 앞으로 가져왔습니다. 스크립트는 이제 실제 bundle 경로 `pgrep -f '<target>/Contents/MacOS/'` + `kill -9`로 프로세스를 종료합니다(바이너리 이름의 대소문자와 무관). `killall -I netsense`는 백스톱입니다. 또한 설치 후 quarantine `xattr`가 제거되었는지, 설치된 `CFBundleShortVersionString`이 일치하는지, 자체 `codesign` 자가 점검이 통과하는지 검증합니다 —— 각 단계를 앱 로그에 echo합니다. 새 단위 테스트 `darwin_install_script_is_valid_shell_and_kills_by_path`는 생성된 스크립트가 유효한 shell이며 경로로 프로세스를 종료함을 단언합니다. (`src-tauri/src/update.rs`)
+
 ## [1.9.0] - 2026-10-31
 
 ### 추가

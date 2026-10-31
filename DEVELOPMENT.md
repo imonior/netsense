@@ -128,6 +128,7 @@ netsense/
 │   ├── install-priv-helper.sh # macOS install/uninstall privilege channel by hand (writes /etc/sudoers.d/netsense)
 │   ├── validate.py            # ★ platform-independent static checks (JSON / i18n parity / PAL boundary / docs alignment), also run in CI
 │   ├── editor-smoke.mjs       # ★ headless editor harness (stubbed DOM + fake IPC); asserts the binding rules and can dump the payloads the editor really sends
+│   ├── applied-render.mjs     # ★ Playwright real-render regression for the applied popup (MAC / subnet mask), run with `node scripts/applied-render.mjs`
 │   ├── build-windows.ps1      # ★ one-click Windows build (with MSVC/WebView2/disk preflight)
 │   ├── gen_icons.py           # resample + round + pack the icon set from app-icon.png (pure stdlib)
 │   ├── gen_release_notes.py   # compose the GitHub Release body: localized-changelog switch line + notes + per-platform download links

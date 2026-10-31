@@ -4,6 +4,14 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [1.9.1] - 2026-10-31
+
+### 修正
+
+- **結果彈窗的「目前網路」卡片現在顯示真實的 MAC 位址與子網路遮罩。** `refreshPrimary()` 把 `get_interfaces` 的回傳值拿去和 `Array.isArray` 比較，但 IPC 命令回傳的是 **JSON 字串**而非已解析的陣列 —— 於是主網卡永遠是 `null`，這兩個欄位都回退成了 `—`（工具列面板之所以正常，是因為它先把字串 `JSON.parse` 了）。彈窗現在先解析字串再匹配陣列。另外，`list_interfaces` 在 v1.9.0 才補上的 macOS `read_status` 子網路遮罩兜底在這條路徑上漏了，那條後備來源也一直回傳 `None`；`read_status` 現在同樣會解析 `ifconfig` 的十六進位遮罩。（`frontend/applied.html`、`src-tauri/src/platform/macos.rs`）
+- **現在顯示的 MAC 位址是網路上真正被看到的那一個。** 它此前來自 `networksetup` 的出廠 `Ethernet Address`，而在 macOS Wi‑Fi 私有位址機制下，那並不是對端觀察到的位址。`IfaceSnap` 新增 `mac` 欄位，解析自 `ifconfig` 的 `ether` 行，`list_interfaces` 現在優先取它；介面沒有鏈路層位址時仍回退到出廠位址。（`src-tauri/src/platform/macos.rs`）
+- **macOS 應用內升級不再讓所有視窗變白。** 安裝腳本此前用 `killall netsense`（小寫）殺舊程序，但 `tauri.conf.json` 的 `productName` 是 `NetSense`，二進位因此名為 `NetSense` —— `killall` 區分大小寫，舊程序從未被終止，`open` 只把那個已執行、升級後（視窗已拆除）的實例提到前景。腳本現在按真實 bundle 路徑 `pgrep -f '<target>/Contents/MacOS/'` + `kill -9` 殺程序（與二進位名大小寫無關），並以 `killall -I netsense` 兜底；裝後還會校驗 quarantine `xattr` 已清除、已安裝的 `CFBundleShortVersionString` 一致、自身 `codesign` 自我檢查通過 —— 每一步都 echo 進應用日誌。新增單元測試 `darwin_install_script_is_valid_shell_and_kills_by_path` 斷言生成的腳本是合法 shell 且按路徑殺程序。（`src-tauri/src/update.rs`）
+
 ## [1.9.0] - 2026-10-31
 
 ### 新增

@@ -4,6 +4,14 @@ NetSense のすべての重要な変更をここに記録する。形式は
 [Keep a Changelog](https://keepachangelog.com/) に基づき、本プロジェクトは
 [セマンティックバージョニング](https://semver.org/) に準拠する。
 
+## [1.9.1] - 2026-10-31
+
+### 修正
+
+- **結果ポップアップの「現在のネットワーク」カードに、実際の MAC アドレスとサブネットマスクが表示されるようになりました。** `refreshPrimary()` は `get_interfaces` の戻り値を `Array.isArray` と比較していましたが、IPC コマンドが返すのは **JSON 文字列**であり、解析済みの配列ではありません —— そのため主インターフェイスは常に `null` となり、両方の欄が `—` にフォールバックしていました（トレイパネルが正常だったのは、先に文字列を `JSON.parse` していたからです）。ポップアップは現在、配列を照合する前に文字列を解析します。さらに、v1.9.0 で `list_interfaces` に追加された macOS の `read_status` サブネットマスクのフォールバックがこの経路では漏れており、その予備ソースも常に `None` を返していました。`read_status` は現在、`ifconfig` の 16 進マスクも解析します。（`frontend/applied.html`、`src-tauri/src/platform/macos.rs`）
+- **表示される MAC アドレスは、ネットワーク上で実際に観測されるものになりました。** 従来は `networksetup` の出荷時 `Ethernet Address` を使っていましたが、macOS の Wi‑Fi プライベートアドレス機能では、それは対向が観測するアドレスではありません。`IfaceSnap` に `mac` フィールドを追加し、`ifconfig` の `ether` 行から解析し、`list_interfaces` はこれを優先するようになりました。インターフェイスにリンク層アドレスがない場合は、引き続き出荷時アドレスにフォールバックします。（`src-tauri/src/platform/macos.rs`）
+- **macOS のアプリ内アップグレードで、すべてのウィンドウが白くなることはなくなりました。** インストールスクリプトは従来、古いプロセスを `killall netsense`（小文字）で終了させていましたが、`tauri.conf.json` の `productName` は `NetSense` であり、バイナリ名も `NetSense` になります —— `killall` は大文字小文字を区別するため、古いプロセスは一度も終了せず、`open` はすでに実行中でアップグレード後（ウィンドウが取り除かれた）のインスタンスを前面に出すだけでした。スクリプトは現在、実際の bundle パス `pgrep -f '<target>/Contents/MacOS/'` + `kill -9` でプロセスを終了させます（バイナリ名の大文字小文字に依存しない）。`killall -I netsense` はバックストップです。さらにインストール後、quarantine `xattr` が除去されていること、インストールされた `CFBundleShortVersionString` が一致すること、自身の `codesign` 自己チェックが通ることを検証します —— 各ステップをアプリのログに echo します。新しいユニットテスト `darwin_install_script_is_valid_shell_and_kills_by_path` は、生成されたスクリプトが正当な shell であり、パスでプロセスを終了させることを表明します。（`src-tauri/src/update.rs`）
+
 ## [1.9.0] - 2026-10-31
 
 ### 追加

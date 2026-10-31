@@ -1491,6 +1491,15 @@ struct IfaceSnap {
     /// interface (it reads the DHCP lease / config archive), while `ifconfig` always
     /// prints the mask for any interface that has an IPv4 address — a free fallback.
     netmask: Option<String>,
+    /// 链路层地址（MAC），取自 `ifconfig` 的 `ether` 行。
+    /// macOS Wi-Fi 默认开启「私有地址」随机化，`ifconfig` 这里的 MAC 才是网络上
+    /// 真正看到的那个；`networksetup -listallhardwareports` 的 `Ethernet Address`
+    /// 是出厂固化地址，随机化开后与线上不一致，不能拿它当「当前 MAC」展示。
+    /// Link-layer address parsed from `ifconfig`'s `ether` line. macOS Wi-Fi private
+    /// address randomization means this is the MAC actually seen on the wire; the
+    /// factory address from `networksetup -listallhardwareports` diverges once
+    /// randomization is on and must not be shown as the live MAC.
+    mac: Option<String>,
     /// 非 link-local 的 `inet6` 地址（有些 VPN 隧道只在 v6 上有地址）。
     ///
     /// 留着地址本身而不只是「有没有」：`fd7a:115c:a1e0::/48` 这类写死在客户端源码里的
@@ -1539,6 +1548,7 @@ fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSna
                         running: line.contains("RUNNING"),
                         inet: None,
                         netmask: None,
+                        mac: None,
                         v6: Vec::new(),
                     },
                 );
@@ -1565,6 +1575,12 @@ fn parse_iface_snapshot(out: &str) -> std::collections::HashMap<String, IfaceSna
             if !a.is_empty() && !a.starts_with("fe80") {
                 e.v6.push(a.to_string());
             }
+        } else if t.starts_with("ether") {
+            // 链路层地址。私有地址随机化后，这一行才是网络上真实看到的 MAC；
+            // 不是出厂固化地址（那个见 `hardware_ports`）。
+            // Link-layer address. After private-address randomization this is the
+            // real on-wire MAC, not the factory one (see `hardware_ports`).
+            e.mac = extract_mac(t);
         }
     }
     map
@@ -2212,6 +2228,20 @@ fn read_status() -> InterfaceStatus {
                 .ok()
                 .map(|o| o.trim().to_string())
                 .filter(|s| !s.is_empty())
+                // `ipconfig getoption … subnet_mask` 依赖接口的 DHCP 租约 / 配置存档，
+                // 部分接口（本机 Wi-Fi 即如此）拿不到答案、返回空 —— 这时用同一次
+                // `ifconfig <dev>` 快照里的 `netmask 0xffffff00` 兜底，来源与 `list_interfaces`
+                // 一致，免得状态广播里的 `netmask` 在此处恒为 `None`（v1.9.0 只给 `list_interfaces`
+                // 加了这条兜底，漏了 `read_status`，于是 `NetInfo.fill` 的 `st.netmask` 后备在 macOS
+                // 上一直是死的）。
+                // `ipconfig getoption … subnet_mask` reads the DHCP lease / config archive and
+                // answers empty for some interfaces; fall back to the mask from `ifconfig <dev>`,
+                // the same source `list_interfaces` already uses.
+                .or_else(|| {
+                    run("ifconfig", &[dev.as_str()])
+                        .ok()
+                        .and_then(|o| parse_iface_snapshot(&o).get(dev.as_str()).and_then(|s| s.netmask.clone()))
+                })
         });
         let h_svc = s.spawn(wifi_service);
         let gw = gateway.clone();
@@ -2465,7 +2495,13 @@ impl NetworkPlatform for MacPlatform {
                     kind,
                     up: running,
                     ssid,
-                    mac: port.and_then(|p| p.mac.clone()),
+                    // 优先 `ifconfig` 的 `ether`：随机化私有地址后那才是网络上真正看到的 MAC；
+                    // `networksetup` 给的是出厂固化地址，与线上不一致。没有 `ether` 的接口
+                    // （部分虚拟 / 隧道口根本没有链路层地址）再退回出厂地址，避免 MAC 直接消失。
+                    // Prefer the `ether` from `ifconfig` (the real on-wire MAC under private-address
+                    // randomization); fall back to the factory address from `networksetup` only when
+                    // the interface has no link-layer address at all.
+                    mac: snap.and_then(|s| s.mac.clone()).or_else(|| port.and_then(|p| p.mac.clone())),
                     ipv4,
                     netmask,
                     ipv6,
@@ -3303,10 +3339,12 @@ mod tests {
         // 建了但没起来的隧道：RUNNING 为真、地址为空 → 枚举时被丢掉的正是这种
         assert_eq!(
             m.get("utun3"),
-            Some(&IfaceSnap { running: true, inet: None, netmask: None, v6: Vec::new() })
+            Some(&IfaceSnap { running: true, inet: None, netmask: None, mac: None, v6: Vec::new() })
         );
         // 只有 IPv6 地址的隧道必须留下，否则用户的 VPN 在面板上凭空消失
         assert_eq!(m.get("utun4").unwrap().v6, vec!["fd1c:b7b7:1::2".to_string()]);
+        // 只有 `ether` 的口（en4）也要把链路层地址解析出来，且优先于出厂地址
+        assert_eq!(m.get("en4").unwrap().mac.as_deref(), Some("d6:0f:20:b7:9a:f9"));
         // 地址本身要留着（归属第 3 条证据认的就是段前缀），而 fe80:: 那条不配进这张表
         assert_eq!(m.get("utun5").unwrap().v6, vec!["fd7a:115c:a1e0::112b:75f".to_string()]);
         assert_eq!(m.get("utun5").unwrap().inet.as_deref(), Some("100.88.7.94"));
