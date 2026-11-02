@@ -573,8 +573,15 @@
         // because this process gets killed. Reaching the next line means relaunch did not take
         // over (Linux self-relaunches via the package manager, Homebrew channel) — the old hint
         // remains the fallback.
-        await invoke("relaunch_app").catch(() => {});
-        showUpdateResult(true, d);
+        try {
+          await invoke("relaunch_app");
+          showUpdateResult(true, d);
+        } catch (re) {
+          // 安装成功但重启没能把新版本拉起来（文件被占用等）：如实告知，不谎报成功。
+          // Install ok but relaunch could not bring up the new build (file in use, etc.):
+          // report it honestly instead of faking success.
+          showUpdateResult(true, d, String(re));
+        }
       } catch (e) {
         // 失败回退到发布页 + 显式报错
         showUpdateResult(false, d, String(e));
@@ -617,7 +624,21 @@
 
     function showUpdateResult(ok, d, err) {
       const box = document.getElementById("update-modal");
-      if (ok) {
+      if (ok && err) {
+        // 升级包已下载，但磁盘上的程序仍是旧版（升级时它正在被使用，安装器没能覆盖）。
+        // 若照旧「杀旧→起新」会拉起旧程序，表现为「重启了却没升级」，所以这里改为
+        // 如实提示用户重启电脑；「立即重启」再点一次仍失败则同样重新提示。
+        // The package downloaded, but the on-disk app is still the old build (it was in use
+        // during the upgrade, so the installer could not overwrite it). Relaunching "kill old
+        // -> start new" would launch the old build ("restarted but not upgraded"), so we tell
+        // the user to reboot instead; Restart now retries and re-warns if it still fails.
+        box.innerHTML = `<h3>${esc(t("popup.update_ok", "Update complete"))}</h3>
+          <div class="mv warn">${esc(t("popup.update_stale", "The update was downloaded, but the installed app is still the old version — it was in use during the upgrade. Restart your computer to finish, or click Restart now to try again."))}</div>
+          <div class="row-btns">
+            <button id="up-restart">${esc(t("popup.restart_now", "Restart now"))}</button>
+            <button id="up-close">${esc(t("popup.close", "Close"))}</button>
+          </div>`;
+      } else if (ok) {
         box.innerHTML = `<h3>${esc(t("popup.update_ok", "Update complete"))}</h3>
           <div class="mv">${esc(t("popup.restart_hint", "The app should restart automatically. If it does not, click Restart now."))}</div>
           <div class="row-btns">
@@ -638,7 +659,11 @@
       const c = document.getElementById("up-close");
       if (c) c.onclick = closeUpdateModal;
       const r = document.getElementById("up-restart");
-      if (r) r.onclick = () => { invoke("relaunch_app").catch(() => {}); };
+      if (r) r.onclick = () => {
+        invoke("relaunch_app")
+          .then(() => {})
+          .catch((e2) => showUpdateResult(true, d, String(e2)));
+      };
     }
 
     async function checkForUpdate() {

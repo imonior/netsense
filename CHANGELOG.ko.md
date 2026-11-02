@@ -4,6 +4,16 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.9.5] - 2026-11-03
+
+### 수정
+
+- **Windows 앱 내 업그레이드가 이제 구 버전을 조용히 재시작하는 일이 없습니다.** 재시작 헬퍼는 그동안 "실행 파일이 있다"는 것만 확인하고 바로 기동했습니다. 그런데 머신 단위 무음 업그레이드 중에는 실행 중(잠김)인 `NetSense.exe`를 NSIS가 덮어쓸 수 없어, 디스크의 파일은 이전 버전 그대로인데 헬퍼가 그것을 띄워 버립니다 — 사용자는 "재시작 중"을 보지만 바뀌지 않은 옛 앱이 열립니다. `relaunch()`는 이제 설치된 exe를 찾고(현재 디렉터리, 그리고 알려진 `Program Files` 경로), 그 `FileVersion`을 읽습니다. 이것이 `CARGO_PKG_VERSION`(NSIS 빌드 번호는 무시)과 일치하지 않으면, 낡은 바이너리를 띄우는 대신 오류를 돌려보내고, 프런트엔드는 가짜 성공 대신 "컴퓨터를 다시 시작하세요" 경고와 "다시 시도" 버튼을 보여 줍니다. (`src-tauri/src/update.rs`, `frontend/popup.html`, `src-tauri/src/ipc.rs`)
+
+### 추가
+
+- **Windows 재시작-오래됨 경로용 i18n 키 3개를 추가했습니다.** `popup.update_stale`(다운로드는 끝났으나 설치된 앱이 여전히 옛 버전 —— 사용자에게 재시작하거나 "지금 재시작"을 누르라고 알림), `upd.exe_not_found`, `upd.exe_stale`이 5개 언어 모두에 동봉되어 키 총수는 `720`이 됩니다. 프런트엔드는 재시작 실패를 더 이상 삼키지 않습니다. 실패한 `relaunch_app`은 이제 성공이라고 거짓말하는 대신 진짜 이유를 보여 줍니다. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+
 ## [1.9.4] - 2026-11-03
 
 ### 수정

@@ -1877,14 +1877,19 @@ pub fn run_update(
     crate::update::run_update(&app, &t, &choice, &mirror)
 }
 
-/// 装好新包后重启软件：macOS 上把「杀旧实例 + 等它退出 + `open -n` 新包」交给一个
-/// 独立进程组的 helper（见 [`crate::update::relaunch`]），本命令立即返回，随后本进程
-/// 会被 helper 杀掉 —— 前端在 resolve 之后不要再做重要的事。其余平台无操作。
-/// Relaunch after a successful install: on macOS the "kill the old instance, wait for
-/// it to exit, `open -n` the new bundle" work is handed to a helper in its own process
-/// group (see [`crate::update::relaunch`]); this command returns immediately and the
-/// process is killed shortly after — the frontend must not do anything important after
-/// this resolves. Other platforms are a no-op.
+/// 装好新包后重启软件：macOS 与 Windows 都把「杀旧实例 + 拉起新包」交给独立进程组的
+/// helper（见 [`crate::update::relaunch`]），本命令立即返回，随后本进程会被杀掉 —— 前端在
+/// resolve 之后不要再做重要的事。Windows 在重启前会核对磁盘 exe 是否已是新版本；若仍是旧版
+/// （升级时文件被占用、安装器没能覆盖），返回 `Err` 交由前端如实提示「请重启电脑」，而不是
+/// 静默重启进旧程序。Linux 走包管理器自重启，本命令为无操作。
+/// Relaunch after a successful install: on macOS and Windows the "kill the old instance and
+/// launch the new build" work is handed to a helper in its own process group (see
+/// [`crate::update::relaunch`]); this command returns immediately and the process is killed
+/// shortly after — the frontend must not do anything important after it resolves. On Windows
+/// the on-disk exe is checked before relaunch: if it is still the old build (the file was in
+/// use during the upgrade and the installer could not overwrite it), an `Err` is returned so
+/// the frontend can tell the user to reboot instead of silently relaunching the old build.
+/// Linux self-relaunches via the package manager, so this command is a no-op there.
 #[tauri::command(async)]
 pub fn relaunch_app() -> Result<(), String> {
     crate::update::relaunch()

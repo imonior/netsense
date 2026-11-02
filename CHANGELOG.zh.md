@@ -4,6 +4,16 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.9.5] - 2026-11-03
+
+### 修正
+
+- **Windows 应用内升级不再会静默重启进旧版本。** 重启 helper 过去只确认「有 exe 在」就拉起；但在按机器静默升级时，正在运行（被锁住）的 `NetSense.exe` 无法被 NSIS 覆盖，于是磁盘上的文件仍是旧版，helper 却把它启动了 —— 用户看到「重启中」，得到的却是没变的旧程序。`relaunch()` 现在先定位已安装的 exe（当前目录，再到已知的 `Program Files` 路径），读取它的 `FileVersion`；若与 `CARGO_PKG_VERSION`（忽略 NSIS 的构建号）不符，就返回错误而不是启动旧二进制，前端则显示「请重启电脑」的警告加一个「重试」按钮，而不是报假成功。 (`src-tauri/src/update.rs`、`frontend/popup.html`、`src-tauri/src/ipc.rs`)
+
+### 新增
+
+- **为 Windows 重启-陈旧路径新增三个 i18n 键。** `popup.update_stale`（下载完成但已安装的程序仍是旧版 —— 提示用户重启或点「立即重启」）、`upd.exe_not_found`、`upd.exe_stale` 随五个语言一同发布，总键数来到 `720`。前端不再吞掉重启失败：一次失败的 `relaunch_app` 现在会给出真实原因，而不是谎报成功。 (`frontend/popup.html`、`src-tauri/src/i18n/`)
+
 ## [1.9.4] - 2026-11-03
 
 ### 修正

@@ -4,6 +4,16 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.5] - 2026-11-03
+
+### Fixed
+
+- **Windows in-app upgrade can no longer silently relaunch into the old build.** The relaunch helper only checked that an executable existed and launched it; but during a per-machine silent upgrade the running (locked) `NetSense.exe` cannot be overwritten by NSIS, so the file on disk stayed at the previous version while our helper started it — the user saw "restarting" yet got the unchanged app. `relaunch()` now resolves the installed exe (current dir, then the known `Program Files` locations) and reads its `FileVersion`; if it does not match `CARGO_PKG_VERSION` (ignoring the NSIS build number), it returns an error instead of launching the stale binary, and the frontend shows a "restart your computer" warning with a Retry button rather than a fake success. (`src-tauri/src/update.rs`, `frontend/popup.html`, `src-tauri/src/ipc.rs`)
+
+### Added
+
+- **Three new i18n keys for the Windows relaunch-stale path.** `popup.update_stale` (download finished but the installed app is still the old version — tells the user to reboot or click Restart now), `upd.exe_not_found`, and `upd.exe_stale` ship in all five languages, bringing the table to `720` keys. The frontend no longer swallows a relaunch failure: a failed `relaunch_app` now surfaces the real reason instead of claiming success. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+
 ## [1.9.4] - 2026-11-03
 
 ### Fixed
@@ -13,7 +23,7 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **A "Restart now" button in the update-success popup.** Auto-relaunch can still be defeated on some setups (e.g. a process killed but the new instance never launching); the button calls `relaunch_app` once more so the user is never stuck on a dead modal. Two new i18n keys ship in all five languages, bringing the table to `717` keys. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+- **A "Restart now" button in the update-success popup.** Auto-relaunch can still be defeated on some setups (e.g. a process killed but the new instance never launching); the button calls `relaunch_app` once more so the user is never stuck on a dead modal. Two new i18n keys ship in all five languages, bringing the table to `720` keys. (`frontend/popup.html`, `src-tauri/src/i18n/`)
 
 ## [1.9.3] - 2026-11-01
 
@@ -57,7 +67,7 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 717 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
+- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 720 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
 - **Every window now reports to the backend once its page has finished initializing.** All five windows call the new `frontend_ready` command (with their window label) at the end of init, and the backend logs `frontend ready: <win>`. A blank-window report can now be bisected from the log alone: ready lines present means the scripts ran and the failure is in the rendering layer; no ready lines at all means the WebView never executed them. The smoke test's first-paint command contract pins the heartbeat in place. (`frontend/*.html`, `ipc.rs`, `main.rs`, `scripts/editor-smoke.mjs`)
 - **The in-app upgrade's installation steps are now audited in the app log — including on success.** The macOS installer script echoes each step (removing the old bundle, copying the new one, relaunching as the logged-in user), and `install_macos` writes the script output to the log even when everything succeeds; previously the success path logged nothing at all, so a broken upgrade left a single verification line to investigate. (`src-tauri/src/update.rs`)
 

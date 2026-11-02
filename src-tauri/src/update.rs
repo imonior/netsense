@@ -1322,18 +1322,37 @@ pub fn relaunch() -> Result<(), String> {
 /// approach as the macOS branch above.
 #[cfg(target_os = "windows")]
 pub fn relaunch() -> Result<(), String> {
-    // 找不到安装目录就交给用户手动启动：宁可什么都不做，也不要杀掉旧进程后没新进程顶上。
-    // If we cannot locate the install dir, leave the app running — better than killing the
-    // old process with nothing to replace it.
-    let dir = match current_install_dir() {
-        Some(d) => d,
-        None => return Ok(()),
+    // 先定位安装目录里的新 exe（带兜底，见 resolve_new_exe）。找不到就实话实说、
+    // 不杀旧进程——宁可留着旧版，也别杀完却没新进程顶上。
+    // Resolve the new exe to launch (with fallbacks, see resolve_new_exe). If we cannot
+    // locate it, say so and leave the app running rather than killing it with nothing to
+    // replace it.
+    let new_exe = match resolve_new_exe() {
+        Some(p) => p,
+        None => return Err(i18n::t("upd.exe_not_found")),
     };
-    let exe_name = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "NetSense.exe".to_string());
-    let new_exe = Path::new(&dir).join(&exe_name).to_string_lossy().into_owned();
+    // 关键加固：静默 NSIS 升级时，若旧 NetSense.exe 仍在运行（被本进程占用），安装器无法
+    // 覆盖该文件，磁盘上的 exe 仍是旧版。若此时照旧「杀旧→起新」，拉起的其实是旧版 exe，
+    // 用户看到「重启了但版本没变」。所以重启前先核对磁盘 exe 的版本：若仍是旧版，绝不静默
+    // 重启进旧程序，而是报错交由前端如实提示「请重启电脑完成更新」。
+    // Key hardening: during a silent NSIS upgrade, if the old NetSense.exe is still running
+    // (held open by this process), the installer cannot overwrite it and the on-disk exe
+    // stays the old build. Relaunching "kill old -> start new" would then launch the old
+    // exe, so the user sees "restarted but version unchanged". Verify the on-disk version
+    // first; if it is still the old build, refuse to silently relaunch into it and let the
+    // frontend tell the user to reboot.
+    let expected = env!("CARGO_PKG_VERSION");
+    if let Some(on_disk) = on_disk_exe_version(&new_exe) {
+        if !version_matches(&on_disk, expected) {
+            return Err(i18n::tf(
+                "upd.exe_stale",
+                &[("installed", &on_disk), ("expected", expected)],
+            ));
+        }
+    }
+    // 读到版本且与预期一致（或读不到版本时保守放行）→ 杀掉精确旧 PID，拉起新 exe。
+    // Version matches (or we could not read it, fail open) -> kill the exact old PID and
+    // launch the new exe.
     let script = windows_relaunch_script(std::process::id(), &new_exe);
     let mut cmd = Command::new("powershell");
     hide_console(&mut cmd);
@@ -1373,6 +1392,84 @@ fn windows_relaunch_script(old_pid: u32, new_exe: &str) -> String {
            Start-Process -FilePath '{safe}' \
          }}",
     )
+}
+
+/// 在常见安装位置里定位待启动的新 exe（带兜底，避免非标准安装路径下整块跳过重启）。
+/// Resolve the new exe to launch, with fallbacks so a non-standard install location does
+/// not skip the whole relaunch.
+#[cfg(target_os = "windows")]
+fn resolve_new_exe() -> Option<String> {
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "NetSense.exe".to_string());
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    // 1) 当前 exe 所在目录（标准安装位置）。
+    //    The directory of the running exe (the standard install location).
+    if let Some(dir) = current_install_dir() {
+        candidates.push(Path::new(&dir).join(&exe_name));
+    }
+    // 2) 本进程路径自身（便携版 / 安装器未改 exe 名时也能拉起自身）。
+    //    The running exe itself (portable builds, or when the installer kept the same name).
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe);
+    }
+    // 3) 标准 Program Files 兜底。
+    //    Standard Program Files fallback.
+    for base in [
+        std::env::var("ProgramFiles").unwrap_or_default(),
+        std::env::var("ProgramFiles(x86)").unwrap_or_default(),
+    ] {
+        if !base.is_empty() {
+            candidates.push(Path::new(&base).join("NetSense").join(&exe_name));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// 读取磁盘 exe 的文件版本（如 "1.9.5" 或 "1.9.5.0"）。读不到返回 None。
+/// Read the on-disk exe file version (e.g. "1.9.5" or "1.9.5.0"); None if unreadable.
+#[cfg(target_os = "windows")]
+fn on_disk_exe_version(exe: &str) -> Option<String> {
+    let safe = exe.replace('\'', "''");
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("(Get-Item -LiteralPath '{safe}').VersionInfo.FileVersion"),
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 把 "1.9.5" / "1.9.5.0" 归一化为前三个数值分量后比较（忽略构建号）。
+/// Normalize "1.9.5" / "1.9.5.0" to its first three numeric components for comparison
+/// (the build number is ignored).
+// 仅在 Windows 上被 relaunch() 直接调用；其余平台仅供单测使用，故允许 dead_code。
+// Only called directly by relaunch() on Windows; on other platforms it is used by the unit
+// test, so allow dead_code there.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn normalize_version(v: &str) -> Vec<u32> {
+    v.split('.')
+        .map(|p| p.trim().parse::<u32>().unwrap_or(0))
+        .take(3)
+        .collect()
+}
+
+/// 两个版本号是否指向同一发布（忽略构建号）。
+/// Whether two version strings denote the same release (build number ignored).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn version_matches(a: &str, b: &str) -> bool {
+    normalize_version(a) == normalize_version(b)
 }
 
 #[cfg(target_os = "macos")]
@@ -2380,5 +2477,20 @@ mod tests {
         assert!(kill < start, "kill the old process before starting the new one");
         // 路径里的反斜杠与空格不应破坏脚本（PowerShell 单引号字符串）。
         assert!(s.contains("C:\\Program Files\\NetSense\\NetSense.exe"));
+    }
+
+    /// 版本比较必须忽略构建号（NSIS 写入的 FileVersion 可能是 "1.9.5.0"，而 CARGO_PKG_VERSION
+    /// 是 "1.9.5"），否则会误判「磁盘 exe 仍是旧版」而拒绝重启。
+    /// Version comparison must ignore the build number (NSIS writes FileVersion as "1.9.5.0"
+    /// while CARGO_PKG_VERSION is "1.9.5"), or we would wrongly treat the fresh exe as stale.
+    #[test]
+    fn version_matches_ignores_build_number() {
+        assert!(version_matches("1.9.5", "1.9.5.0"));
+        assert!(version_matches("1.9.5", "1.9.5"));
+        assert!(!version_matches("1.9.4", "1.9.5"));
+        assert!(!version_matches("1.10.0", "1.9.5"));
+        // 非数字段回退为 0，不应 panic。
+        // Non-numeric segments fall back to 0 without panicking.
+        assert!(version_matches("1.9.5", "1.9.5.xyz"));
     }
 }
