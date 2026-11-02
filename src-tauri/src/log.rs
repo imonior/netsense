@@ -60,6 +60,74 @@ impl Level {
 /// 逐条采样 / 逐步下发这类细节要在软件设置里把级别调到 Debug 才落盘。
 static MIN_LEVEL: AtomicU8 = AtomicU8::new(Level::Info.verbosity());
 
+/// 日志分类：按「产生日志的模块」在**写入时**标注，日志窗按它过滤 —— 分级（严重度）
+/// 与分类（模块层）是两个独立维度，界面上交叉生效。
+///
+/// 分类不靠调用点手传：100+ 个调用点逐一传参会把每个模块改一遍，而且新调用点必然忘。
+/// 这里在写入端按调用方源文件归层（见 [`category_of`]），调用点一行都不用动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cat {
+    /// 网络层：网络检测 / 配置下发 / 平台命令（network、platform）。
+    /// Network layer: detection, apply, platform commands (network, platform).
+    Network,
+    /// 自动化层：引擎、规则求值、检测节律、动作执行（engine、automation、conditions、detection）。
+    /// Automation layer: engine, rule evaluation, detection cadence, actions.
+    Automation,
+    /// 升级：检查 / 下载 / 校验 / 安装 / 重启（update）。
+    /// Updater: check, download, verify, install, relaunch (update).
+    Update,
+    /// 配置：自动化配置、软件设置、备份（config、appconfig、backup、state、paths）。
+    /// Configuration: automation config, app settings, backup (config, appconfig, backup, state, paths).
+    Config,
+    /// 应用层：其余一切（IPC、托盘、窗口、代理设置、日志自身……）。
+    /// App layer: everything else (IPC, tray, windows, proxy settings, logging itself…).
+    App,
+}
+
+impl Cat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Cat::Network => "net",
+            Cat::Automation => "auto",
+            Cat::Update => "upd",
+            Cat::Config => "cfg",
+            Cat::App => "app",
+        }
+    }
+}
+
+/// 调用方源文件（`file!()`，形如 `src-tauri/src/engine.rs`）→ 分类。
+///
+/// 用「包含子串」而不是全等：`file!()` 在不同编译口径下可能是相对路径也可能是绝对路径，
+/// 子串匹配对两者都成立。归不到任何层的落进 App —— 日志窗对**没有分类标记的旧行**也用
+/// 同一条兜底规则，于是「全部」永远等于五类之和，任何一行都不会在过滤里失踪。
+///
+/// Maps the caller's source file (`file!()`, like `src-tauri/src/engine.rs`) to a
+/// category. Substring match (not equality) because `file!()` may be relative or
+/// absolute depending on the invocation. Anything unmatched falls into App — the viewer
+/// applies the same fallback to old lines that carry no category tag, so "All" always
+/// equals the union of the five filters and no line disappears.
+fn category_of(file: &str) -> Cat {
+    let f = file.replace('\\', "/");
+    // 判据一律不带扩展名（如 `engine` 而非 `engine.rs`）：裸的「单词.单词」字符串
+    // 会被静态闸门当成 i18n key 引用（engine 恰好是一个命名空间），凭空报缺键。
+    // The matchers deliberately carry no file extension (`engine`, not the dotted
+    // form): a bare word.word string is picked up by the static gate as an i18n key
+    // citation (engine happens to be a namespace) and reported as a missing key.
+    let has = |p: &str| f.contains(&format!("src/{p}"));
+    if has("network/") || has("platform") {
+        Cat::Network
+    } else if has("automation/") || has("engine") || has("conditions/") || has("detection/") {
+        Cat::Automation
+    } else if has("update") {
+        Cat::Update
+    } else if has("config/") || has("appconfig") || has("backup") || has("state") || has("paths") {
+        Cat::Config
+    } else {
+        Cat::App
+    }
+}
+
 /// 这一级别过不过闸门（测试与 `log` 共用一句判据，不各写一遍）。
 fn passes(level: Level) -> bool {
     level.verbosity() <= MIN_LEVEL.load(Ordering::Relaxed)
@@ -419,8 +487,34 @@ fn one_line(msg: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// 一条记录 = 时间戳 + 级别 + 分类 + 正文：消息里的换行在这里折成看得见的 `\n`。
+///
+/// 分类插在级别之后（`[INFO] [net]`）：日志窗用一条正则同时解析两样；没有分类标记的
+/// 旧行（旧版本写的、panic 行）在过滤时按 App 兜底，详见前端同一规则。
+/// One record = timestamp + level + category + body; newlines in the message are folded
+/// into a visible `\n`. The category follows the level (`[INFO] [net]`): the viewer
+/// parses both with one regex; old lines (and the panic line) without a tag fall back
+/// to App under filtering — same rule as the frontend.
+fn render_line(today: &str, ts: &str, level: Level, cat: Cat, msg: &str) -> String {
+    format!(
+        "[{today} {ts}] [{}] [{}] {}\n",
+        level.as_str(),
+        cat.as_str(),
+        one_line(msg)
+    )
+}
+
 /// 核心写日志。任何地方调用，未初始化则降级到 stderr。
-pub fn log(level: Level, msg: &str) {
+///
+/// 分类由**调用方**的源文件决定（见 [`category_of`]）：每个包装函数各自带
+/// `#[track_caller]` 拿到真实调用点 —— `#[track_caller]` 不会穿过一层普通函数调用，
+/// 所以包装函数必须自己取 `Location`，不能指望从下一个函数里继承。
+///
+/// Core log write; falls back to stderr when not initialized. The category comes from
+/// the CALLER's source file (see [`category_of`]): each wrapper carries its own
+/// `#[track_caller]` to capture the real call site — the attribute does not propagate
+/// through an ordinary call, so every wrapper must grab the `Location` itself.
+fn emit(level: Level, msg: &str, cat: Cat) {
     if !passes(level) {
         return;
     }
@@ -439,13 +533,7 @@ pub fn log(level: Level, msg: &str) {
             now.minute(),
             now.second()
         );
-        let line = format!(
-            "[{} {}] [{}] {}\n",
-            l.today,
-            ts,
-            level.as_str(),
-            one_line(msg)
-        );
+        let line = render_line(&l.today, &ts, level, cat, msg);
         if let Some(f) = l.file.as_mut() {
             let _ = f.write_all(line.as_bytes());
             let _ = f.flush();
@@ -459,20 +547,24 @@ pub fn log(level: Level, msg: &str) {
 }
 
 #[inline]
+#[track_caller]
 pub fn error(msg: &str) {
-    log(Level::Error, msg);
+    emit(Level::Error, msg, category_of(std::panic::Location::caller().file()));
 }
 #[inline]
+#[track_caller]
 pub fn warn(msg: &str) {
-    log(Level::Warn, msg);
+    emit(Level::Warn, msg, category_of(std::panic::Location::caller().file()));
 }
 #[inline]
+#[track_caller]
 pub fn info(msg: &str) {
-    log(Level::Info, msg);
+    emit(Level::Info, msg, category_of(std::panic::Location::caller().file()));
 }
 #[inline]
+#[track_caller]
 pub fn debug(msg: &str) {
-    log(Level::Debug, msg);
+    emit(Level::Debug, msg, category_of(std::panic::Location::caller().file()));
 }
 
 #[cfg(test)]
@@ -571,6 +663,47 @@ mod tests {
         assert_eq!(&*one_line("a\rb"), "a\\rb");
         // 绝大多数日志不含换行，那条路返回借用而不是另起一个 String。
         assert!(matches!(one_line("plain text"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    /// 模块 → 分类的映射：界面五个分类按钮的语义全靠这张表，映射错层用户就会在
+    /// 「网络」里看到升级日志。相对与绝对两种 `file!()` 口径都要认。
+    /// Module → category mapping: the five filter buttons mean exactly this table; a
+    /// wrong layer puts update logs under "Network". Both relative and absolute
+    /// `file!()` shapes must resolve.
+    #[test]
+    fn every_module_maps_to_its_layer_category() {
+        use Cat::{App, Automation, Config, Network, Update};
+        // 网络：network/ 与 platform（目录与顶层文件两种形状）。
+        assert_eq!(category_of("src-tauri/src/network/mod.rs"), Network);
+        assert_eq!(category_of("src-tauri/src/platform/macos.rs"), Network);
+        assert_eq!(category_of("/Users/x/src-tauri/src/platform.rs"), Network);
+        // 自动化：engine / automation / conditions / detection。
+        assert_eq!(category_of("src-tauri/src/engine.rs"), Automation);
+        assert_eq!(category_of("src-tauri/src/automation/one_shot.rs"), Automation);
+        assert_eq!(category_of("src-tauri/src/conditions/evaluator.rs"), Automation);
+        assert_eq!(category_of("src-tauri/src/detection/mod.rs"), Automation);
+        // 升级 / 配置。
+        assert_eq!(category_of("src-tauri/src/update.rs"), Update);
+        assert_eq!(category_of("src-tauri/src/appconfig.rs"), Config);
+        assert_eq!(category_of("src-tauri/src/config/model.rs"), Config);
+        assert_eq!(category_of("src-tauri/src/backup.rs"), Config);
+        // 其余一切（含 Windows 反斜杠路径）落 App。
+        assert_eq!(category_of("src-tauri/src/ipc.rs"), App);
+        assert_eq!(category_of("src-tauri/src/tray.rs"), App);
+        assert_eq!(category_of("src-tauri\\src\\tray.rs"), App);
+        assert_eq!(category_of("something/unrelated.rs"), App);
+    }
+
+    /// 行形状：级别之后紧跟分类标记；换行折叠发生在正文里、不动前缀。
+    /// Line shape: the category tag follows the level; newline folding touches only the body.
+    #[test]
+    fn a_line_carries_level_then_category_tag() {
+        assert_eq!(
+            render_line("2026-01-08", "12:00:00", Level::Info, Cat::Network, "hello"),
+            "[2026-01-08 12:00:00] [INFO] [net] hello\n"
+        );
+        let folded = render_line("d", "t", Level::Error, Cat::Update, "a\nb");
+        assert!(folded.contains("[upd] a\\nb"), "{folded:?}");
     }
 
     /// 级别闸门：默认 Info 放行 Error/Warn/Info、挡下 Debug；`from_setting` 认不出的值

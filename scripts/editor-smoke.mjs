@@ -642,15 +642,16 @@ eq("已存 SSID、在用网卡、本机网卡、打印机与已装程序各取�
    h.appList.map((a) => a.name)],
   [["Office_5G", "Café"], ["en0", "en5", "utun3"], ["en0", "en5", "en7"], ["Office LaserJet", "Home Inkjet"],
    ["Broken", "Firefox", "Keka", "Slack"]]);
-// 开机批次：合并枚举 + 状态快照（两者都是子进程采样，同属第二帧、在 `Promise.all([external,
-// get_status])` 里一起 await，所以等的是「最慢那份」而非「两份之和」）+ 首屏三份便宜数据
-// （配置 / 语言 / 配色，背后不拉子进程）。已装程序不在首屏关键路径（后台补拉），不在此列。
+// 开机批次：合并枚举（子进程采样，第二帧 `await external`）+ 状态快照（子进程采样，自 v1.9.3 起
+// 移出第二帧、改走后台 `loadStatus`，与 `get_installed_apps` 同构）+ 首屏三份便宜数据
+// （配置 / 语言 / 配色，背后不拉子进程）。状态快照与已装程序都是后台补拉，都不在首屏关键路径上。
 // 旧版是「外部四份 + 状态快照 + 首屏三份」八项一次性并发发出；现在第一帧只等首屏三份、第二帧再
-// 并发枚举与状态快照，第一帧因此完全不碰慢的子进程 —— 这才是现场那句「点开空白好几秒」的根因解法。
+// 等合并枚举，第一帧因此完全不碰慢的子进程 —— 这才是现场那句「点开空白好几秒」的根因解法；状态快照
+// 进一步挪到后台，Windows 的 PowerShell 启动链与 macOS 的 `system_profiler` 探测都不再拖慢打开。
 // 下面两条改判「第一帧不挡在慢数据上」与「慢的两份都发了」：旧版时钟式的「全 issued 早于全
-// resolved」已不适用 —— 第二帧的 get_status 在首屏落回之后才发出，而 mock 里枚举瞬时落回，量不出
-// 两者在真机上的重叠（真机上子进程要跑好几秒，发出时枚举仍在飞行中）。结构上的「两者并发」由
-// 编辑器源码里的 `Promise.all` 保证，冒烟测试只能验结构、验不了真机时序。
+// resolved」已不适用 —— 第二帧的 get_status 在首屏落回之后才发出（后台 `loadStatus`），而 mock 里枚举
+// 瞬时落回，量不出两者在真机上的重叠（真机上子进程要跑好几秒，发出时枚举仍在飞行中）。结构上的
+// 「状态不挡首屏」由编辑器源码里的 `loadStatus` 后台补拉保证，冒烟测试只能验结构、验不了真机时序。
 const bootIpc = ["get_editor_enumerations", "get_status", "get_config", "get_language", "get_theme"];
 const bootBatch = ipcTime.filter((t) => bootIpc.includes(t.cmd)).slice(0, 5);
 eq("开机那五份各发一次（合并枚举 + 状态快照 + 首屏三份，没有哪一项被读了两遍；已装程序不在此列）", bootBatch.length, 5);
@@ -1498,7 +1499,10 @@ await broadcast("netsense://status", { language: "en", engine: h.view, config_re
 eq("迟到的旧代际号不会把界面踢回重读", cfgCalls(), cfgAfterCatchUp);
 
 // 重读途中配置又换代：那条广播会被在途的 `cfgFetching` 挡下，改由这一趟收尾时补读。
-holdCmd("get_status");
+// 这里的「在途」靠按住第二帧的合并枚举（`get_editor_enumerations`）制造 —— `get_status` 自 v1.9.3 起
+// 已移出首屏关键路径、改走后台 `loadStatus`（与 `get_installed_apps` 同构，贵采样只做一次、状态靠广播刷新），
+// 不再能当在途卡点；合并枚举仍在第二帧 `await external` 链里，可作等效的慢替身，挡出同样的窗口。
+holdCmd("get_editor_enumerations");
 h.loadAll();
 await settle();
 backendRev += 1;

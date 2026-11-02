@@ -115,6 +115,15 @@
       <button class="lvl" data-lvl="I" data-i18n="logs.level_info">Info</button>
       <button class="lvl" data-lvl="D" data-i18n="logs.level_debug">Debug</button>
     </div>
+    <div class="bar" id="cat-bar">
+      <span class="lbl" data-i18n="logs.filter_cat">Category</span>
+      <button class="lvl on" data-cat="" data-i18n="logs.cat_all">All</button>
+      <button class="lvl" data-cat="net" data-i18n="logs.cat_net">Network</button>
+      <button class="lvl" data-cat="auto" data-i18n="logs.cat_auto">Automation</button>
+      <button class="lvl" data-cat="upd" data-i18n="logs.cat_upd">Update</button>
+      <button class="lvl" data-cat="cfg" data-i18n="logs.cat_cfg">Config</button>
+      <button class="lvl" data-cat="app" data-i18n="logs.cat_app">App</button>
+    </div>
     <div class="bar">
       <input type="text" id="in-filter" data-i18n-placeholder="logs.filter" placeholder="Filter" spellcheck="false">
       <span class="val" id="v-status"></span>
@@ -183,6 +192,9 @@
     let levelFilter = "";
     // 级别筛选的「最小严重度」映射：选 E 只看错误，W 含错误+警告，I 含前三者，D 全部。
     const LEVEL_MIN = { "": null, "E": ["E"], "W": ["E", "W"], "I": ["E", "W", "I"], "D": ["E", "W", "I", "D"] };
+    // 选中的分类筛选（空 = 不过滤）：分级（严重度）之外的第二维度，两维交叉生效 ——
+    // 比如「Error × 网络」就是「只看网络层报过错」。
+    let catFilter = "";
 
     function optLabel(f) {
       return f.today ? `${f.name} ${t("logs.today", "(today)")}` : f.name;
@@ -239,6 +251,17 @@
         if (!m) return true;
         return allowed.includes(m[1]);
       });
+      // 分类筛选：与级别、子串过滤交叉生效。行内没有分类标记的（旧版本写的行、panic 行）
+      // 按 app 兜底 —— 与后端「归不进其余四层的都算应用层」同一条规则，于是「全部」
+      // 永远等于五类之和，任何一行都不会在过滤里失踪。
+      // Category filter: crosses with level and substring filters. Lines without a tag
+      // (written by older versions, the panic line) fall back to app — the same rule the
+      // backend applies to anything outside the other four layers, so "All" always equals
+      // the union of the five filters and no line disappears.
+      if (catFilter) kept = kept.filter(l => {
+        const m = /\] \[[A-Z]+\](?: \[([a-z]{2,4})\])?/.exec(l);
+        return (m && m[1] ? m[1] : "app") === catFilter;
+      });
       const mark = (line) => {
         const i = q ? line.toLowerCase().indexOf(q) : -1;
         if (i < 0) return esc(line);
@@ -273,6 +296,15 @@
       b.onclick = () => {
         levelFilter = b.dataset.lvl || "";
         document.querySelectorAll("#level-bar .lvl").forEach(x => x.classList.toggle("on", x === b));
+        renderBody();
+      };
+    });
+    // 分类筛选切换：与级别筛选独立工作，交叉生效。
+    // Category toggle: independent from the level filter, both apply at once.
+    document.querySelectorAll("#cat-bar .lvl").forEach(b => {
+      b.onclick = () => {
+        catFilter = b.dataset.cat || "";
+        document.querySelectorAll("#cat-bar .lvl").forEach(x => x.classList.toggle("on", x === b));
         renderBody();
       };
     });

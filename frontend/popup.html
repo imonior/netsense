@@ -565,7 +565,15 @@
       showUpdating();
       try {
         await invoke("run_update", { target: JSON.stringify(target) });
-        // 控制返回说明未被替换进程杀掉（如 brew 退出 0），提示重启用
+        // 安装完成：macOS 与 Windows 都把「杀旧实例 + 拉起新包」交给后端的独立 helper
+        // （relaunch_app），这一调用通常一去不回 —— 本进程会被杀掉，下面的提示多半来不及显示。
+        // 能走到下一行说明 relaunch 没接管（Linux 走包管理器自重启、Homebrew 渠道），旧提示仍是兜底。
+        // Install finished: on macOS and Windows the backend hands "kill the old instance and
+        // relaunch" to a detached helper (relaunch_app); that call normally never returns
+        // because this process gets killed. Reaching the next line means relaunch did not take
+        // over (Linux self-relaunches via the package manager, Homebrew channel) — the old hint
+        // remains the fallback.
+        await invoke("relaunch_app").catch(() => {});
         showUpdateResult(true, d);
       } catch (e) {
         // 失败回退到发布页 + 显式报错

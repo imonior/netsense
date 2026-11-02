@@ -1146,21 +1146,20 @@ fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
         // 不依赖 `set -e`：每个破坏性步骤都用显式守卫，失败即保留旧 app 退出。
         // No `set -e`: every destructive step is explicitly guarded so a failure preserves
         // the current install instead of aborting mid-removal.
+        //
+        // 这个脚本只负责「把新包放到位」，**不杀进程、不重启**：v1.9.1/1.9.2 在这里用
+        // `pgrep` 按路径猜旧进程，路径/大小写对不上就漏杀 —— 旧实例还活着，随后的
+        // `open` 被 LaunchServices 判定为「已在运行」而什么都不做，结局是磁盘已换成
+        // 新版、内存里跑的还是旧版。杀与拉起现在由 [`relaunch`] 的独立 helper 用精确
+        // PID 做（见 `darwin_relaunch_script`），路径不再参与进程匹配。
+        // This script ONLY places the new bundle; it never kills a process or relaunches.
+        // v1.9.1/1.9.2 used `pgrep` to guess the old process by path here; a path/case
+        // mismatch left the old instance alive, the following `open` was judged
+        // "already running" by LaunchServices and did nothing — new bytes on disk, old
+        // version in memory. Kill and relaunch now live in a detached helper behind
+        // [`relaunch`] using an exact PID (see `darwin_relaunch_script`).
         format!("TARGET={}", q(target_app)),
-        // 杀旧进程：按真实 bundle 路径（macOS `killall` 大小写敏感，写死小写会漏掉大写的
-        // `NetSense`，导致旧实例残留、活包被 `rm`、新包拷贝失败）。排除本脚本 PID，避免误杀。
-        // Kill the old process by its real bundle path (killall is case-sensitive on macOS,
-        // so a hard-coded lowercase name misses the uppercase `NetSense` binary and leaves
-        // the live bundle to be removed mid-copy). Exclude our own PID.
         "BIN=$(/usr/bin/basename \"$TARGET\" .app)".to_string(),
-        format!(
-            "for p in $(pgrep -f {}/Contents/MacOS/ 2>/dev/null); do [ \"$p\" = \"$$\" ] && continue; kill -9 \"$p\" 2>/dev/null || true; done",
-            q(target_app)
-        ),
-        // 兜底：再按进程名（大小写不敏感）补一刀，覆盖 pgrep 没列全的边界。
-        // Fallback: also try the process name case-insensitively for any edge pgrep missed.
-        "killall -I netsense 2>/dev/null || true".to_string(),
-        "/bin/sleep 2".to_string(),
         // 新包先拷到临时目录（不动已安装的旧 app）。
         // Stage the new bundle into a temp dir without touching the installed app yet.
         "WORK=$(/usr/bin/mktemp -d \"${TMPDIR:-/tmp}/netsense-update.XXXXXX\")".to_string(),
@@ -1197,17 +1196,172 @@ fn darwin_install_script(new_app: &Path, target_app: &str) -> String {
         "echo \"install: installed version = $(/usr/bin/defaults read \"$TARGET\"/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo UNKNOWN)\"".to_string(),
         "if /usr/bin/xattr -l \"$TARGET\" 2>/dev/null | /usr/bin/grep -q quarantine; then echo \"install: WARN quarantine still present\"; else echo \"install: quarantine cleared\"; fi".to_string(),
         "if /usr/bin/codesign --verify --deep --strict \"$TARGET\" >/dev/null 2>&1; then echo \"install: codesign OK\"; else echo \"install: codesign WARN ($(/usr/bin/codesign -v \"$TARGET\" 2>&1 | head -1))\"; fi".to_string(),
-        // 以登录用户（非 root）重新打开：脚本若被 osascript 提权，裸 open 会成 root。
-        // Relaunch as the console user (avoid launching as root if elevated).
-        "OPEN_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || /usr/bin/whoami)".to_string(),
-        "echo \"install: relaunch as user $OPEN_USER\"".to_string(),
-        "if [ -n \"$OPEN_USER\" ] && [ \"$OPEN_USER\" != \"root\" ]; then".to_string(),
-        "  /bin/launchctl asuser \"$(/usr/bin/id -u \"$OPEN_USER\")\" /usr/bin/open \"$TARGET\"".to_string(),
-        "else".to_string(),
-        "  /usr/bin/open \"$TARGET\"".to_string(),
-        "fi".to_string(),
     ];
     lines.join("\n") + "\n"
+}
+
+/// 重启 helper 脚本：按**精确 PID** 杀掉正在运行的实例、等它彻底退出，再以登录用户
+/// `open -n` 拉起新包。由 [`relaunch`] 写成私有脚本、以独立进程组运行。
+///
+/// 为什么不用 `pgrep` 按路径找进程：路径匹配在「实际安装位置与推导不一致」时静默漏杀，
+/// 旧实例残留导致 LaunchServices 认为 app 已在运行、`open` 什么都不做 —— 这正是
+/// v1.9.1/1.9.2「提示重启但没重启」的根因。PID 由后端传入（就是它自己的进程号），
+/// 没有歧义。
+///
+/// Relaunch helper: kill the running instance by its EXACT pid, wait until it is fully
+/// gone, then `open -n` the bundle as the console user. Written to a private script and
+/// run in its own process group by [`relaunch`].
+///
+/// Path-based `pgrep` is deliberately not used: a path mismatch silently misses the old
+/// instance, LaunchServices then thinks the app is already running and `open` does
+/// nothing — the root cause of "it said restarting but never restarted" in v1.9.1/1.9.2.
+/// The pid comes from the backend (its own process id), so there is no ambiguity.
+#[cfg(target_os = "macos")]
+fn darwin_relaunch_script(target_app: &str, current_pid: u32) -> String {
+    let q = shell_quote;
+    let lines = [
+        "#!/bin/sh".to_string(),
+        // 精确杀掉正在运行的实例。`|| true`：进程已不在（提前崩溃等）不算失败。
+        // Kill the running instance by exact pid. `|| true`: an already-dead process
+        // (e.g. it crashed early) is not a failure.
+        format!("kill -9 {current_pid} 2>/dev/null || true"),
+        // 等旧实例**彻底退出**再拉起（`kill -0` 探测，最多 5 秒）：否则新实例可能被
+        // single-instance 插件判定为重复、把参数转发给正在死去的旧实例后自己退出，
+        // 结局是「什么都没起来」。pid 复用属理论边界，5 秒上限兜底。
+        // Wait until the old instance is FULLY gone before launching (`kill -0` probe,
+        // 5s cap): otherwise the new instance may be judged a duplicate by the
+        // single-instance plugin, forward its args to the dying old one and exit —
+        // leaving nothing running. Pid reuse is a theoretical edge; the cap bounds it.
+        format!("n=0; while kill -0 {current_pid} 2>/dev/null && [ \"$n\" -lt 50 ]; do n=$((n+1)); /bin/sleep 0.1; done"),
+        // 以登录用户（非 root）重新打开：relaunch 若在提权安装链路里被调到，裸 open 会成 root。
+        // Relaunch as the console user (never root, even if reached from an elevated flow).
+        "OPEN_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || /usr/bin/whoami)".to_string(),
+        "echo \"relaunch: as user $OPEN_USER\"".to_string(),
+        "if [ -n \"$OPEN_USER\" ] && [ \"$OPEN_USER\" != \"root\" ]; then".to_string(),
+        format!(
+            "  /bin/launchctl asuser \"$(/usr/bin/id -u \"$OPEN_USER\")\" /usr/bin/open -n {}",
+            q(target_app)
+        ),
+        "else".to_string(),
+        format!("  /usr/bin/open -n {}", q(target_app)),
+        "fi".to_string(),
+        // self-delete: the parent is already dead by this point, so no one else will clean up.
+        // 自删：走到这里时父进程早已不在，没人替它清理。
+        "rm -f \"$0\"".to_string(),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// 装好新包后重启软件（仅 macOS）：把「杀旧实例 + 等它退出 + 拉起新包」交给一个
+/// 独立进程组的 helper 脚本，本函数立即返回。helper 随后会杀掉本进程，所以调用方
+/// （前端）在 `relaunch_app` 返回之后不要再做任何重要的事。
+///
+/// helper 用独立进程组 + 空 stdio 启动：本进程被 `kill -9`（只杀单 PID，不涉进程组）
+/// 时它作为孤儿被 launchd 收养、继续把新包拉起来 —— 重启动作的每一环都在「进程已死」
+/// 之后发生，这是把 v1.9.1 那种「提示重启但没重启」变成确定性行为的关键。
+///
+/// Relaunch the app after a successful install (macOS only): "kill the old instance,
+/// wait for it to exit, launch the new bundle" is handed to a helper script in its own
+/// process group and this function returns immediately. The helper kills this process
+/// shortly after, so callers (the frontend) must not do anything important after
+/// `relaunch_app` returns.
+///
+/// The helper starts with its own process group and null stdio: when this process is
+/// `kill -9`-ed (single pid, no group signal) the helper is orphaned to launchd and
+/// still launches the new bundle. Every step of the restart happens strictly after the
+/// old process is gone — that is what turns v1.9.1's "said restarting but never did"
+/// into deterministic behavior.
+#[cfg(target_os = "macos")]
+pub fn relaunch() -> Result<(), String> {
+    let target = darwin_install_target();
+    let script = darwin_relaunch_script(&target, std::process::id());
+    let path = write_private_script("update-relaunch", &script)?;
+    use std::os::unix::process::CommandExt as _;
+    let spawned = std::process::Command::new("/bin/sh")
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn();
+    match spawned {
+        Ok(_) => {
+            crate::log::info(&i18n::tf("upd.relaunching", &[("target", &target)]));
+            Ok(())
+        }
+        Err(e) => Err(i18n::tf("upd.relaunch_failed", &[("error", &e.to_string())])),
+    }
+}
+
+/// Linux 不在这里接管重启：`install_linux` 已经在包管理器覆盖文件后自行
+/// `relaunch_linux_app()` 拉起新版，前端保留的「请手动重启」提示只是兜底。
+/// Linux does not take over here: `install_linux` already self-relaunches via
+/// `relaunch_linux_app()` after the package manager swaps the binary in place.
+#[cfg(target_os = "linux")]
+pub fn relaunch() -> Result<(), String> {
+    Ok(())
+}
+
+/// Windows 升级后需要显式拉起新版：静默 NSIS/MSI 安装器不会自动启动程序，而 `install_windows`
+/// 只负责把文件落到位。这里精确杀掉本进程（旧版本）再以独立进程组启动安装目录里的新 exe，
+/// 与 macOS 的 detached helper 思路一致（见上面的 macOS 分支）。
+/// Windows must explicitly relaunch: the silent NSIS/MSI installer does not auto-start, and
+/// `install_windows` only drops the files. We kill this exact process (the old build) and
+/// launch the new exe from the install dir in its own process group — the same detached
+/// approach as the macOS branch above.
+#[cfg(target_os = "windows")]
+pub fn relaunch() -> Result<(), String> {
+    // 找不到安装目录就交给用户手动启动：宁可什么都不做，也不要杀掉旧进程后没新进程顶上。
+    // If we cannot locate the install dir, leave the app running — better than killing the
+    // old process with nothing to replace it.
+    let dir = match current_install_dir() {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "NetSense.exe".to_string());
+    let new_exe = Path::new(&dir).join(&exe_name).to_string_lossy().into_owned();
+    let script = windows_relaunch_script(std::process::id(), &new_exe);
+    let mut cmd = Command::new("powershell");
+    hide_console(&mut cmd);
+    cmd.args(["-NoProfile", "-Command", &script]);
+    // 独立进程组 + 脱离父进程：旧 netsense 被 Stop-Process 后，本 helper 仍存活并把新 exe 拉起。
+    // Own process group + detached: once the old netsense is killed by Stop-Process, this
+    // helper stays alive and launches the new exe.
+    use std::os::windows::process::CommandExt as _;
+    cmd.creation_flags(0x00000200 | 0x00000008); // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+    match cmd.spawn() {
+        Ok(_) => {
+            crate::log::info(&i18n::tf("upd.relaunching", &[("target", &new_exe)]));
+            Ok(())
+        }
+        Err(e) => Err(i18n::tf("upd.relaunch_failed", &[("error", &e.to_string())])),
+    }
+}
+
+/// 生成 Windows 升级重启用的 PowerShell 脚本（纯函数，便于单测钉住「先杀后起」的顺序）。
+/// 顺序不能反：先 `Test-Path` 确认新 exe 已就位，再 `Stop-Process` 精确杀旧 PID，最后
+/// `Start-Process` 拉起新 exe；否则 single-instance 会把新实例转发给旧进程、新实例自己退出，
+/// 结果旧版本继续跑。
+/// Pure helper that builds the Windows relaunch PowerShell script (testable). Order
+/// matters: verify the new exe exists, then kill the exact old PID, then start the new one —
+/// otherwise the single-instance plugin forwards the new instance to the old process and the
+/// new instance exits on its own, leaving the old build running.
+#[cfg(target_os = "windows")]
+fn windows_relaunch_script(old_pid: u32, new_exe: &str) -> String {
+    // 路径里的单引号在 PowerShell 单引号字符串里要写成两个单引号，避免语法断裂。
+    // A single quote inside a PowerShell single-quoted string must be doubled.
+    let safe = new_exe.replace('\'', "''");
+    format!(
+        "Start-Sleep -Milliseconds 800; \
+         if (Test-Path -LiteralPath '{safe}') {{ \
+           Stop-Process -Id {old_pid} -Force -ErrorAction SilentlyContinue; \
+           Start-Sleep -Milliseconds 300; \
+           Start-Process -FilePath '{safe}' \
+         }}",
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1616,7 +1770,7 @@ mod tests {
     /// `killall`; an invalid script would abort the upgrade midway.
     #[cfg(target_os = "macos")]
     #[test]
-    fn darwin_install_script_is_valid_shell_and_kills_by_path() {
+    fn darwin_install_script_is_valid_shell_and_never_kills_or_relaunches() {
         let script = darwin_install_script(
             Path::new("/tmp/netsense-update-staging/NetSense.app"),
             "/Applications/NetSense.app",
@@ -1631,11 +1785,16 @@ mod tests {
             "install script is not valid shell:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        // 按真实路径杀（而非写死小写进程名，且排除本脚本 PID）。
-        // Kill by real bundle path (not a hard-coded lowercase name) and never our own PID.
-        assert!(script.contains("pgrep -f '/Applications/NetSense.app'/Contents/MacOS/"));
-        assert!(script.contains("[ \"$p\" = \"$$\" ] && continue"));
-        assert!(script.contains("killall -I netsense"));
+        // 安装脚本不碰进程、不重启：杀与拉起是 `relaunch` helper 的职责，且必须按
+        // 精确 PID 做。按路径 `pgrep` 猜进程是 v1.9.1「提示重启但没重启」的根因，
+        // 这里钉死它不许回来。
+        // The install script never touches processes and never relaunches: killing and
+        // relaunching belong to the `relaunch` helper, by exact PID. Path-based `pgrep`
+        // caused v1.9.1's "said restarting but never did" — pinned out for good.
+        assert!(!script.contains("pgrep"), "install script must not match processes by path");
+        assert!(!script.contains("killall"), "install script must not kill by process name");
+        assert!(!script.contains("kill "), "install script must not kill anything");
+        assert!(!script.contains("open "), "install script must not relaunch; that is relaunch()'s job");
         // 失败安全：先 mktemp 暂存新包，再校验，最后才删旧包。
         // Fail-safe: stage to a temp dir, verify, only then remove the installed app.
         assert!(script.contains("mktemp"));
@@ -1720,12 +1879,6 @@ mod tests {
         // Happy path: new bundle lands, old sentinel replaced with NEW.
         let out = Command::new("sh").arg(&sp).output().unwrap();
         let so = String::from_utf8_lossy(&out.stdout);
-        // `open` 在测试里打不开 fake .app（"incorrect executable format"）会返回非零，
-        // 但那只是测试环境产物；真实签名 app 能正常打开。升级是否成功看文件是否真落位，
-        // 不看 `open` 的退出码。
-        // `open` can't launch the fake .app in tests ("incorrect executable format") and returns
-        // non-zero, but that is only a test artifact; a real signed app opens fine. Upgrade
-        // success is judged by whether the files actually landed, not by `open`'s exit code.
         assert!(
             so.contains("new bundle in place"),
             "install script did not report a successful place; stdout={}\nstderr={}",
@@ -1777,6 +1930,38 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 重启 helper：必须按**精确 PID** 杀进程、等它退出、`open -n` 拉起，绝不允许
+    /// 按路径 `pgrep` 猜进程 —— 后者就是 v1.9.1「提示重启但没重启」的根因。
+    /// The relaunch helper must kill by EXACT pid, wait for the exit, and relaunch with
+    /// `open -n` — never guess processes by path via pgrep, which caused v1.9.1's
+    /// "said restarting but never did".
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_relaunch_script_kills_by_exact_pid_and_relaunches() {
+        let script = darwin_relaunch_script("/Applications/NetSense.app", 4242);
+        let p = std::env::temp_dir().join("netsense-relaunch-script.sh");
+        std::fs::write(&p, &script).unwrap();
+        let out = std::process::Command::new("sh").arg("-n").arg(&p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "relaunch script is not valid shell:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // PID 是写进脚本的那个数字：杀与探测（等待退出）都必须用它。
+        // The pid is the literal number baked into the script: both the kill and the
+        // wait-for-death probe must use it.
+        assert!(script.contains("kill -9 4242"), "must kill the exact pid passed in");
+        assert!(script.contains("kill -0 4242"), "must wait until the pid is fully gone");
+        assert!(script.contains("open -n '/Applications/NetSense.app'"), "must relaunch with open -n on the target");
+        // 按路径猜进程的旧写法（v1.9.1 根因）不许回来。
+        // The old path-guessing approach (root cause of v1.9.1) must not return.
+        assert!(!script.contains("pgrep"));
+        assert!(!script.contains("killall"));
+        // 脚本自删：父进程此刻已死，没人替它清理。
+        // Self-delete: the parent is gone by then, nobody else cleans up.
+        assert!(script.contains("rm -f \"$0\""));
     }
 
     #[test]
@@ -2159,5 +2344,30 @@ mod tests {
         // 否则升级上来的用户会静默丢掉水位（表现为「旧清单又能用了」）。
         let legacy: TrustState = serde_json::from_str(r#"{"seq":7,"version":"1.4.0"}"#).unwrap();
         assert_eq!(legacy.seq, 7);
+    }
+
+    /// Windows 重启 helper 必须「先确认新 exe 就位、再按精确 PID 杀旧进程、最后拉起新 exe」，
+    /// 顺序写反就会把新实例转发给旧进程、升级白做（与 macOS 分支要对齐的契约）。
+    /// The Windows relaunch helper must verify the new exe exists, kill the exact old pid,
+    /// then start the new exe — reversed order forwards the new instance to the old process.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_relaunch_script_kills_old_then_starts_new() {
+        let s = windows_relaunch_script(
+            4242,
+            "C:\\Program Files\\NetSense\\NetSense.exe",
+        );
+        // 新 exe 必须先被确认存在，才轮到「杀旧进程」—— 否则可能杀完旧进程新 exe 又不在。
+        let check = s.find("Test-Path").expect("must verify the new exe exists first");
+        let kill = s
+            .find("Stop-Process -Id 4242")
+            .expect("must kill the exact old pid");
+        let start = s
+            .find("Start-Process -FilePath")
+            .expect("must launch the new exe");
+        assert!(check < kill, "verify new exe before killing the old process");
+        assert!(kill < start, "kill the old process before starting the new one");
+        // 路径里的反斜杠与空格不应破坏脚本（PowerShell 单引号字符串）。
+        assert!(s.contains("C:\\Program Files\\NetSense\\NetSense.exe"));
     }
 }

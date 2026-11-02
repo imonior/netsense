@@ -78,6 +78,17 @@ pub struct AppState {
     /// 存下这份载荷后，内容投递不再依赖加载时序：显示窗口时定向重发一次
     /// （见 `engine::show_applied_window`），页面加载完也会主动来取（`ipc::get_last_applied`）。
     pub last_applied: Mutex<Option<serde_json::Value>>,
+    /// 最近一次「检查更新」完成的本地时刻（RFC3339 字符串），仅存于本进程内存。
+    ///
+    /// 托盘面板开机的静默检查与 About 界面的手动检查都走 `check_update`，都会记下
+    /// 这一刻；设置窗口打开时经 `get_app_settings` 的 `checked_at` 回显「上次检查」。
+    /// 重启后由开机那次静默检查重新播种，不落盘。
+    /// Local time of the last completed update check (RFC3339), in-memory only. Both
+    /// the tray's silent startup check and the About tab's manual check go through
+    /// `check_update` and record it; the settings window echoes it as "last checked"
+    /// via `checked_at` in `get_app_settings`. Re-seeded by the startup check after a
+    /// restart; never persisted to disk.
+    pub last_update_check: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -120,6 +131,7 @@ impl AppState {
             watcher: Mutex::new(None),
             applied_show_pending: AtomicBool::new(false),
             last_applied: Mutex::new(None),
+            last_update_check: Mutex::new(None),
         }
     }
 

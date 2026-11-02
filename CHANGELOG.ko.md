@@ -4,6 +4,28 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.9.3] - 2026-11-01
+
+### 추가
+
+- **로그 창에 수준 필터와 교차하는 「분류」 축이 생겼습니다.** 로그 줄은 쓰이는 시점에 "어떤 모듈이 남겼는지"로 자동으로 다섯 분류(네트워크 / 자동화 / 업데이트 / 설정 / 앱)에 귀속됩니다. `log.rs`의 네 래퍼 함수는 `#[track_caller]`를 가지고 호출자의 소스 파일에서 층을 판별하므로, 100+ 호출 지점은 한 줄도 바꿀 필요가 없었습니다. 줄 형식은 수준 뒤에 분류 태그(`[INFO] [net]`)를 붙입니다. 태그 없는 옛 줄과 panic 줄은 필터 시 「앱」으로 폴백하며, 이는 백엔드의 "나머지 네 층에 들지 않으면 앱 층" 규칙과 같아서 「전체」는 항상 다섯 분류의 합집합이 됩니다. 창에는 분류 버튼 행이 추가되어 수준·부분 문자열 필터와 삼중으로 겹쳐 적용됩니다. (`src-tauri/src/log.rs`, `frontend/logs.html`, `src-tauri/src/i18n/`)
+- **설정 창의 About 페이지를 WireGuard Plus 스타일로 다시 만들었습니다.** 1부: 왼쪽에 앱 아이콘, 오른쪽에 아이콘 높이에 맞춘 네 줄 — 이름, 소개 문구, 버전과 확인 상태(녹색 = 최신 / 빨강 = 새 버전 발견), 「지금 확인」 버튼과 마지막 확인 시각. 2부: 소프트웨어 상세 소개. 3부: 네 개의 빨간 링크(GitHub / 릴리스 노트 / 문제 보고 / 라이선스 정보)가 저장소의 해당 페이지로 이어집니다. 창의 닫기 버튼은 빨간 테두리로 우하단으로 옮겨졌고, 좌하단에는 `Develop by @//imonior/ ©2026 NetSense` 서명 푸터가 놓였습니다(작성자명은 `github.com/imonior`로 가는 빨간 링크). (`frontend/settings.html`, `frontend/icon.png`)
+- **About 페이지가 마지막 업데이트 확인 시각을 기억합니다.** `check_update`는 완료할 때마다 프로세스 내 시각을 기록하고, About는 창이 열리는 순간 `get_app_settings`로 되돌려 보여 줍니다. 트레이의 기동 시 조용한 확인도 같은 명령을 거치므로 창을 열면 이미 값이 있습니다. (`src-tauri/src/ipc.rs`, `src-tauri/src/state.rs`)
+
+### 변경
+
+- **설정 창의 「업데이트」 섹션 이름이 「프록시」로 바뀌었습니다.** 이 섹션이 본래 담고 있던 것은 네트워크 출구의 선택(프록시 3 상태, 미러, 속도 측정, 수동 추가)이었습니다. 「업데이트 확인」 버튼과 그 결과 영역은 About 페이지로 통째로 옮겨져, 상태·진행 바·「지금 업데이트 / 릴리스 페이지」 버튼이 한곳에 모였습니다. (`frontend/settings.html`)
+
+### 수정
+
+- **macOS 앱 내 업그레이드가 이제 실제로 새 버전으로 재시작합니다.** v1.9.1/1.9.2의 설치 스크립트는 `pgrep`으로 bundle 경로에서 이전 프로세스를 추측했고, 경로나 대소문자가 어긋나면 놓쳐 이전 인스턴스가 살아남았습니다. 그러면 LaunchServices가 "이미 실행 중"으로 판정해 `open`은 아무 것도 하지 않았습니다 — 디스크는 새 버전, 메모리는 옛 버전인데 UI만 "재시작 중"이라고 말하고 있던 것입니다. 이제 설치 스크립트는 새 패키지를 제자리에 놓는 일만 하고 프로세스에는 전혀 손대지 않습니다. 새 명령 `relaunch_app`이 "정확한 PID로 이전 인스턴스 종료 → `kill -0` 폴링으로 완전 종료 확인 → 로그인 사용자로 `open -n` 기동"을 독립 프로세스 그룹의 헬퍼 스크립트에 맡기고, 프런트엔드는 `run_update` 성공 후 호출합니다. 대기 단계가 single-instance 플러그인과의 경합을 막습니다(방치하면 새 인스턴스가 죽어가는 이전 인스턴스에 인수를 전달한 뒤 스스로 종료합니다). Linux는 「수동으로 재시작해 주세요」 폴백을 유지합니다(패키지 관리자가 스스로 재시작함). (`src-tauri/src/update.rs`, `src-tauri/src/ipc.rs`, `src-tauri/src/main.rs`, `frontend/popup.html`, `frontend/settings.html`)
+
+- **자동화 편집기의 첫 화면이 Windows / macOS에서 `get_status`로 막히지 않습니다.** `get_status`가 공급하는 것은 상태 표시줄·배지·엔진 뷰뿐(폼 자체는 아님)인데도, 열거와 함께 `loadAllInner` 두 번째 프레임의 중요한 경로에 묶여 있었습니다 —— 그 비용(Windows에서는 PowerShell 시작 체인 전체, macOS 폴백에서는 `system_profiler` 탐색) 때문에 폼이 이미 그려진 후에도 이 위젯들은 몇 초간 빈 채로 남았습니다. 이제 중요한 경로에서 분리해 백그라운드 `loadStatus()`(이미 지연시킨 `get_installed_apps`와 같은 형태)로 옮겼습니다. 폼은 저렴한 config/language/theme 세 가지 후에 그려지고, 열거가 다음 프레임에서 SSID/인터페이스/프린터 후보를 채우며, 상태 스냅샷은 `get_status`가 돌아오면 갱신됩니다. 가져오기에 실패하면 "없음"으로 취급하고 다음 엔진 브로드캐스트에서 재시도하며, 창 전체를 실패시키지 않습니다. (`frontend/editor.html`)
+
+- **Windows 앱 내 업그레이드가 이제 새 버전으로 자동 재시작합니다.** 자동 NSIS/MSI 설치 프로그램은 파일만 배치하고 프로그램을 시작하지 않으며, `install_windows`는 재시작 없이 돌아가고 Windows의 `relaunch_app`은 아무 것도 하지 않아서, 업그레이드 후 이전 프로세스는 사라지고 새 것을 시작하는 주체가 없어 사용자가 바탕화면 바로가기를 직접 열어야 했습니다. 이제 `relaunch()`는 detached PowerShell 헬퍼(독립 프로세스 그룹, 부모에서 분리)를 시작해, 먼저 설치 위치에 새 exe가 있음을 확인하고, 이어 이 프로세스를 정확한 PID로 종료시킨 뒤 새 exe를 기동합니다. 종료 후 기동이므로 single-instance 플러그인이 새 인스턴스를 죽어가는 이전 인스턴스에 전달하는 일이 없습니다. (`src-tauri/src/update.rs`, `frontend/popup.html`)
+
+- **트레이 메뉴와 편집기의 조건 패널이 더 이상 `get_status` 호출이 거부되어 깨지지 않습니다.** `get_status`는 필수 `needs_bssid` 인자를 받았고, 해당 IPC 키의 정확한 대소문자는 빌드 시 매크로가 결정합니다. 실행 중인 바이너리와 프런트엔드의 대소문자가 어긋나면(보통 증분 빌드로 인한 오래된 빌드가 원인) `get_status` 전체가 "필수 키 없음"으로 거부되어 트레이의 네트워크 정보(적용된 프로필, 인터페이스, VPN, 빠른 전환이 모두 `-`로 표시)가 비워지고 편집기의 조건 패널이 렌더링되지 않았습니다. 인자가 이제 기본값이 있는 선택형이 되어 호출이 거부되는 일은 없으며, 최악의 경우 BSSID/RSSI 샘플링만 건너뜁니다. (`src-tauri/src/ipc.rs`, 영향 `frontend/popup.html`, `frontend/editor.html`, `frontend/applied.html`)
+
 ## [1.9.2] - 2026-11-01
 
 ### 수정
@@ -24,7 +46,7 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 
 ### 추가
 
-- **설정의 About 페이지에 작성자와 프로젝트 GitHub 페이지 링크를 표시했습니다.** 이 카드에는 지금까지 플랫폼과 버전만 있었습니다. 이제 작성자(`imonior`)와 `github.com/imonior/netsense` 링크를 표시하며, 클릭하면 기존 `open_url` 명령을 통해 시스템 브라우저로 열립니다(`preventDefault`를 붙여 WebView가 직접 페이지를 이동하는 것을 막습니다). i18n 키 2개(`sett.author`, `sett.github`)를 추가해 5개 언어에 모두 반영했으며, 단어표가 702키가 되었습니다. (`frontend/settings.html`, `src-tauri/src/i18n/`)
+- **설정의 About 페이지에 작성자와 프로젝트 GitHub 페이지 링크를 표시했습니다.** 이 카드에는 지금까지 플랫폼과 버전만 있었습니다. 이제 작성자(`imonior`)와 `github.com/imonior/netsense` 링크를 표시하며, 클릭하면 기존 `open_url` 명령을 통해 시스템 브라우저로 열립니다(`preventDefault`를 붙여 WebView가 직접 페이지를 이동하는 것을 막습니다). i18n 키 2개(`sett.author`, `sett.github`)를 추가해 5개 언어에 모두 반영했으며, 단어표가 715키가 되었습니다. (`frontend/settings.html`, `src-tauri/src/i18n/`)
 - **모든 창이 페이지 초기화 완료 시 백엔드에 보고합니다.** 다섯 창 모두 init 마지막에 새 `frontend_ready` 명령을 호출하고(자신의 창 라벨과 함께), 백엔드는 `frontend ready: <win>`을 기록합니다. 다시 "창이 하얗게" 나오는 경우 로그만으로 이분할할 수 있습니다: ready가 모두 있으면 스크립트는 실행된 것이고 고장은 렌더링 층에 있으며, 한 줄도 없으면 WebView가 스크립트를 아예 실행하지 않은 것입니다. 스모크 테스트의 첫 화면 명령 계약에도 이 하트비트를 못박았습니다. (`frontend/*.html`, `ipc.rs`, `main.rs`, `scripts/editor-smoke.mjs`)
 - **앱 내 업그레이드의 설치 단계가 이제 앱 로그에 기록됩니다 — 성공 시에도요.** macOS 설치 스크립트는 각 단계에서 echo하고(이전 bundle 삭제, 새 bundle 복사, 로그인 사용자로 재실행), `install_macos`는 모두 성공했을 때도 스크립트 출력을 로그에 씁니다. 이전에는 성공 경로에 한 줄도 기록하지 않아, 업그레이드에 문제가 생기면 확인할 수 있는 것이 검증 기록 한 줄뿐이었습니다. (`src-tauri/src/update.rs`)
 

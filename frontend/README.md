@@ -101,7 +101,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 702 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 715 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -216,7 +216,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，64 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，65 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -280,6 +280,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `open_url` | `url` | 打开 URL（Release 页 / 下载链接） |
 | `check_update` | — | 查 GitHub 最新版、挑本平台安装包、判断 Homebrew 渠道，并给出「这次能不能就地装」的判定（`installable` / `install_note`） |
 | `run_update` | `target`（`check_update` 给出的下载信息，JSON 字符串） | 下载 + 校验 + 安装；进度走 `netsense://update_progress` |
+| `relaunch_app` | — | 装好新包后重启软件（macOS）：后端把「杀旧实例 + 等它退出 + `open -n` 新包」交给一个独立进程组的 helper，本命令立即返回、随后本进程被杀掉；其他平台无操作（前端保留「请手动重启」提示兜底） |
 | `quit_app` | — | 停监视、退出 |
 
 ## 验证方式

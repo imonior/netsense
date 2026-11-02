@@ -373,6 +373,8 @@
   let appList = [];     // 本机已装程序（[{name, path}]）—— 启动程序动作的候选
   let appListLoading = false; // `get_installed_apps` 是否正在后台补拉，避免重复触发
   let appListReady = false;   // 是否已经补拉过一次（成功与否都算），避免 `loadAll` 每趟重扫
+  let statusLoading = false;  // `get_status` 是否正在后台补拉，避免重复触发
+  let statusReady = false;    // 是否已经补拉过一次（成功与否都算），避免 `loadAll` 每趟重扫
   let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
   let dirty = false;
@@ -1641,36 +1643,35 @@
       loadFailed(e);
       return;
     }
-    // 剩下这两份（一条枚举 + `get_status`）每一项都要拉起系统子进程：Windows 上每一趟是一整条
-    // PowerShell 启动链，macOS 的降级链里 `get_status` 那一趟可以走到几秒。它们喂的是状态条、
-    // 徽标与下拉候选，不是表单本身 —— 让它们排进首绘的关键路径，就是现场那句「自动化配置点开
-    // 以后空白好几秒」。只有 `get_status` 的失败会落到下面的 catch：它带着「当前网络」那几项
-    // 地址和引擎视图，取不到就等于窗口没起来，不该装作没事。
+    // 枚举（网络 / 网卡 / 打印机）仍要拉系统子进程，但已由后端 `get_editor_enumerations`
+    // 合成一条 IPC、内部并发，比 `get_status` 便宜，且它喂的是**核心填表候选**（SSID / 接口 /
+    // 打印机），必须趁首绘后第一帧落地，不能无限延迟。
+    //
+    // `get_status` 则是另一回事：Windows 上每一趟是一整条 PowerShell 启动链、macOS 降级链里
+    // 还含一次几秒的 `system_profiler`，而它只喂状态条、徽标与引擎视图（非填表字段）。把它
+    // 和第二帧的枚举绑在同一个 `await` 上，就是 Windows / macOS 打开编辑器时「状态区空转几秒」
+    // 的来由。现在把它**移出关键路径**、改走后台补拉（见 [`loadStatus`]）：首绘后枚举一回来
+    // 就把候选填好，状态快照到了再单独刷新 —— 两个平台都「打开即满屏可交互」。
     try {
-      const [[nets, nics, adapters, printers], rawSt] = await Promise.all([external, invoke("get_status", { needs_bssid: false })]);
+      const [nets, nics, adapters, printers] = await external;
       wifiList = asArray(nets);
       nicList = asArray(nics);
       adapterList = asArray(adapters);
       printerList = asArray(printers);
-      const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
-      statusSnap = st.status || null;
-      view = st.engine || null;
       // 记下这份网卡清单是跟着哪个身份快照取来的（见 [`refreshNics`]）。取失败就当没有：
       // 留空键，下一次广播会再试一遍，而不是把这个窗口的接口信息永远冻在空上。
       nicsKey = nicsFailed ? "" : nicsFp();
-      // 语言与配色再以这一份快照对一次：两处来源本是同一句 `i18n::current()` / `theme_now()`，
-      // 但首绘那一瞬正好有人换了档时，快照里的是新的。
-      langShown = st.language || langShown;
-      setLang(langShown);
-      applyTheme(st.theme);
-      // 状态徽标和下拉候选都出自上面这几份，所以要重画一次才出现。用户在这不到一秒里
+      // 枚举候选都出自上面这几份，所以要重画一次才出现。用户在这不到一秒里
       // 已经动过表单时不重画 —— 那会把焦点从他正在填的那一格拿走；候选晚一步（跟着下一次
       // 自然重画）出现，不影响他手上这一条。广播那条路径同理，见 [`refreshLive`]。
       if (dirty) refreshLive(); else renderAll();
     } catch (e) {
       loadFailed(e);
     }
-    // 后台补拉已装程序：不进首屏关键路径（见上面 external 处的注释）。`appList` 是机器级
+    // 后台补拉状态快照（见上面注释）：不进首屏关键路径，Windows / macOS 上都不拖慢打开。
+    // 失败当作没有（和枚举 `nicsFailed` 一致），下次广播再试，不在这里把窗口判死。
+    loadStatus();
+    // 后台补拉已装程序：不进首屏关键路径（见 [`loadInstalledApps`]）。`appList` 是机器级
     // 缓存、与配置无关，所以即便随后又有一次 `loadAll` 也不会重复扫描 —— 它已经在了。
     loadInstalledApps();
   }
@@ -1694,6 +1695,38 @@
     } finally {
       appListLoading = false;
       appListReady = true;
+    }
+  }
+
+  /* —————————————————————— 状态快照后台补拉 —————————————————————— */
+
+  /// 后台补拉引擎状态快照（喂状态条 / 徽标 / 引擎视图）。从不在首屏关键路径上：
+  // Windows 上一趟是整条 PowerShell 启动链、macOS 降级链里含一次几秒的 `system_profiler`，
+  // 而它只喂状态展示、非填表字段 —— 让它占第二帧关键路径，就是 Windows / macOS 打开编辑器时
+  // 「状态区空转几秒」的来由。移到这里后，首绘只等枚举，状态到了再单独刷新。
+  // 与 `appListReady` 同理：带 TTL 的引擎快照缓存、与配置无关，第二趟 `loadAll` 直接复用，不重采。
+  async function loadStatus() {
+    // 已经补拉过（成功与否都算）就直接复用：它是引擎快照缓存、与配置无关，`loadAll` 每趟都
+    // 会调一次，但第二趟起不该再起一次 PowerShell / system_profiler 采样。进行中也跳过，避免并发重入。
+    if (statusLoading || statusReady) return;
+    statusLoading = true;
+    try {
+      const rawSt = await invoke("get_status", { needs_bssid: false }).catch(() => null);
+      if (!rawSt) return; // 取不到就当没有，下次广播再试，不在这里把窗口判死
+      const st = typeof rawSt === "string" ? JSON.parse(rawSt) : rawSt;
+      statusSnap = st.status || null;
+      view = st.engine || null;
+      // 语言与配色再以这一份快照对一次：两处来源本是同一句 `i18n::current()` / `theme_now()`，
+      // 但首绘那一瞬正好有人换了档时，快照里的是新的。
+      langShown = st.language || langShown;
+      setLang(langShown);
+      applyTheme(st.theme);
+      // 状态徽标出自上面这几份，所以要重画一次才出现。用户正在编辑时不抢焦点（走 `refreshLive`
+      // 原地更新）；停手后的下一次自然重画里出现，不影响手上这一条。
+      if (dirty) refreshLive(); else renderAll();
+    } finally {
+      statusLoading = false;
+      statusReady = true;
     }
   }
 

@@ -4,6 +4,28 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.9.3] - 2026-11-01
+
+### 新增
+
+- **日志窗新增「分类」维度，与级别过滤交叉生效。** 日志行在写入时按「产生它的模块」自动归入五类（网络 / 自动化 / 升级 / 配置 / 应用）：`log.rs` 的四个包装函数带 `#[track_caller]`，按调用方源文件归层，100+ 个调用点一行都不用改。行格式在级别之后插入分类标记（`[INFO] [net]`）；没有标记的旧行与 panic 行在过滤时按「应用」兜底 —— 与后端「归不进其余四层的都算应用层」同一条规则，于是「全部」永远等于五类之和。日志窗加了一排分类按钮，与级别、子串过滤三维叠加。 (`src-tauri/src/log.rs`、`frontend/logs.html`、`src-tauri/src/i18n/`)
+- **设置窗口的 About 页按 WireGuard Plus 风格重做。** 第一部分：应用图标在左，右侧四行与图标高度平齐 —— 名称、简介、版本 + 检测状态（绿 = 已是最新 / 红 = 网络上有更新的版本），以及「立即检查」按钮与上次检查时间；第二部分是软件详细介绍；第三部分为四个红色链接（GitHub / 发行说明 / 报告问题 / 许可证），指向仓库对应页面。窗口关闭按钮移到右下角（红色描边），左下角加署名页脚 `Develop by @//imonior/ ©2026 NetSense`，作者句柄是红色链接指向 `github.com/imonior`。 (`frontend/settings.html`、`frontend/icon.png`)
+- **About 页现在记得上次检查更新的时间。** `check_update` 每次完成都记下进程内时刻，About 打开时经 `get_app_settings` 当场回显；托盘开机的静默检查走同一条命令，所以窗口一开就有值。 (`src-tauri/src/ipc.rs`、`src-tauri/src/state.rs`)
+
+### 变更
+
+- **设置窗口的「更新」区改名为「代理」。** 这个区里放的本来就是网络出口的选择（代理三态、镜像、测速、手动添加）；「检查更新」按钮及其结果区整体搬进 About 页 —— 检测状态、进度条、「立即更新 / 发布页」按钮都在那里，一处看完。 (`frontend/settings.html`)
+
+### 修复
+
+- **macOS 应用内升级现在会真的重启进新版本。** v1.9.1/1.9.2 的安装脚本用 `pgrep` 按 bundle 路径猜旧进程，路径/大小写对不上就漏杀 —— 旧实例还活着，LaunchServices 判定 app「已在运行」，`open` 什么都不做：磁盘已是新版、内存还是旧版，界面却提示「重启软件完成」。现在安装脚本只负责把新包放到位、完全不碰进程；新增 `relaunch_app` 命令把「按精确 PID 杀旧实例 → `kill -0` 轮询确认彻底退出 → 以登录用户 `open -n` 拉起新包」交给一个独立进程组的 helper 脚本，前端在 `run_update` 成功后调用。等待环节堵死了与单实例插件的竞态（否则新实例可能把参数转发给正在死去的旧实例后自己退出）。Linux 保留「请手动重启」兜底（其包管理器会自重启）。 (`src-tauri/src/update.rs`、`src-tauri/src/ipc.rs`、`src-tauri/src/main.rs`、`frontend/popup.html`、`frontend/settings.html`)
+
+- **自动化编辑器在 Windows / macOS 上不再因 `get_status` 卡住首屏。** `get_status` 只喂状态条、徽标与引擎视图（不是表单本身），却和枚举一起绑在 `loadAllInner` 第二帧的关键路径上 —— 它的开销（Windows 上整条 PowerShell 启动链、macOS 降级链里的 `system_profiler` 探测）会让这些控件在表单早已绘出后仍空转几秒。现在它被移出关键路径、改走后台 `loadStatus()`（与早已延迟的 `get_installed_apps` 同一形态）：表单在廉价的 config/language/theme 三件套后绘出，枚举在下一帧填好 SSID/接口/打印机候选，状态快照等 `get_status` 回来再刷新。取失败当作「没有」、下次引擎广播再试，不再把整窗判死。（`frontend/editor.html`）
+
+- **Windows 应用内升级现在会自动重启进新版本。** 静默 NSIS/MSI 安装器只把文件落到位、不会自动启动程序，而 `install_windows` 返回时不做重启、`relaunch_app` 在 Windows 上又是空操作 —— 于是升级后旧进程已不在、又没人拉起新进程，只能手动点桌面图标。现在 `relaunch()` 会派生一个 detached 的 PowerShell helper（独立进程组、脱离父进程）：先确认安装目录里的新 exe 已就位，再按精确 PID 杀掉本进程，最后拉起新 exe。先杀后起可避免 single-instance 插件把新实例转发给正在死去的旧实例。 (`src-tauri/src/update.rs`、`frontend/popup.html`)
+
+- **状态栏菜单与编辑器的条件面板不再因为一次被拒绝的 `get_status` 调用而崩坏。** `get_status` 此前要求必填 `needs_bssid` 参数，而该 IPC key 的精确大小写由编译期 macro 决定；一旦运行中的二进制与前端在大小写上对不上（通常是增量构建产生的陈旧构建），整条 `get_status` 调用就会被以「缺少必填参数」拒绝，从而把状态栏的网络信息（生效配置、网卡、VPN、快速切换区全部显示为 `-`）清空，并让编辑器的条件面板无法渲染。现在该参数改为可选且带默认值，调用再也不会被拒 —— 最坏情况只是跳过 BSSID/RSSI 采样。 (`src-tauri/src/ipc.rs`，影响 `frontend/popup.html`、`frontend/editor.html`、`frontend/applied.html`)
+
 ## [1.9.2] - 2026-11-01
 
 ### 修复
@@ -24,7 +46,7 @@ NetSense 的所有重要变更记录于此。格式基于
 
 ### 新增
 
-- **Settings → About 页现在列出作者并链接项目 GitHub 主页。** 该卡片此前只有平台与版本。现在列出作者（`imonior`）与 `github.com/imonior/netsense` 链接，点击经既有 `open_url` 命令用系统浏览器打开（并 `preventDefault`，防止 WebView 自己导航走）。新增两个 i18n 键（`sett.author`、`sett.github`），五语同步，词表达到 702 键。（`frontend/settings.html`、`src-tauri/src/i18n/`）
+- **Settings → About 页现在列出作者并链接项目 GitHub 主页。** 该卡片此前只有平台与版本。现在列出作者（`imonior`）与 `github.com/imonior/netsense` 链接，点击经既有 `open_url` 命令用系统浏览器打开（并 `preventDefault`，防止 WebView 自己导航走）。新增两个 i18n 键（`sett.author`、`sett.github`），五语同步，词表达到 715 键。（`frontend/settings.html`、`src-tauri/src/i18n/`）
 - **每个窗口现在会在页面初始化完成后向後端报到。** 五个窗口都在 init 尾部调用新的 `frontend_ready` 命令（带上各自的窗口标签），后端记一条 `frontend ready: <win>`。再遇「窗口全白」，只看日志就能二分：ready 齐全 = 脚本跑了、故障在渲染层；一条都没有 = WebView 根本没执行脚本。冒烟测试的首屏命令契约也把这条心跳钉住了。（`frontend/*.html`、`ipc.rs`、`main.rs`、`scripts/editor-smoke.mjs`）
 - **应用内升级的安装步骤现在会写进应用日志 —— 成功时也记。** macOS 安装脚本每步都 echo（删除旧 bundle、复制新 bundle、以登录用户重新拉起），`install_macos` 即使全部成功也把脚本输出写进日志；此前成功路径一行不记，升级一旦出问题，可查的只有一条校验记录。（`src-tauri/src/update.rs`）
 

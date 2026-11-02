@@ -26,8 +26,21 @@ use crate::state::{self, AppState};
 ///
 /// `async` 是必需的，不是风格偏好：本命令要采样网络状态（macOS 15.6+ 的降级链里含一次
 /// 1~4s 的 `system_profiler`）。
+///
+/// `needs_bssid` 做成 `Option` 而非必填：前端按 Tauri 默认的小驼峰约定传 `needsBssid`，
+/// 但命令的 IPC key 解析依赖编译期 macro 对参数名的转换；一旦运行中的二进制与前端那一侧
+/// 的约定对不上（旧构建 / 不同 Tauri 版本的默认大小写），必填参数就会让整条 `get_status`
+/// 直接被拒（"missing required key"），进而把状态栏菜单与编辑器条件区一并拖垮成全 `-`。
+/// 改成可选 + 默认值后，无论 key 是否精准对上，调用都不再被拒，最多只是跳过 BSSID/RSSI 采样。
+/// `needs_bssid` is optional rather than required: the frontend sends `needsBssid` per Tauri's
+/// default camelCase convention, but the exact IPC key depends on the build-time macro. If the
+/// running binary and the frontend disagree on the casing, a required arg would get the whole
+/// `get_status` call rejected and take the tray menu and the editor's condition panel down with
+/// it. Making it optional means the call can never be rejected; at worst it skips BSSID/RSSI
+/// sampling.
 #[tauri::command(async)]
-pub fn get_status(state: State<'_, std::sync::Arc<AppState>>, needs_bssid: bool) -> String {
+pub fn get_status(state: State<'_, std::sync::Arc<AppState>>, needs_bssid: Option<bool>) -> String {
+    let needs_bssid = needs_bssid.unwrap_or(false);
     let st = state.plat.get_status(needs_bssid);
     let payload = state::status_payload(&state, &st);
     serde_json::to_string(&payload).unwrap_or_default()
@@ -692,6 +705,9 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         "priv": priv_channel().code(),
         "platform": platform_name(),
         "version": env!("CARGO_PKG_VERSION"),
+        // 最近一次检查更新的时刻（进程内存，可能为 None）：About 的「上次检查」。
+        // Time of the last update check (in-memory, may be None): About's "last checked".
+        "checked_at": state.last_update_check.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         "silent_execution": silent_execution,
         // 镜像给前端的是「前缀字符串」或空串：下拉要按这个值回显，而 `UpdateMirror`
         // 自己的序列化形状（一个带标签的对象）对界面没有意义。
@@ -1479,6 +1495,17 @@ pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_
         None
     };
 
+    // 记下检查时刻（进程内存）：About 界面的「上次检查」显示它。开机静默检查与
+    // 手动检查都走这里，所以 About 打开时总能看到最近一次的时间。
+    // Record when the check completed (in-memory): shown as "last checked" in the
+    // About tab. The silent startup check and manual checks both go through here, so
+    // the About tab always sees the most recent time.
+    let checked_at = chrono::Local::now().to_rfc3339();
+    *state
+        .last_update_check
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(checked_at.clone());
+
     Ok(json!({
         "current": current,
         "latest": latest,
@@ -1493,6 +1520,7 @@ pub fn check_update(state: State<'_, std::sync::Arc<AppState>>) -> Result<serde_
         "size": size,
         "installable": note.is_none(),
         "install_note": note,
+        "checked_at": checked_at,
     }))
 }
 
@@ -1847,6 +1875,19 @@ pub fn run_update(
     let choice = proxy_choice_of(&state);
     let mirror = mirror_of(&state);
     crate::update::run_update(&app, &t, &choice, &mirror)
+}
+
+/// 装好新包后重启软件：macOS 上把「杀旧实例 + 等它退出 + `open -n` 新包」交给一个
+/// 独立进程组的 helper（见 [`crate::update::relaunch`]），本命令立即返回，随后本进程
+/// 会被 helper 杀掉 —— 前端在 resolve 之后不要再做重要的事。其余平台无操作。
+/// Relaunch after a successful install: on macOS the "kill the old instance, wait for
+/// it to exit, `open -n` the new bundle" work is handed to a helper in its own process
+/// group (see [`crate::update::relaunch`]); this command returns immediately and the
+/// process is killed shortly after — the frontend must not do anything important after
+/// this resolves. Other platforms are a no-op.
+#[tauri::command(async)]
+pub fn relaunch_app() -> Result<(), String> {
+    crate::update::relaunch()
 }
 
 /// [`fetch_url`] 的总尝试次数。三次覆盖的是秒级抖动；真断网就是三次都失败。

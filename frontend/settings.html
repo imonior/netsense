@@ -43,9 +43,28 @@
     .nav-item.active { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     .nav-item.active:hover { background: var(--accent); }
     .nav-spacer { flex: 1; }
-    .nav-close { color: var(--muted); border-color: var(--line); margin-top: 6px; }
-    .nav-close:hover { color: var(--fg); }
-    .content { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
+    .content { flex: 1; overflow-y: auto; padding: 16px 16px 64px; min-width: 0; }
+    /* 关闭按钮悬在窗口右下角（fixed）：这颗关的是整扇设置窗口。红色描边标示，
+       悬停反色成红底 —— 关闭是这里唯一的破坏性动作，值得一眼认出。
+       The close button floats bottom-right (fixed): it closes the whole settings
+       window. Red outline, inverted to solid red on hover — the only destructive
+       action here should be recognizable at a glance. */
+    .win-close {
+      position: fixed; right: 16px; bottom: 14px; z-index: 50;
+      color: var(--t-err); border-color: var(--t-err); background: var(--bg-card);
+      padding: 5px 14px;
+    }
+    .win-close:hover { background: var(--t-err); color: var(--t-on-accent); }
+    /* 左下角署名页脚（fixed）：品牌信息，所有语言同一段（见 markup 处的 i18n-exempt）。
+       作者句柄是红色外链，指向作者主页。
+       Bottom-left branding footer (fixed): same wording in every language (see the
+       i18n-exempt note in the markup). The author handle is a red link to the profile. */
+    .dev-foot {
+      position: fixed; left: 16px; bottom: 18px; z-index: 50;
+      color: var(--muted); font-size: 11px; user-select: text;
+    }
+    .dev-foot a { color: var(--t-err); text-decoration: none; }
+    .dev-foot a:hover { text-decoration: underline; }
     .card {
       background: var(--bg-card); border: 1px solid var(--line);
       border-radius: var(--t-r-md); margin-top: 12px; padding: 12px 14px;
@@ -93,8 +112,8 @@
       font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text;
     }
     .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
-    /* 升级那两行是「当前版本 / 最新版本」这样按行堆叠的，不是拼不成句的一段散文 */
-    #hint-update { white-space: pre-line; }
+    /* About 里「已是最新 / 有新版本」这类多行提示是按行堆叠的，不是拼不成句的一段散文 */
+    #hint-about, #hint-about-run { white-space: pre-line; }
     .err { margin-top: 6px; color: var(--t-err); font-size: 11px; word-break: break-word; }
     /* `hidden` 是 UA 样式表里的 `[hidden] { display: none }`，而上面 `.row` 的 `display: flex`
        是作者样式表 —— 同优先级下作者胜出，于是一切 `class="row" hidden` 的元素**照常显示**
@@ -118,12 +137,28 @@
     .progress .bar.indeterminate { width: 35% !important; animation: indet 1s ease-in-out infinite; }
     @keyframes indet { 0% { margin-left: 0; } 100% { margin-left: 65%; } }
     .mv { font-size: 11px; color: var(--muted); margin-top: 4px; }
-    /* About 卡里指向 GitHub 的外链：跟正文同字号，强调色 + 悬停下划线，
-       别做成大按钮 —— 这一格要的是一行能点的字。
-       External GitHub link in the About card: same size as body text, accent
-       color + hover underline. A big button would be out of place here. */
-    .ext-link { color: var(--t-fg-accent); text-decoration: none; }
-    .ext-link:hover { text-decoration: underline; }
+    /* About 里指向 GitHub 的链接按需求全部用红色（区别于正文的外链强调色），
+       悬停下划线提示「这是能点的字」。悬停只加下划线，不反色。
+       The About links are red by design (distinct from the body accent color used
+       elsewhere); hover adds an underline only. */
+    .red-link { color: var(--t-err); text-decoration: none; font-size: 12px; width: fit-content; }
+    .red-link:hover { text-decoration: underline; }
+    /* About 头部：图标在左，右侧四行（名称 / 简介 / 版本+检测状态 / 检查按钮+上次时间）
+       与图标**高度平齐** —— stretch + 两端对齐让四行正好填满图标那格高度。
+       About header: icon on the left, four lines on the right (name / tagline /
+       version+check status / check button+last time) aligned to the icon's height —
+       stretch + space-between makes the four lines fill exactly that height. */
+    .about-head { display: flex; align-items: stretch; gap: 12px; margin-top: 2px; }
+    .about-icon { width: 64px; height: 64px; flex: none; align-self: center; }
+    .about-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 3px; }
+    .about-name { font-size: 15px; font-weight: 600; }
+    /* 检测状态两档：绿 = 已是最新；红 = 网络上有更新的版本。检查中与未检查保持默认色。 */
+    #v-upd-status.ok { color: var(--ok); }
+    #v-upd-status.bad { color: var(--t-err); }
+    /* 第二部分：详细介绍是几行完整句子，行高放宽到 1.7 才读得下去。 */
+    .about-intro { margin: 12px 0 0; font-size: 12px; line-height: 1.7; }
+    /* 第三部分：链接竖排一列，全部红色。 */
+    .about-links { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
     /* 升级通路每行后面的测速结果：成功绿、失败红、「测速中…」灰。与 WireGuard Plus 同款语义，
        让「没测」和「测了但不通」一眼可分，而不是都挤成一条 `—`。 */
     .path-ms { min-width: 66px; text-align: right; }
@@ -147,10 +182,9 @@
     <nav class="sidenav">
       <div class="nav-brand">NetSense <span class="nav-ver" id="nav-ver"></span></div>
       <button class="nav-item active" data-nav="general" data-i18n="sett.nav_general">General</button>
-      <button class="nav-item" data-nav="updates" data-i18n="sett.nav_updates">Updates</button>
+      <button class="nav-item" data-nav="proxy" data-i18n="sett.nav_proxy">Proxy</button>
       <button class="nav-item" data-nav="about" data-i18n="sett.nav_about">About</button>
       <div class="nav-spacer"></div>
-      <button class="nav-item nav-close" id="btn-close" data-i18n="sett.close">Close</button>
     </nav>
     <main class="content">
       <section data-section="general">
@@ -289,9 +323,9 @@
         <div class="hint" id="hint-applied-popup" data-i18n="sett.show_applied_hint">After a profile is applied (automatically or by hand), show a popup listing exactly which settings were written. Off: only a toast is shown.</div>
       </div>
       </section>
-      <section data-section="updates" hidden>
+      <section data-section="proxy" hidden>
     <div class="card">
-      <h3 id="sec-update" data-i18n="sett.section_update">Updates</h3>
+      <h3 id="sec-proxy" data-i18n="sett.section_proxy_title">Proxy</h3>
       <div class="hint" id="hint-update-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
 
       <!-- 出口 IP 与归属地置顶：探的是**当前选中的那条升级通路**的出口，换路时跟着变，
@@ -312,21 +346,6 @@
       </div>
       <div class="hint" id="hint-path-speed" data-i18n="sett.proxy_speed_hint">Times the real download through each path, so you can pick whichever is actually fastest right now.</div>
       <div class="err" id="err-path" hidden></div>
-
-      <div class="row" style="margin-top:12px">
-        <span class="k" id="k-update-note" data-i18n="sett.update_note">The panel checks quietly once after start-up; this button asks again, right now.</span>
-        <button id="btn-update-check" data-i18n="popup.check_update">Check for Updates</button>
-      </div>
-      <div class="progress" id="up-progress" hidden><div class="bar indeterminate" id="up-bar"></div></div>
-      <div class="hint" id="hint-update" hidden></div>
-      <div class="err" id="err-update" hidden></div>
-      <div class="row" id="row-update-actions" hidden>
-        <span class="k"></span>
-        <button class="primary" id="btn-update-now" data-i18n="popup.update_now">Update Now</button>
-        <button id="btn-update-release" data-i18n="popup.release_page">Release Page</button>
-      </div>
-      <div class="hint" id="hint-update-run" hidden></div>
-      <div class="mv" id="up-pct" hidden></div>
 
       <!-- 手动添加通路：代理或镜像，填了即持久化保存（写入 settings.json）。 -->
       <div class="row" style="margin-top:12px">
@@ -352,16 +371,66 @@
       <section data-section="about" hidden>
     <div class="card">
       <h3 id="sec-about" data-i18n="sett.section_about">About</h3>
-      <div class="row"><span class="k" id="k-platform" data-i18n="sett.platform">Platform</span><span class="val" id="v-platform">—</span></div>
-      <div class="row"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></div>
-      <!-- i18n-exempt：作者名是专有名词，任何语言下都写作 imonior，不进词表。 -->
-      <!-- i18n-exempt: the author handle is a proper noun, spelled "imonior" in every language. -->
-      <div class="row"><span class="k" id="k-author" data-i18n="sett.author">Author</span><span class="val">imonior</span></div>
-      <div class="row"><span class="k" id="k-github" data-i18n="sett.github">GitHub</span><span class="val"><a href="#" class="ext-link" id="link-github">github.com/imonior/netsense</a></span></div>
-      <div class="mv" data-i18n="sett.about_desc">Network automation that watches where you are and applies the right configuration.</div>
+
+      <!-- 第一部分：图标在左，右侧四行与图标高度平齐 —— 名称 / 简介 / 版本+检测状态 /
+           检查按钮+上次检查时间。检测状态绿 = 已是最新，红 = 网络上有更新的版本。
+           Part 1: icon on the left; the four lines on the right align with the icon's
+           height — name / tagline / version+check status (green = up to date, red =
+           newer version found online) / check button + last check time. -->
+      <div class="about-head">
+        <img src="icon.png" alt="NetSense" class="about-icon">
+        <div class="about-lines">
+          <div class="about-name">NetSense</div>
+          <div class="mv" data-i18n="sett.about_desc">Network automation that watches where you are and applies the right configuration.</div>
+          <div class="row" style="margin-top:0">
+            <span class="k" id="k-version" data-i18n="sett.version">Version</span>
+            <span class="val" id="v-version">—</span>
+            <span id="v-upd-status"></span>
+          </div>
+          <div class="row" style="margin-top:0">
+            <button id="btn-about-check" data-i18n="sett.check_now">Check now</button>
+            <span class="mv" id="v-last-check"></span>
+          </div>
+        </div>
+      </div>
+      <div class="err" id="err-about" hidden></div>
+
+      <!-- 检查出更新之后的动作：验得了才给「立即更新」，发布页始终留着兜底；
+           进度条与托盘面板同一套视觉。安装完成后 macOS 由后端拉起新版本。 -->
+      <div class="progress" id="up-progress" hidden><div class="bar indeterminate" id="up-bar"></div></div>
+      <div class="mv" id="up-pct" hidden></div>
+      <div class="hint" id="hint-about" hidden></div>
+      <div class="row" id="row-about-actions" hidden>
+        <button class="primary" id="btn-about-update" data-i18n="popup.update_now">Update Now</button>
+        <button id="btn-about-release" data-i18n="popup.release_page">Release Page</button>
+      </div>
+      <div class="hint" id="hint-about-run" hidden></div>
+
+      <!-- 第二部分：软件详细介绍。 -->
+      <!-- Part 2: what this app actually does, in full sentences. -->
+      <p class="about-intro" data-i18n="sett.about_intro"></p>
+
+      <!-- 第三部分：相关链接，全部红色。i18n-exempt 不适用 —— 链接文字要翻译。
+           Part 3: related links, all red. -->
+      <div class="about-links">
+        <a href="#" class="red-link" id="link-github" data-i18n="sett.link_github">GitHub</a>
+        <a href="#" class="red-link" id="link-release" data-i18n="sett.link_release">Release notes</a>
+        <a href="#" class="red-link" id="link-issue" data-i18n="sett.link_issue">Report an issue</a>
+        <a href="#" class="red-link" id="link-license" data-i18n="sett.link_license">License</a>
+      </div>
     </div>
       </section>
   </main>
+
+  <!-- 左下角署名页脚：品牌信息，任何语言保持同一段（作者句柄是红色外链）。
+       Bottom-left branding footer: identical in every language (the author handle is
+       a red link). -->
+  <!-- i18n-exempt：页脚是品牌署名，固定不译。 -->
+  <!-- i18n-exempt: the footer is branding; keep the same wording in every language. -->
+  <div class="dev-foot">Develop by <a href="#" id="link-author">@//imonior/</a> ©2026 NetSense</div>
+  <!-- 关闭按钮悬在窗口右下角（无边框窗口没有原生标题栏可点）。
+       The close button floats bottom-right (this borderless window has no native title bar). -->
+  <button class="win-close" id="btn-close" data-i18n="sett.close">Close</button>
 
   <div class="toast" id="toast"></div>
 
@@ -434,7 +503,6 @@
       // 级别是启动时读进闸门的（见 main.rs 的 set_min_level），但设置窗口每次打开都按
       // 落盘的值回填 —— 用户在别处改过（或手改过 settings.json）时这里要说实话。
       el("sel-loglevel").value = d.log_level || "info";
-      el("v-platform").textContent = d.platform || "—";
       el("v-priv").textContent = d.priv === "direct"
         ? t("sett.priv_direct", "Elevated access configured: changes apply without a system prompt")
         : d.priv === "outdated"
@@ -451,6 +519,12 @@
       // 用户正在手填服务器时不许被焦点刷新覆盖（见 in-dnsfb 的 oninput 把 dnsfbDirty 置真）。
       if (!dnsfbDirty) el("in-dnsfb").value = d.dns_fallback_servers || "";
       el("v-version").textContent = d.version || "—";
+      // About 的「上次检查」：后端在 check_update 里记下的进程内时刻。开机静默检查
+      // 也走那一条路，所以窗口一开就有值可显。
+      // About's "last checked": the in-memory time recorded by check_update. The
+      // silent startup check goes through the same command, so this has a value
+      // as soon as the window opens.
+      showLastCheck(d.checked_at);
       // 侧栏品牌后的版本号：与托盘面板同一来源（`get_app_version`），「我手上是哪一版」
       // 在设置窗口也一眼能看到。取不到就整段不显示。
       const navVer = document.getElementById("nav-ver");
@@ -843,13 +917,11 @@
       } catch (e) { show("err-path", String(e)); }
     };
 
-    // 升级：用的就是面板那三条命令（check_update / run_update / open_url），文案也直接取
-    // popup.* 那几条 —— 同一句话在字典里写两遍，五种语言就会各漂一次，而「能不能就地装上」
-    // 这句判定只能有一处来源。这个窗口不做启动静默检查：那是面板的活（一次会话只提示一次），
-    // 所以这里的结果只在按下按钮之后才出现。
-    let updInfo = null;      // 最近一次 check_update 的返回；run_update 的 target 只从它取
-    let updBusy = false;
-    const val = (label, v) => label + ": " + v;   // 一行「标签: 值」，值不是文案，不进字典
+    // —— About：版本行与更新检查（原「升级」区整块搬来，那里现在是纯代理设置）——
+    // The About tab owns the version line and the update check (moved wholesale from
+    // the old "Updates" section, which is now purely proxy settings).
+    let aboutInfo = null;    // 最近一次 check_update 的返回；run_update 的 target 只从它取
+    let aboutBusy = false;
     function updVerifyText(code) {
       const reason = code === "no_asset"
         ? t("popup.no_installable", "No installable package for this platform")
@@ -858,9 +930,20 @@
           : t("popup.verify_no_sums", "the release publishes no SHA256SUMS, or that file does not list this installer");
       return tf("popup.cannot_verify", "This update cannot be verified: {reason}", { reason });
     }
-    // 设置窗口的升级进度条：与托盘弹窗同一套视觉（见 popup.html 的 showUpdateProgress）。
+    // 状态文字按结论分色：绿 = 已是最新；红 = 有新版本；检查中 / 未检查保持默认色。
+    // Status text color by verdict: green = up to date; red = newer version found;
+    // neutral while checking / before the first check.
+    const setStatus = (text, cls) => { const n = el("v-upd-status"); n.textContent = text || ""; n.className = cls || ""; };
+    // RFC3339 → 「YYYY-MM-DD HH:MM:SS」：本地时间的字符串前面那段就是本地钟表读数。
+    const showLastCheck = (s) => {
+      const v = s ? String(s).slice(0, 19).replace("T", " ") : "";
+      el("v-last-check").textContent = v
+        ? tf("sett.last_check", "Last checked: {time}", { time: v })
+        : "";
+    };
+    // About 窗口的升级进度条：与托盘弹窗同一套视觉（见 popup.html 的 showUpdateProgress）。
     // phase 为空 = 清除（隐藏）；install / refresh / 总大小未知时的下载起步用不确定滑动动画，
-    // 其余按真实百分比画实心进度。文字阶段由 hint-update-run 负责，这里只画条与百分比。
+    // 其余按真实百分比画实心进度。文字阶段由 hint-about-run 负责，这里只画条与百分比。
     function setUpdateBar(phase, percent) {
       const box = el("up-progress");
       const bar = el("up-bar");
@@ -878,51 +961,58 @@
         pct.textContent = p + "%";
       }
     }
-    function renderUpdate(d) {
-      updInfo = null;
+    function renderAboutUpdate(d) {
+      aboutInfo = null;
       setUpdateBar("", 0);   // 检查出结果：清掉检查途中的不确定动画
-      const act = el("row-update-actions");
-      act.hidden = true;
-      show("hint-update-run", "");
+      el("row-about-actions").hidden = true;
+      show("hint-about-run", "");
       if (!d || d.__error) {
-        show("hint-update", "");
-        show("err-update", val(t("popup.update_failed", "Failed to check for updates"), d && d.__error ? d.__error : ""));
+        setStatus(t("popup.update_failed", "Failed to check for updates"), "bad");
+        show("hint-about", "");
+        show("err-about", d && d.__error ? d.__error : "");
         return;
       }
-      show("err-update", "");
+      show("err-about", "");
+      showLastCheck(d.checked_at);
       if (!d.update_available) {
-        show("hint-update", t("popup.up_to_date", "You're up to date"));
+        show("hint-about", "");
+        setStatus(t("popup.up_to_date", "You're up to date"), "ok");
         return;
       }
-      const lines = [val(t("popup.current", "Current"), d.current), val(t("popup.latest", "Latest"), d.latest)];
-      if (d.homebrew) lines.push(t("popup.brew_note", "Installed via Homebrew — Update Now runs: brew upgrade --cask netsense"));
-      show("hint-update", lines.join("\n"));
-      // 后端在检查阶段就答过「装不装得上」：验不了的时候连按钮都不给 —— 点了才报错，
-      // 等于先让用户把这条下载花掉。发布页那一颗始终留着，它是这条路走得通时的兜底。
+      // 红：网络上有更新的版本。装不装得上在检查阶段就判完：验不了的时候连按钮都不给
+      // —— 点了才报错，等于先让用户把这条下载花掉。发布页那一颗始终留着，它是这条路
+      // 走得通时的兜底。
+      setStatus(tf("sett.update_found", "Version {version} is available", { version: d.latest }), "bad");
       const unverifiable = d.installable === false;
-      show("err-update", unverifiable ? updVerifyText(d.install_note) : "");
-      el("btn-update-now").hidden = unverifiable || (!d.homebrew && !d.download_url);
-      el("btn-update-release").hidden = !d.html_url;
-      act.hidden = el("btn-update-now").hidden && el("btn-update-release").hidden;
-      updInfo = d;
+      const hints = [];
+      if (d.homebrew) hints.push(t("popup.brew_note", "Installed via Homebrew — Update Now runs: brew upgrade --cask netsense"));
+      if (unverifiable) hints.push(updVerifyText(d.install_note));
+      show("hint-about", hints.join("\n"));
+      el("btn-about-update").hidden = unverifiable || (!d.homebrew && !d.download_url);
+      el("btn-about-release").hidden = !d.html_url;
+      el("row-about-actions").hidden = el("btn-about-update").hidden && el("btn-about-release").hidden;
+      aboutInfo = d;
     }
 
-    el("btn-update-check").onclick = async () => {
-      if (updBusy) return;
-      updBusy = true;
-      show("hint-update", t("popup.updating", "Checking…"));
-      show("err-update", "");
-      setUpdateBar("download", 0);   // 检查途中画一条不确定动画，结果出来由 renderUpdate 清掉
+    el("btn-about-check").onclick = async () => {
+      if (aboutBusy) return;
+      aboutBusy = true;
+      el("btn-about-check").disabled = true;
+      setStatus(t("popup.updating", "Checking…"), "");
+      show("hint-about", "");
+      show("err-about", "");
+      setUpdateBar("download", 0);   // 检查途中画一条不确定动画，结果出来由 renderAboutUpdate 清掉
       const r = await invoke("check_update").catch(e => ({ __error: String(e) }));
-      renderUpdate(typeof r === "string" ? JSON.parse(r) : r);
-      updBusy = false;
+      renderAboutUpdate(typeof r === "string" ? JSON.parse(r) : r);
+      el("btn-about-check").disabled = false;
+      aboutBusy = false;
     };
-    el("btn-update-now").onclick = async () => {
-      const d = updInfo;
-      if (!d || updBusy) return;
-      updBusy = true;
-      el("row-update-actions").hidden = true;
-      show("hint-update-run", t("popup.downloading", "Downloading…"));
+    el("btn-about-update").onclick = async () => {
+      const d = aboutInfo;
+      if (!d || aboutBusy) return;
+      aboutBusy = true;
+      el("row-about-actions").hidden = true;
+      show("hint-about-run", t("popup.downloading", "Downloading…"));
       setUpdateBar("download", 0);   // 起手不确定动画，真百分比由进度事件接管
       const target = {
         download_url: d.download_url || null,
@@ -932,27 +1022,37 @@
         version: d.latest,
       };
       try {
-        // 控制能返回就说明没被替换进程杀掉（Homebrew 渠道就是退出码 0），这时提示重启才有意义。
+        // 安装完成：macOS 把「杀旧实例 + 拉起新包」交给后端的独立 helper，relaunch_app
+        // 一去不回（本进程会被杀掉，下面的提示多半来不及显示）。能走到下一行说明
+        // relaunch 没接管（其他平台 / Homebrew），旧提示「重启软件完成」仍是兜底。
+        // Install finished: on macOS the backend hands "kill the old instance and
+        // relaunch" to a detached helper and relaunch_app never returns (this process
+        // gets killed, so the hint below rarely shows). Reaching the next line means
+        // relaunch did not take over (other platforms / Homebrew); the manual-restart
+        // hint stays as the fallback.
         await invoke("run_update", { target: JSON.stringify(target) });
+        await invoke("relaunch_app").catch(() => {});
         setUpdateBar("", 0);
-        show("hint-update-run", [t("popup.update_ok", "Update complete"), t("popup.update_restart", "Restarting…")].join("\n"));
+        show("hint-about-run", [t("popup.update_ok", "Update complete"), t("popup.update_restart", "Restarting…")].join("\n"));
       } catch (e) {
         setUpdateBar("", 0);
-        show("hint-update-run", "");
-        show("err-update", String(e));
-        el("btn-update-now").hidden = false;
-        el("btn-update-release").hidden = !d.html_url;
-        el("row-update-actions").hidden = false;
+        show("hint-about-run", "");
+        show("err-about", String(e));
+        el("btn-about-update").hidden = false;
+        el("btn-about-release").hidden = !d.html_url;
+        el("row-about-actions").hidden = false;
       } finally {
-        updBusy = false;
+        aboutBusy = false;
       }
     };
-    el("btn-update-release").onclick = () => {
-      if (updInfo && updInfo.html_url)
-        invoke("open_url", { url: updInfo.html_url }).catch(() => {});
+    el("btn-about-release").onclick = () => {
+      if (aboutInfo && aboutInfo.html_url)
+        invoke("open_url", { url: aboutInfo.html_url }).catch(() => {});
     };
-    // 进度是全局广播的：面板那边开始下载时这里也会收到。只在本窗口真的发起了升级时才写
-    // 这一行，否则设置窗口会在用户什么都没点的时候冒出一句「正在下载…」。
+    // 进度是全局广播的：托盘面板那边开始下载时这里也会收到。只在 About 真的发起了
+    // 升级时才写这一行，否则用户什么都没点就冒出一句「正在下载…」。
+    // Progress is a global broadcast; only write it while the About tab itself started
+    // an update, or the window would show "Downloading…" when the user clicked nothing.
     if (window.__TAURI__ && window.__TAURI__.event) {
       // 配色是全局的：在面板或编辑器那边改档时，这里也得当下跟着变，而不是等下一次焦点。
       window.__TAURI__.event.listen("netsense://status", (e) => {
@@ -960,13 +1060,13 @@
         if (p) applyTheme(p.theme);
       });
       window.__TAURI__.event.listen("netsense://update_progress", (e) => {
-        if (!updBusy) return;
+        if (!aboutBusy) return;
         const p = e.payload || {};
         const label = p.phase === "refresh" ? t("popup.refreshing", "Refreshing Homebrew…")
           : p.phase === "install" ? t("popup.installing", "Installing…")
           : t("popup.downloading", "Downloading…");
         // 文字只说阶段，百分比交给进度条（与托盘弹窗同一套视觉）。
-        show("hint-update-run", label);
+        show("hint-about-run", label);
         setUpdateBar(p.phase, p.percent);
       });
     }
@@ -1108,15 +1208,27 @@
     el("btn-view-logs").onclick = () => invoke("open_log_viewer").catch(e => toast(String(e)));
     el("btn-editor").onclick = () => invoke("open_editor").catch(e => toast(String(e)));
     el("btn-close").onclick = () => invoke("close_settings").catch(() => {});
-    // About 卡的 GitHub 外链：交给系统默认浏览器开（open_url 与 Release 页同一条路），
-    // 阻止默认跳转 —— WebView 自己导航走就回不来了。
-    // The GitHub link in the About card opens in the system browser via open_url
-    // (same path as the Release page); default navigation must be suppressed or
-    // the WebView itself would navigate away with no way back.
-    el("link-github").addEventListener("click", (e) => {
-      e.preventDefault();
-      invoke("open_url", { url: "https://github.com/imonior/netsense" }).catch(() => {});
-    });
+    // About 与页脚的外链：全部交给系统默认浏览器开（open_url 与 Release 页同一条路），
+    // 阻止默认跳转 —— WebView 自己导航走就回不来了。链接目标写死在这里而不是 markup：
+    // 五种语言共用同一组 URL，改一个地方就行。
+    // About and footer links open in the system browser via open_url (same path as the
+    // Release page); default navigation must be suppressed or the WebView itself would
+    // navigate away with no way back. Targets live here rather than in the markup so
+    // all five languages share one copy of each URL.
+    const ABOUT_LINKS = {
+      "link-author": "https://github.com/imonior",
+      "link-github": "https://github.com/imonior/NetSense",
+      "link-release": "https://github.com/imonior/NetSense/releases/latest",
+      "link-issue": "https://github.com/imonior/NetSense/issues/new",
+      "link-license": "https://github.com/imonior/NetSense/blob/main/LICENSE",
+    };
+    for (const [id, url] of Object.entries(ABOUT_LINKS)) {
+      const a = el(id);
+      if (a) a.addEventListener("click", (e) => {
+        e.preventDefault();
+        invoke("open_url", { url }).catch(() => {});
+      });
+    }
 
     // 每次获得焦点都重问一遍：开机启动的真相在操作系统里，用户可能刚从
     // 系统设置 / 注册表里动过它，读缓存会让这个勾选框说谎。备份清单同理 ——
@@ -1157,6 +1269,9 @@
       // 下面的 focus 刷新只重拉设置、不重跑测速，避免切窗口时狂打请求。
       loadPublicIp();
       runPathScan();
+      // 检测状态列的初始文案：还没检查过就如实说明，而不是留一片空白。
+      // Initial status text: say "not checked yet" plainly instead of leaving it blank.
+      setStatus(t("sett.not_checked", "Not checked yet"), "");
       // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
       // 下一次白屏能用「日志里有没有 ready」一步分辨 JS 没跑还是画不出来。
       // Readiness heartbeat, sent only after init fully completes: blank-window
