@@ -175,6 +175,8 @@
   "popup.release_page": "查看发布页",
   "popup.update_ok": "更新完成",
   "popup.update_restart": "即将重启…",
+  "popup.restart_now": "立即重启",
+  "popup.restart_hint": "软件应会自动重启。若未自动重启，请点击「立即重启」。",
   "popup.no_installable": "当前平台没有可安装的安装包",
   "popup.brew_note": "通过 Homebrew 安装，点击「立即更新」将执行：brew upgrade --cask netsense",
   "popup.cannot_verify": "无法校验这个更新：{reason}",

@@ -1233,11 +1233,22 @@ fn darwin_relaunch_script(target_app: &str, current_pid: u32) -> String {
         // single-instance plugin, forward its args to the dying old one and exit —
         // leaving nothing running. Pid reuse is a theoretical edge; the cap bounds it.
         format!("n=0; while kill -0 {current_pid} 2>/dev/null && [ \"$n\" -lt 50 ]; do n=$((n+1)); /bin/sleep 0.1; done"),
-        // 以登录用户（非 root）重新打开：relaunch 若在提权安装链路里被调到，裸 open 会成 root。
-        // Relaunch as the console user (never root, even if reached from an elevated flow).
+        // 以登录用户重新打开 GUI。关键分支：普通用户双击启动的 app 本就是登录用户，
+        // **直接 `open -n` 即可，最可靠**；`launchctl asuser` 是给 root 用来降权到别的用户的，
+        // 普通进程调它要么权限不足、要么拿不到 GUI 会话 —— 结果静默失败，什么都没起，
+        // 这正是 v1.9.x「提示重启但没重启」一直没修掉的真凶。所以只有「本进程以 root 运行」
+        // （提权安装链路）时才走 `launchctl asuser` 降权；其余一律直连 `open -n`。
+        // Relaunch the GUI as the console user. The critical branch: an app launched by
+        // double-click already runs as the console user, so a plain `open -n` is the reliable
+        // path. `launchctl asuser` is for root to *drop* to another user; a non-root process
+        // calling it either lacks permission or loses the GUI session — it silently does
+        // nothing, which is exactly why "said restarting but never restarted" persisted through
+        // v1.9.x. So we only use `launchctl asuser` when THIS process is root (an elevated
+        // install path); everything else goes straight to `open -n`.
         "OPEN_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || /usr/bin/whoami)".to_string(),
-        "echo \"relaunch: as user $OPEN_USER\"".to_string(),
-        "if [ -n \"$OPEN_USER\" ] && [ \"$OPEN_USER\" != \"root\" ]; then".to_string(),
+        "CUR_UID=$(/usr/bin/id -u)".to_string(),
+        "echo \"relaunch: console user $OPEN_USER (current uid $CUR_UID)\"".to_string(),
+        "if [ \"$CUR_UID\" -eq 0 ] && [ -n \"$OPEN_USER\" ] && [ \"$OPEN_USER\" != \"root\" ]; then".to_string(),
         format!(
             "  /bin/launchctl asuser \"$(/usr/bin/id -u \"$OPEN_USER\")\" /usr/bin/open -n {}",
             q(target_app)

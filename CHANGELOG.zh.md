@@ -4,6 +4,17 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [1.9.4] - 2026-11-03
+
+### 修正
+
+- **macOS 应用内升级现在真的会重新启动进新版本。** 重启 helper 的 open 分支错误地让每个非 root 的控制台用户都走 `launchctl asuser`——它在非 root 上下文里拿不到 GUI 会话、且静默失败（stdout/stderr 全进 `/dev/null`）——于是升级完成、弹窗写着「重启中」，却什么都没打开。现在该分支对登录用户直接用 `open -n` 拉起，只有真正的 root 提权场景才用 `launchctl asuser`。 (`src-tauri/src/update.rs`、`frontend/popup.html`)
+- **应用结果弹窗在 fallback 匹配时不再把 profile 显示成光秃秃的 `-`。** 顶部卡片读的是 payload 的 profile 字段，无匹配、实际应用的是 fallback 配置时它是 null；而底部「Applied profile」行本来就会显示本地化的兜底标签。现在两处渲染同一个值：匹配到就显示 profile 名，否则显示本地化的 `popup.applied_fallback` 标签。 (`frontend/applied.html`)
+
+### 新增
+
+- **升级成功弹窗里新增「立即重启」按钮。** 自动重启在有些环境仍可能失效（比如进程被杀但新实例没能起来）；这个按钮再调一次 `relaunch_app`，用户不会被卡死在一个死的弹窗上。两条新的 i18n 键随五个语言一同发布，总键数来到 `717`。 (`frontend/popup.html`、`src-tauri/src/i18n/`)
+
 ## [1.9.3] - 2026-11-01
 
 ### 新增

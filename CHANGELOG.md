@@ -4,6 +4,17 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.4] - 2026-11-03
+
+### Fixed
+
+- **macOS in-app upgrade now truly relaunches into the new version.** The relaunch helper's open branch wrongly sent every non-root console user through `launchctl asuser`, which cannot obtain a GUI session outside a root context and fails silently (its stdout/stderr go to `/dev/null`) — so the upgrade finished, the modal said "restarting", but nothing opened. The branch now launches with `open -n` directly for the logged-in user and reserves `launchctl asuser` for the genuine root-elevated case only. (`src-tauri/src/update.rs`, `frontend/popup.html`)
+- **The applied-result popup no longer shows a bare `-` for the profile on a fallback match.** The top card read the payload's profile field, which is null when no profile matched and the fallback config was applied; the bottom "Applied profile" row already showed the localized fallback label. Both now render the same value: the profile name when one matched, otherwise the localized `popup.applied_fallback` label. (`frontend/applied.html`)
+
+### Added
+
+- **A "Restart now" button in the update-success popup.** Auto-relaunch can still be defeated on some setups (e.g. a process killed but the new instance never launching); the button calls `relaunch_app` once more so the user is never stuck on a dead modal. Two new i18n keys ship in all five languages, bringing the table to `717` keys. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+
 ## [1.9.3] - 2026-11-01
 
 ### Added
@@ -46,7 +57,7 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 715 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
+- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 717 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
 - **Every window now reports to the backend once its page has finished initializing.** All five windows call the new `frontend_ready` command (with their window label) at the end of init, and the backend logs `frontend ready: <win>`. A blank-window report can now be bisected from the log alone: ready lines present means the scripts ran and the failure is in the rendering layer; no ready lines at all means the WebView never executed them. The smoke test's first-paint command contract pins the heartbeat in place. (`frontend/*.html`, `ipc.rs`, `main.rs`, `scripts/editor-smoke.mjs`)
 - **The in-app upgrade's installation steps are now audited in the app log — including on success.** The macOS installer script echoes each step (removing the old bundle, copying the new one, relaunching as the logged-in user), and `install_macos` writes the script output to the log even when everything succeeds; previously the success path logged nothing at all, so a broken upgrade left a single verification line to investigate. (`src-tauri/src/update.rs`)
 

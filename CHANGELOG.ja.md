@@ -4,6 +4,17 @@ NetSense のすべての重要な変更をここに記録する。形式は
 [Keep a Changelog](https://keepachangelog.com/) に基づき、本プロジェクトは
 [セマンティックバージョニング](https://semver.org/) に準拠する。
 
+## [1.9.4] - 2026-11-03
+
+### 修正
+
+- **macOS のアプリ内アップグレードが本当に新バージョンへ再起動するようになりました。** 再起動ヘルパーの open ブランチは root でないコンソールユーザーをすべて `launchctl asuser` に回していましたが、これは root 外のコンテキストでは GUI セッションを得られず、しかも黙って失敗します（stdout/stderr はすべて `/dev/null` へ）——そのためアップグレードは完了し、ダイアログには「再起動中」と出るのに何も開きませんでした。今はログインユーザーに対しては直接 `open -n` で起動し、`launchctl asuser` は本当の root 昇格ケースのみに留めています。 (`src-tauri/src/update.rs`、`frontend/popup.html`)
+- **適用結果ポップアップが fallback マッチ時に profile をただの `-` と表示しなくなりました。** 上部カードは payload の profile 欄を読んでおり、マッチがなく fallback 設定が適用された場合はこれが null になります。一方下部の「Applied profile」行はすでに本地化された fallback ラベルを表示していました。両者が同じ値を描画するようになりました。マッチがあれば profile 名、なければ本地化された `popup.applied_fallback` ラベルです。 (`frontend/applied.html`)
+
+### 追加
+
+- **アップグレード成功ポップアップに「今すぐ再起動」ボタンを追加しました。** 自動再起動は一部環境ではそれでも失敗し得ます（例：プロセスは殺されたが新インスタンスが起動しなかった）。このボタンは `relaunch_app` をもう一度呼び出すので、ユーザーが死んだダイアログに張り付くことはありません。2 つの新しい i18n キーが 5 言語すべてに同梱され、キー総数は `717` になります。 (`frontend/popup.html`、`src-tauri/src/i18n/`)
+
 ## [1.9.3] - 2026-11-01
 
 ### 追加

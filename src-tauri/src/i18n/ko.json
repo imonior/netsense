@@ -175,6 +175,8 @@
   "popup.release_page": "릴리스 페이지",
   "popup.update_ok": "업데이트 완료",
   "popup.update_restart": "재시작 중…",
+  "popup.restart_now": "지금 다시 시작",
+  "popup.restart_hint": "앱이 자동으로 다시 시작됩니다. 자동으로 시작되지 않으면 '지금 다시 시작'을 클릭하세요.",
   "popup.no_installable": "이 플랫폼용 설치 파일이 없습니다",
   "popup.brew_note": "Homebrew로 설치됨 — 지금 업데이트를 누르면 실행: brew upgrade --cask netsense",
   "popup.cannot_verify": "이 업데이트를 검증할 수 없습니다: {reason}",

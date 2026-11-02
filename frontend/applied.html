@@ -144,9 +144,17 @@
       //    现在这套地址 / 掩码 / 网关 / DNS。
       const card = document.createElement("div");
       card.innerHTML = NetInfo.cardHtml(t);
+      // 顶部「当前网络」卡的 profile 行必须与底部 System 组的「Applied profile」行**同源**：
+      // 有名显示名字，fallback（`d.profile` 为 null）时回退到本地化「兜底」标签。
+      // 后端 `applied_notice.profile` 在兜底时是 null（`fallback:true` 另行标出），若直接喂给
+      // `NetInfo.fill` 会画成「—」，而底部那一行却能正确显示「兜底」—— 同一份结果两处不一致。
+      // Top card and the bottom "Applied profile" row must agree: a name shows the name, and a
+      // null (fallback) falls back to the localized fallback label, exactly like the bottom row.
+      const profileDisp = d.profile ? d.profile
+        : t("popup.applied_fallback", "Fallback (no profile matched)");
       NetInfo.fill(card.firstElementChild, {
         st: netInfo, primary: netPrimary, v6mode: netV6,
-        connected: !!(netInfo && netInfo.connected), profile: d.profile, t, esc,
+        connected: !!(netInfo && netInfo.connected), profile: profileDisp, t, esc,
       });
       let body = card.innerHTML;
 

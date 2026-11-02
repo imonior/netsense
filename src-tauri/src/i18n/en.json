@@ -175,6 +175,8 @@
   "popup.release_page": "Release Page",
   "popup.update_ok": "Update complete",
   "popup.update_restart": "Restarting…",
+  "popup.restart_now": "Restart now",
+  "popup.restart_hint": "The app should restart automatically. If it does not, click Restart now.",
   "popup.no_installable": "No installable package for this platform",
   "popup.brew_note": "Installed via Homebrew — Update Now runs: brew upgrade --cask netsense",
   "popup.cannot_verify": "This update cannot be verified: {reason}",

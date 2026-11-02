@@ -619,8 +619,11 @@
       const box = document.getElementById("update-modal");
       if (ok) {
         box.innerHTML = `<h3>${esc(t("popup.update_ok", "Update complete"))}</h3>
-          <div class="mv">${esc(t("popup.update_restart", "Restarting…"))}</div>
-          <div class="row-btns"><button id="up-close">${esc(t("popup.close", "Close"))}</button></div>`;
+          <div class="mv">${esc(t("popup.restart_hint", "The app should restart automatically. If it does not, click Restart now."))}</div>
+          <div class="row-btns">
+            <button id="up-restart">${esc(t("popup.restart_now", "Restart now"))}</button>
+            <button id="up-close">${esc(t("popup.close", "Close"))}</button>
+          </div>`;
       } else {
         box.innerHTML = `<h3>${esc(t("popup.update_failed", "Failed to check for updates"))}</h3>
           <div class="err">${esc(err || "")}</div>
@@ -634,6 +637,8 @@
       }
       const c = document.getElementById("up-close");
       if (c) c.onclick = closeUpdateModal;
+      const r = document.getElementById("up-restart");
+      if (r) r.onclick = () => { invoke("relaunch_app").catch(() => {}); };
     }
 
     async function checkForUpdate() {

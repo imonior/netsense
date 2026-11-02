@@ -4,6 +4,17 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [1.9.4] - 2026-11-03
+
+### 수정
+
+- **macOS 앱 내 업그레이드가 이제 실제로 새 버전으로 재시작합니다.** 재시작 헬퍼의 open 브랜치는 root가 아닌 콘솔 사용자를 모두 `launchctl asuser`로 넘겼는데, 이것은 root 밖 컨텍스트에서는 GUI 세션을 얻지 못하고 조용히 실패합니다(stdout/stderr는 모두 `/dev/null`로 갑니다). 그래서 업그레이드는 끝났고 대화상자에는 "재시작 중"이라고 뜨지만 아무 것도 열리지 않았습니다. 이제 이 브랜치는 로그인 사용자에게는 직접 `open -n`으로 기동하고, `launchctl asuser`는 진짜 root 승격 경우에만 남겨 둡니다. (`src-tauri/src/update.rs`, `frontend/popup.html`)
+- **적용 결과 팝업이 fallback 매치 시 profile을 그냥 `-`로 보여주지 않게 되었습니다.** 위쪽 카드는 payload의 profile 필드를 읽는데, 매치가 없고 fallback 설정이 적용된 경우 이것은 null이 됩니다. 아래쪽 "Applied profile" 행은 이미 현지화된 fallback 라벨을 보여주고 있었습니다. 이제 둘 다 같은 값을 그립니다. 매치가 있으면 profile 이름, 없으면 현지화된 `popup.applied_fallback` 라벨입니다. (`frontend/applied.html`)
+
+### 추가
+
+- **업그레이드 성공 팝업에 "지금 재시작" 버튼을 추가했습니다.** 자동 재시작은 일부 환경에서 여전히 실패할 수 있습니다(예: 프로세스는 죽었는데 새 인스턴스가 뜨지 않음). 이 버튼은 `relaunch_app`을 한 번 더 호출하므로, 사용자가 죽은 대화상자에 갇히는 일은 없습니다. 2개의 새 i18n 키가 5개 언어 모두에 동봉되어 키 총수는 `717`이 됩니다. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+
 ## [1.9.3] - 2026-11-01
 
 ### 추가
