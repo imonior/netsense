@@ -27,7 +27,7 @@
     }
     /* WireGuard Plus 风格：左侧固定导航栏 + 右侧内容区。导航切换 section 显隐，
        所有卡片与控件 ID 保持不变，只换布局外壳。 */
-    .app { display: flex; height: 100%; min-height: 0; }
+    .app { display: flex; flex: 1; min-height: 0; }
     .sidenav {
       flex: none; width: 184px; padding: 14px 10px; border-right: 1px solid var(--line);
       background: var(--t-sunken); display: flex; flex-direction: column; gap: 2px;
@@ -43,24 +43,30 @@
     .nav-item.active { background: var(--accent); border-color: var(--accent); color: var(--t-on-accent); }
     .nav-item.active:hover { background: var(--accent); }
     .nav-spacer { flex: 1; }
-    .content { flex: 1; overflow-y: auto; padding: 16px 16px 64px; min-width: 0; }
-    /* 关闭按钮悬在窗口右下角（fixed）：这颗关的是整扇设置窗口。红色描边标示，
-       悬停反色成红底 —— 关闭是这里唯一的破坏性动作，值得一眼认出。
-       The close button floats bottom-right (fixed): it closes the whole settings
-       window. Red outline, inverted to solid red on hover — the only destructive
-       action here should be recognizable at a glance. */
+    .content { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
+    /* 底部固定条（in-flow，不是 fixed）：开发署名 + 关闭按钮在同一行、分列两端，
+       整条作为 `.app` 下方的 flex 子项，内容区在它上方独立滚动，两者永不重叠。
+       Bottom bar (in-flow, not fixed): dev credit + close button share one row at
+       opposite ends; as a flex child below `.app`, the content scrolls above it with
+       no overlap. */
+    .app-foot {
+      flex: none; display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 8px 16px; border-top: 1px solid var(--line);
+      background: var(--t-sunken);
+    }
+    /* 关闭按钮：关的是整扇设置窗口。红色描边标示，悬停反色成红底 —— 关闭是这里唯一的
+       破坏性动作，值得一眼认出。
+       The close button closes the whole settings window. Red outline, inverted to
+       solid red on hover — the only destructive action here should be recognizable. */
     .win-close {
-      position: fixed; right: 16px; bottom: 14px; z-index: 50;
       color: var(--t-err); border-color: var(--t-err); background: var(--bg-card);
       padding: 5px 14px;
     }
     .win-close:hover { background: var(--t-err); color: var(--t-on-accent); }
-    /* 左下角署名页脚（fixed）：品牌信息，所有语言同一段（见 markup 处的 i18n-exempt）。
-       作者句柄是红色外链，指向作者主页。
-       Bottom-left branding footer (fixed): same wording in every language (see the
-       i18n-exempt note in the markup). The author handle is a red link to the profile. */
+    /* 开发署名：品牌信息，所有语言同一段（见 markup 处的 i18n-exempt）。作者句柄是红色外链。
+       Dev credit: branding, identical in every language (see the i18n-exempt note in
+       the markup). The author handle is a red link. */
     .dev-foot {
-      position: fixed; left: 16px; bottom: 18px; z-index: 50;
       color: var(--muted); font-size: 11px; user-select: text;
     }
     .dev-foot a { color: var(--t-err); text-decoration: none; }
@@ -120,6 +126,16 @@
        （升级按钮那一行就是这么漏出来的）。凡是自己设了 `display` 的类都要在这里补回来。 */
     .err[hidden], .hint[hidden], .row[hidden] { display: none; }
     .val { color: var(--muted); }
+    /* 行为卡里「短标签 + 长值」的行（Privilege channel 等）：默认 `.row .k` 的 flex:1 会把
+       长值往右怼、窄列时标签与值重叠。这里让标签定宽、值占满余下并右对齐、长值换行，
+       既不挤压标签也不与之重叠。
+       "Short label + long value" rows in the Behavior card (Privilege channel, etc.):
+       the default `flex:1` on `.k` shoves a long value rightward and overlaps the label
+       in a narrow column. Here the label keeps its width, the value fills the rest,
+       right-aligned and wrapping — no overlap, no squeeze. */
+    .row.row-valwrap { align-items: flex-start; }
+    .row.row-valwrap .k { flex: none; }
+    .row.row-valwrap .val { flex: 1; min-width: 0; text-align: right; word-break: break-word; }
     /* 合并后的「更新」卡里，代理是第一个子区块：用比卡片标题低一级的小标题把它和下面的
        镜像 / 检查区分开，又不另起一张卡（那样又回到「两处各一张」的散）。 */
     .card > h4.sub {
@@ -155,10 +171,18 @@
     /* 检测状态两档：绿 = 已是最新；红 = 网络上有更新的版本。检查中与未检查保持默认色。 */
     #v-upd-status.ok { color: var(--ok); }
     #v-upd-status.bad { color: var(--t-err); }
+    /* About 版本号：靠左紧贴「Version」标签（不被 flex:1 推到最右），并按更新结论分色——
+       已是最新（无可用更新）绿；网络上有新版时这个旧版号为红；检查失败保持默认色。
+       About version number: left-aligned right after the "Version" label (not pushed to
+       the far right by flex:1), colored by update verdict — green when up to date, red
+       when a newer version exists online; neutral on check failure. */
+    .row.row-version .k { flex: none; margin-right: 6px; }
+    #v-version.ok { color: var(--ok); }
+    #v-version.bad { color: var(--t-err); }
     /* 第二部分：详细介绍是几行完整句子，行高放宽到 1.7 才读得下去。 */
     .about-intro { margin: 12px 0 0; font-size: 12px; line-height: 1.7; }
-    /* 第三部分：链接竖排一列，全部红色。 */
-    .about-links { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    /* 第三部分：链接横排一行（窄窗自动换行），全部红色。 */
+    .about-links { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; }
     /* 升级通路每行后面的测速结果：成功绿、失败红、「测速中…」灰。与 WireGuard Plus 同款语义，
        让「没测」和「测了但不通」一眼可分，而不是都挤成一条 `—`。 */
     .path-ms { min-width: 66px; text-align: right; }
@@ -302,7 +326,7 @@
 
       <div class="card">
         <h3 id="sec-behavior" data-i18n="sett.section_behavior">Behavior</h3>
-        <div class="row"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
+        <div class="row row-valwrap"><span class="k" id="k-priv" data-i18n="sett.privilege">Privilege channel</span><span class="val" id="v-priv">—</span></div>
         <div class="row" id="row-priv-remove" hidden><span class="k"></span><button class="tiny" id="btn-priv-remove" data-i18n="sett.priv_remove">Remove password-free changes</button></div>
         <div class="row">
           <label class="chk"><input type="checkbox" id="chk-silent"><span id="k-silent" data-i18n="sett.silent_execution">Silent execution</span></label>
@@ -330,12 +354,16 @@
 
       <!-- 出口 IP 与归属地置顶：探的是**当前选中的那条升级通路**的出口，换路时跟着变，
            让用户看到「选这个会从哪出去、归属地是哪」。读不到也给一句话：静悄悄的「—」
-           看起来像功能没做。 -->
+           看起来像功能没做。IP + 归属地单独占一整行（`path` 块），窄窗也看得清，
+           不再挤在「标签 — 刷新」那一行里被压扁。
+           The egress IP + geolocation sits on its own full-width line (a `path` block)
+           so it stays legible even in a narrow window, instead of being squeezed into
+           the "label — refresh" row. -->
       <div class="row" style="margin-top:10px">
         <span class="k" id="k-proxy-ip" data-i18n="sett.proxy_ip">Current IP</span>
-        <span id="v-proxy-ip" class="path">—</span>
         <button id="btn-proxy-ip" data-i18n="sett.refresh">Refresh</button>
       </div>
+      <div class="path" id="v-proxy-ip">—</div>
       <div class="hint" id="hint-proxy-now" hidden></div>
 
       <!-- 升级通路：互斥的分类，每行一条，后面跟真实测速结果。选哪一行同时决定出口与地址。 -->
@@ -382,7 +410,7 @@
         <div class="about-lines">
           <div class="about-name">NetSense</div>
           <div class="mv" data-i18n="sett.about_desc">Network automation that watches where you are and applies the right configuration.</div>
-          <div class="row" style="margin-top:0">
+          <div class="row row-version" style="margin-top:0">
             <span class="k" id="k-version" data-i18n="sett.version">Version</span>
             <span class="val" id="v-version">—</span>
             <span id="v-upd-status"></span>
@@ -427,10 +455,12 @@
        a red link). -->
   <!-- i18n-exempt：页脚是品牌署名，固定不译。 -->
   <!-- i18n-exempt: the footer is branding; keep the same wording in every language. -->
-  <div class="dev-foot">Develop by <a href="#" id="link-author">@//imonior/</a> ©2026 NetSense</div>
-  <!-- 关闭按钮悬在窗口右下角（无边框窗口没有原生标题栏可点）。
-       The close button floats bottom-right (this borderless window has no native title bar). -->
-  <button class="win-close" id="btn-close" data-i18n="sett.close">Close</button>
+  <footer class="app-foot">
+    <!-- 左下角开发署名：品牌信息，任何语言保持同一段（作者句柄是红色外链）。 -->
+    <div class="dev-foot">Develop by <a href="#" id="link-author">@imonior</a> ©2026 NetSense</div>
+    <!-- 关闭按钮在底边条右侧（无边框窗口没有原生标题栏可点）。 -->
+    <button class="win-close" id="btn-close" data-i18n="sett.close">Close</button>
+  </footer>
 
   <div class="toast" id="toast"></div>
 
@@ -970,6 +1000,7 @@
         setStatus(t("popup.update_failed", "Failed to check for updates"), "bad");
         show("hint-about", "");
         show("err-about", d && d.__error ? d.__error : "");
+        el("v-version").classList.remove("ok", "bad");   // 检查失败：版本号保持默认色
         return;
       }
       show("err-about", "");
@@ -977,12 +1008,14 @@
       if (!d.update_available) {
         show("hint-about", "");
         setStatus(t("popup.up_to_date", "You're up to date"), "ok");
+        el("v-version").classList.add("ok"); el("v-version").classList.remove("bad");  // 已是最新：版本号绿色
         return;
       }
       // 红：网络上有更新的版本。装不装得上在检查阶段就判完：验不了的时候连按钮都不给
       // —— 点了才报错，等于先让用户把这条下载花掉。发布页那一颗始终留着，它是这条路
       // 走得通时的兜底。
       setStatus(tf("sett.update_found", "Version {version} is available", { version: d.latest }), "bad");
+      el("v-version").classList.add("bad"); el("v-version").classList.remove("ok");  // 有新版：当前旧版号标红
       const unverifiable = d.installable === false;
       const hints = [];
       if (d.homebrew) hints.push(t("popup.brew_note", "Installed via Homebrew — Update Now runs: brew upgrade --cask netsense"));

@@ -132,7 +132,10 @@
   /// 补 mac / ipv6 / prefix6 / gateway6）填这张卡。字段取不到留「—」
   /// （每个字段都在场，排障时才看得出「是空的」和「没读到」）。
   /// `v6mode` 是当前生效配置里的 IPv6 模式：off → IPv6 行显示设置值「Off」、前缀 / 网关行
-  /// 整行收起；非 off 三行都摆，读不到的给红色「—」（配置说它该有而实测没有，值得警惕）。
+  /// 整行收起；非 off 三行都摆。IPv6 地址行「模式已开但实测没拿到地址」时，显示「设置的模式」
+  /// （Automatic / Manual / Link-local）而不是刺眼的红「—」—— 用户要的就是这句「没取到就回退到模式」。
+  /// 只有 manual（显式配了静态地址却没生效）才标红告警；automatic / linklocal 没拿到地址属常态，不告警。
+  /// 前缀 / 网关行读不到就给中性「—」，不标红（它们不是模式，套用模式名反而误导）。
   /// 与托盘菜单 `popup.html` 的填充逻辑逐字同构（抽出来共用）。
   function fill(card, ctx) {
     const { st, primary, v6mode, connected, profile, t } = ctx;
@@ -154,12 +157,26 @@
     setRow("gateway", (st && st.gateway) || (primary && primary.gateway));
     const v6off = v6mode === "off";
     const v6known = v6mode === "automatic" || v6mode === "manual" || v6mode === "linklocal";
+    // 模式名（读不到地址时回填到 IPv6 行）；off 不在此列（那一支走上面的 Off 文案）。
+    const v6label = v6mode === "automatic" ? t("editor.automatic", "Automatic")
+      : v6mode === "manual" ? t("editor.manual", "Manual")
+      : v6mode === "linklocal" ? t("editor.linklocal", "Link-local")
+      : "";
     const setRow6 = (id, v) => {
       const el = setRow(id, v);
       if (el && el.parentElement) el.parentElement.hidden = !!v6off;
-      if (el) el.className = "v" + (v6known && !v ? " bad" : "");
+      if (el) el.className = "v";
     };
     setRow6("ipv6", v6off ? t("editor.off", "Off") : (primary && primary.ipv6));
+    // IPv6 地址行：模式已开但实测没拿到地址 → 回退显示「设置的模式」，而非红色「—」。
+    // 仅 manual（显式静态配置却没生效）标红；automatic / linklocal 没拿到地址属常态，不告警。
+    if (v6known && !(primary && primary.ipv6)) {
+      const ipv6El = card.querySelector("#v-ipv6");
+      if (ipv6El) {
+        ipv6El.textContent = v6label;
+        ipv6El.className = "v" + (v6mode === "manual" ? " bad" : "");
+      }
+    }
     setRow6("prefix6", v6off ? "" : (primary && primary.prefix6));
     setRow6("gateway6", v6off ? "" : ((st && st.gateway6) || (primary && primary.gateway6)));
     setRow("dns", (st && st.dns) || (primary && primary.dns));

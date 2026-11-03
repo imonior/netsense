@@ -4,6 +4,12 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.6] - 2026-11-04
+
+### Fixed
+
+- **macOS UI polish for the status-tray menu, the applied-result popup, and the settings window.** The shared network-info renderer (`frontend/netinfo.js`, used by both the tray single-click menu and the applied popup) no longer shows a bare red `-` when an IPv6 address has not been obtained yet: with a mode configured but the address still absent it now shows the configured mode label (Automatic / Manual / Link-local), reserving the red warning for `manual` (explicit static config that failed to apply). The settings window (`frontend/settings.html`) gains a real bottom bar so the branding footer and the Close button sit on their own row and never overlap scrolling content; the Privilege channel row now wraps its long value instead of overlapping the label; the proxy current-IP block shows the IP and its geolocation on a full-width line; the About version number is left-aligned next to its label and colored green when up to date / red when a newer version exists; and the four links (GitHub / Release notes / Report an issue / License) now sit on one row. The author handle in the branding footer is corrected to `@imonior`.
+
 ## [1.9.5] - 2026-11-03
 
 ### Fixed
