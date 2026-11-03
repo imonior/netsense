@@ -4,6 +4,13 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.7] - 2026-11-04
+
+### Fixed
+
+- **Status-tray menu and settings window regressions from 1.9.6.** The settings window (`frontend/settings.html`) bottom bar (branding footer + Close button) is now a real bottom bar again: in 1.9.6 it was accidentally placed inside the horizontal flex container and rendered as a third column, while it should sit flush at the bottom of the window with the scrolling content above it. The About version number is now glued directly to its `Version` label, with the update-state pill (green when up to date / red when a newer version exists) following right after. Opening the settings window also triggers a silent background update check that fills the About card automatically, so clicking "Check now" is no longer required.
+- **Persistent upgrade reminder in the tray menu.** When a newer version is available, the tray single-click menu (`frontend/popup.html`) now shows a persistent "Update available" banner at the top on every open. Previously this was a one-shot modal gated by a per-session flag. The banner offers "Update now" (opens the update modal) and "Release page".
+
 ## [1.9.6] - 2026-11-04
 
 ### Fixed

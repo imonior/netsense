@@ -176,7 +176,9 @@
        About version number: left-aligned right after the "Version" label (not pushed to
        the far right by flex:1), colored by update verdict — green when up to date, red
        when a newer version exists online; neutral on check failure. */
-    .row.row-version .k { flex: none; margin-right: 6px; }
+    /* About 版本号：标签与版本号粘成一个 inline 组，只留 6px，确保「Version」紧挨版本号；
+       更新结论（绿=最新 / 红=有新版）单独成段放在组后。 */
+    .ver-group { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
     #v-version.ok { color: var(--ok); }
     #v-version.bad { color: var(--t-err); }
     /* 第二部分：详细介绍是几行完整句子，行高放宽到 1.7 才读得下去。 */
@@ -410,9 +412,8 @@
         <div class="about-lines">
           <div class="about-name">NetSense</div>
           <div class="mv" data-i18n="sett.about_desc">Network automation that watches where you are and applies the right configuration.</div>
-          <div class="row row-version" style="margin-top:0">
-            <span class="k" id="k-version" data-i18n="sett.version">Version</span>
-            <span class="val" id="v-version">—</span>
+          <div class="row" style="margin-top:0">
+            <span class="ver-group"><span class="k" id="k-version" data-i18n="sett.version">Version</span><span class="val" id="v-version">—</span></span>
             <span id="v-upd-status"></span>
           </div>
           <div class="row" style="margin-top:0">
@@ -449,6 +450,7 @@
     </div>
       </section>
   </main>
+  </div><!-- /.app -->
 
   <!-- 左下角署名页脚：品牌信息，任何语言保持同一段（作者句柄是红色外链）。
        Bottom-left branding footer: identical in every language (the author handle is
@@ -1305,6 +1307,16 @@
       // 检测状态列的初始文案：还没检查过就如实说明，而不是留一片空白。
       // Initial status text: say "not checked yet" plainly instead of leaving it blank.
       setStatus(t("sett.not_checked", "Not checked yet"), "");
+      // 打开设置即后台静默查一次更新：把结果填进 About 卡（版本号按结论着色、状态、上次检查
+      // 时间），用户切到 About 时已是现成结论，不必再手动点「Check now」。
+      // Auto-check updates in the background on open: fill the About card so the verdict is
+      // ready when the user navigates there, no manual "Check now" needed.
+      setTimeout(() => {
+        invoke("check_update").then(r => {
+          const d = (typeof r === "string") ? JSON.parse(r) : r;
+          renderAboutUpdate(d);
+        }).catch(() => {});
+      }, 1500);
       // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
       // 下一次白屏能用「日志里有没有 ready」一步分辨 JS 没跑还是画不出来。
       // Readiness heartbeat, sent only after init fully completes: blank-window

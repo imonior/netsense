@@ -158,6 +158,28 @@
     .modal .notes { max-height: 130px; overflow-y: auto; font-size: 11px; color: var(--muted);
       white-space: pre-wrap; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
     .modal .err { color: var(--t-err); font-size: 11px; word-break: break-word; margin: 6px 0; }
+    /* 有可用更新时的常驻升级提醒条：出现在菜单顶部，每次打开菜单都会按查新结果重绘。
+       Persistent upgrade-reminder bar shown at the top of the menu; re-rendered on every open. */
+    .update-bar {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin: 0 0 8px; padding: 7px 10px;
+      background: var(--t-sunken); border: 1px solid var(--accent); border-radius: var(--t-r-sm);
+      font-size: 12px; color: var(--fg);
+    }
+    .update-bar[hidden] { display: none; }
+    .update-bar .ub-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+    .update-bar .ub-text { font-weight: 600; }
+    .update-bar b { color: var(--accent); }
+    .update-bar .ub-btn {
+      margin-left: auto; padding: 4px 10px; font-size: 12px; cursor: pointer;
+      border: 1px solid var(--accent); border-radius: var(--t-r-sm);
+      background: var(--accent); color: var(--t-on-accent);
+    }
+    .update-bar .ub-rel {
+      padding: 4px 10px; font-size: 12px; cursor: pointer;
+      border: 1px solid var(--line); border-radius: var(--t-r-sm);
+      background: var(--bg); color: var(--fg);
+    }
   </style>
 </head>
 <body>
@@ -167,6 +189,17 @@
       <button class="tiny" id="btn-quit" data-i18n="tray.quit">Quit NetSense</button>
     </span>
   </header>
+
+  <!-- 有可用更新时的常驻升级提醒条：每次打开菜单（focus → refresh）都会按已缓存的查新结果重绘；
+       不再像旧逻辑那样只在启动时弹一次模态框、且被会话守卫挡掉后续显示。点「Update Now」打开
+       更新模态框，「Release Page」直达发布页。 -->
+  <div class="update-bar" id="update-bar" hidden>
+    <span class="ub-dot"></span>
+    <span class="ub-text" data-i18n="popup.update_available">Update available</span>
+    <b id="update-bar-ver"></b>
+    <button class="ub-btn" id="ub-update" data-i18n="popup.update_now">Update Now</button>
+    <button class="ub-rel" id="ub-rel" data-i18n="popup.release_page">Release Page</button>
+  </div>
 
   <div class="section"><span id="sec-info" data-i18n="popup.section_info">Current network</span><span class="dot" id="dot"></span></div>
   <div class="card" id="net-card">
@@ -491,6 +524,12 @@
 
 
     // 弹窗渲染：发现新版本 / 已是最新 / 检查失败 三种态
+    // 有可用更新时的常驻升级提醒条所需的状态：最近一次 check_update 结果 + 上次真正发请求的时间戳。
+    // 菜单每次打开（focus → refresh → refreshUpdateBanner）都按这些重绘，确保「单击托盘图标总有提醒」。
+    // State for the persistent upgrade-reminder bar: latest check_update result + last real-check timestamp.
+    let updateInfo = null;
+    let lastUpdateCheck = 0;
+
     function renderUpdate(d) {
       const mask = document.getElementById("update-mask");
       const box = document.getElementById("update-modal");
@@ -540,6 +579,41 @@
         document.getElementById("up-rel").onclick = () => invoke("open_url", { url: d.html_url }).catch(() => {});
       }
       document.getElementById("up-close").onclick = closeUpdateModal;
+    }
+
+    // 按已缓存的查新结果重绘常驻升级提醒条：有可用更新就显示（含版本号与「Update Now」，
+    // 仅当后端判定可安装时才给按钮），否则隐藏。
+    // Re-render the persistent reminder bar from the cached result: show when an update is
+    // available (with version + "Update Now", the button only when installable), hide otherwise.
+    function renderUpdateBanner() {
+      const bar = document.getElementById("update-bar");
+      if (!bar) return;
+      if (updateInfo && updateInfo.update_available) {
+        bar.hidden = false;
+        document.getElementById("update-bar-ver").textContent = updateInfo.latest || "";
+        // 后端判定这个更新装不了 / 验不过时，只给「发布页」入口，不放「立即更新」按钮。
+        // When the backend deems the update uninstallable/unverifiable, only offer the release page.
+        document.getElementById("ub-update").hidden = updateInfo.installable === false;
+      } else {
+        bar.hidden = true;
+      }
+    }
+
+    // 菜单每次打开时调用：先按缓存立刻重绘提醒条，再按需（节流 10 分钟）补一次真实查新，
+    // 让久开的会话也能跟上最新版本状态。
+    // Called on every menu open: re-render from cache immediately, then (throttled to 10 min)
+    // refresh once so a long-lived session still catches a newly published version.
+    function refreshUpdateBanner() {
+      renderUpdateBanner();
+      const now = Date.now();
+      if (now - lastUpdateCheck > 10 * 60 * 1000) {
+        lastUpdateCheck = now;
+        invoke("check_update").then(r => {
+          const d = (typeof r === "string") ? JSON.parse(r) : r;
+          updateInfo = d;
+          renderUpdateBanner();
+        }).catch(() => {});
+      }
     }
 
     // 执行下载 + 安装（Homebrew 渠道内部走 brew upgrade）。进度由
@@ -704,6 +778,7 @@
         applyI18n();
         render(data);
         renderNics();
+        refreshUpdateBanner();
       } catch (e) { /* 非 Tauri 环境（浏览器直接打开）时静默 */ }
     }
 
@@ -770,6 +845,10 @@
       catch (e) { toast(String(e)); }
     };
     document.getElementById("btn-update").onclick = () => checkForUpdate();
+    document.getElementById("ub-update").onclick = () => { if (updateInfo) renderUpdate(updateInfo); };
+    document.getElementById("ub-rel").onclick = () => {
+      if (updateInfo && updateInfo.html_url) invoke("open_url", { url: updateInfo.html_url }).catch(() => {});
+    };
 
     // 面板每次获得焦点（被托盘点开）时刷新一次，保证数据新鲜
     window.addEventListener("focus", refresh);
@@ -800,14 +879,16 @@
       // 当前网络信息每 3s 自拉一次：后端只在实际网络变更 / 判定时才广播，稳定网络下不广播，
       // 菜单会被冻在旧值；这个定时器补齐实时性，且 2s 缓存让每趟几乎零成本。
       setInterval(refreshNet, 3000);
-      // 启动后静默检查一次：发现新版本才弹窗，且本次会话只提示一次
+      // 启动后静默检查一次：记住结果并常驻显示提醒条（不再弹模态框——模态框留给
+      // 「Check for Updates」按钮以及提醒条上的「Update Now」）。
+      // Silent background check on launch: store the result and show the persistent banner.
+      // The modal is now reserved for the "Check for Updates" button and the banner's "Update Now".
       setTimeout(() => {
         invoke("check_update").then(r => {
           const d = (typeof r === "string") ? JSON.parse(r) : r;
-          if (d && d.update_available && !sessionStorage.getItem("ns_update_seen")) {
-            sessionStorage.setItem("ns_update_seen", d.latest || "1");
-            renderUpdate(d);
-          }
+          updateInfo = d;
+          lastUpdateCheck = Date.now();
+          renderUpdateBanner();
         }).catch(() => {});
       }, 4000);
       // 就绪心跳：init 全部跑完才发。「界面全白」在文件日志里是隐形的，这条心跳让
