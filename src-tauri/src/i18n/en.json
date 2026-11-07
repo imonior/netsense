@@ -120,6 +120,7 @@
   "notify.probe_running": "Probing current network…",
   "notify.probe_conflict": "Probe found a conflict ({names}); nothing was applied",
   "notify.probe_no_match": "Probe: no profile matches the current network",
+  "notify.probe_unread": "Probe: network identity could not be fully read (SSID / gateway MAC / BSSID); no comparison was performed",
   "popup.vpn": "VPN / virtual adapters",
   "popup.settings": "Settings",
   "popup.logs": "Logs",

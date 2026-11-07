@@ -300,11 +300,15 @@ fn main() {
                     || window.label() == popup::SETTINGS_LABEL
                     || window.label() == popup::LOGS_LABEL =>
             {
-            // 关掉 = 收回托盘常驻（不是退出），此刻把窗口几何记下来 —— 下次打开照原样
-            // 恢复并收敛到工作区，见 `popup::apply_geometry` / `popup::apply_spot`。
-            popup::remember_geometry(window);
-                api.prevent_close();
-                let _ = window.hide();
+        // 关掉 = 收回托盘常驻（不是退出），此刻把窗口几何记下来 —— 下次打开照原样
+        // 恢复并收敛到工作区，见 `popup::apply_geometry` / `popup::apply_spot`。
+        // `remember_geometry` 收 `&WebviewWindow`，而事件给的是 `&Window`，这里按 label 取回
+        // 真正的 WebviewWindow 再传（原生关闭路径的 label 必与已建窗口一致）。
+        if let Some(ww) = window.app_handle().get_webview_window(window.label()) {
+            popup::remember_geometry(&ww);
+        }
+            api.prevent_close();
+            let _ = window.hide();
             }
             // 关掉结果弹窗（applied）= 收起，而不是销毁：它启动时就建好、靠
             // `get_webview_window(APPLIED_LABEL)` 复用，`show_applied` 在窗口不存在时

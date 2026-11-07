@@ -2735,9 +2735,35 @@ fn probe(state: &Arc<AppState>) {
             crate::state::emit_action(state, "probe", false, msg);
         }
         Decision::NoActiveProfile => {
-            let msg = i18n::t("notify.probe_no_match");
-            log::info(&msg);
-            crate::state::emit_action(state, "probe", false, msg);
+            // 先判「身份是否读全」：SSID / 网关 MAC / BSSID 没采样全时，连比对都做不了，
+            // 保持现状并提示「信息不全、未比对」，绝不误用兜底（否则会拿一份不完整的证据
+            // 去推翻正在工作的网络）。这条判定与自动循环同一个守卫 `no_match_is_actionable`，
+            // 语义一致：身份被确认读不到（空转到阈值）才放行兜底，没读全就保持现状。
+            let unread = {
+                let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+                !eng.no_match_is_actionable()
+            };
+            if unread {
+                // 获取信息不全，没有进行比对：只提示，不改动网络。
+                let msg = i18n::t("notify.probe_unread");
+                log::info(&msg);
+                crate::state::emit_action(state, "probe", false, msg);
+            } else {
+                // 身份读全但零命中：复用自动循环同一条「判定 → 下发 → 兜底」链路
+                // （reconcile 内部应用 fallback），用户点探测就是要它落到正确配置（含零命中的兜底）。
+                reconcile(state, &allowed);
+                let applied = {
+                    let eng = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+                    eng.fallback_fp.is_some()
+                };
+                let msg = if applied {
+                    i18n::t("engine.fallback_applied")
+                } else {
+                    i18n::t("notify.probe_no_match")
+                };
+                log::info(&msg);
+                crate::state::emit_action(state, "probe", applied, msg);
+            }
         }
     }
     publish_view(state);

@@ -321,7 +321,7 @@ fn fit_to_work_area(win: &WebviewWindow, w: u32, h: u32) -> (u32, u32) {
 ///
 /// 写不进去只记一条日志：几何是偏好，不是配置 —— 为了它打断「关窗口」这个动作不值得，
 /// 而静默失败又会让「为什么下次又变回去了」无从查起。
-pub fn remember_geometry(window: &tauri::Window) {
+pub fn remember_geometry(window: &WebviewWindow) {
     let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
         return;
     };
@@ -367,7 +367,7 @@ pub fn remember_geometry(window: &tauri::Window) {
 /// 关闭这一刻的窗口位置（物理像素）。最小化中的 Windows 会给出 `(-32000, -32000)`
 /// 这种哨兵坐标，存它等于存一个「下次一定落在屏幕外」的值 —— 直接不记，位置留着上次
 /// 那个正常值（或没有），由打开时的收敛决定。
-fn spot_of(window: &tauri::Window) -> Option<(i32, i32)> {
+fn spot_of(window: &WebviewWindow) -> Option<(i32, i32)> {
     let pos = window.outer_position().ok()?;
     if pos.x <= -32_000 || pos.y <= -32_000 {
         return None;

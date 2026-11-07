@@ -305,10 +305,16 @@ pub fn open_settings(state: State<'_, std::sync::Arc<AppState>>) {
 }
 
 /// 隐藏软件配置窗口（收回菜单栏常驻，不退出应用）。
+///
+/// 隐藏前先记一笔窗口几何：软件配置窗口是无边框的，关闭只走这个 IPC（没有原生标题栏可点），
+/// 若不在这里记，原生 `CloseRequested` 那条 `remember_geometry` 永远触发不到 —— 用户拖好的
+/// 大小与位置下次打开就全丢了。见 `popup::apply_geometry` / `popup::apply_spot`。
 #[tauri::command]
 pub fn close_settings(state: State<'_, std::sync::Arc<AppState>>) {
     if let Some(app) = state.app.get() {
         if let Some(w) = app.get_webview_window(crate::popup::SETTINGS_LABEL) {
+            // 关掉（收回托盘）= 记下窗口几何，下次打开照原样恢复（见 crate::popup::apply_geometry）。
+            crate::popup::remember_geometry(&w);
             let _ = w.hide();
         }
     }

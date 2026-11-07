@@ -4,6 +4,13 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [1.9.8] - 2026-11-07
+
+### Fixed
+
+- **托盤選單「探測」現在會在任何設定都未命中時套用 fallback 設定，並能正確提示身分資訊讀取不全的情況。** 過去手動「探測」只記錄「沒有符合的設定」且從不套用 fallback 設定，於是沒有命中設定的網路會停留在原有狀態，而不會切換到 fallback。現在「探測」複用與自動循環相同的「判定 → 下發 → 兜底」鏈路。它還能區分身分資訊讀不全的情況：當 SSID / 閘道 MAC / BSSID 無法被完整取樣（例如 Wi-Fi 正在休眠）時，「探測」保持目前設定，並提示「網路身分資訊取得不全，未進行比對」，而不會謊報符合結果。新增一個 i18n 鍵（`notify.probe_unread`），隨五種語言一同發布，總鍵數來到 721。 (`src-tauri/src/engine.rs`)
+- **設定視窗現在會在多次開啟之間記住自己的位置與大小。** 設定視窗是無邊框的，關閉它只走 `close_settings` 這個 IPC 命令（不會走原生關閉路徑），因此它的幾何資訊從未被儲存。`close_settings` 現在會在隱藏視窗前記錄幾何資訊，下次開啟時視窗會恢復到上次的尺寸與位置（並收斂到工作區）。同時預設視窗寬度由 720 收窄到 600，避免在較小螢幕上溢出。 (`src-tauri/src/ipc.rs`, `src-tauri/src/popup.rs`, `src-tauri/src/main.rs`, `src-tauri/tauri.conf.json`)
+
 ## [1.9.7] - 2026-11-04
 
 ### 修正

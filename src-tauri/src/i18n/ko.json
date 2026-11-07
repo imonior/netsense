@@ -120,6 +120,7 @@
   "notify.probe_running": "현재 네트워크 진단 중…",
   "notify.probe_conflict": "진단 결과 여러 설정이 동시에 일치합니다({names}). 실행하지 않았습니다",
   "notify.probe_no_match": "진단 완료: 현재 네트워크와 일치하는 설정이 없습니다",
+  "notify.probe_unread": "진단 완료: 네트워크 식별 정보를 모두 읽지 못했습니다(SSID / 게이트웨이 MAC / BSSID). 비교를 수행하지 않았습니다.",
   "popup.vpn": "VPN · 가상 어댑터",
   "popup.settings": "설정",
   "popup.logs": "로그",

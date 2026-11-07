@@ -120,6 +120,7 @@
   "notify.probe_running": "正在探测当前网络…",
   "notify.probe_conflict": "探测发现多个配置同时命中（{names}），未执行",
   "notify.probe_no_match": "探测完成：当前网络没有匹配的配置",
+  "notify.probe_unread": "探测完成：网络身份信息获取不全（SSID / 网关 MAC / BSSID 未读全），未进行比对",
   "popup.vpn": "VPN · 虚拟网卡",
   "popup.settings": "设置",
   "popup.logs": "日志",

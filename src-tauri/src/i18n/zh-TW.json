@@ -120,6 +120,7 @@
   "notify.probe_running": "正在探測目前網路…",
   "notify.probe_conflict": "探測發現多個設定同時符合（{names}），未執行",
   "notify.probe_no_match": "探測完成：目前網路沒有符合的設定",
+  "notify.probe_unread": "探測完成：網路身分資訊取得不全（SSID / 閘道 MAC / BSSID 未讀全），未進行比對",
   "popup.vpn": "VPN · 虛擬網卡",
   "popup.settings": "設定",
   "popup.logs": "紀錄",

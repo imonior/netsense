@@ -120,6 +120,7 @@
   "notify.probe_running": "現在のネットワークを診断中…",
   "notify.probe_conflict": "診断の結果、複数の設定が同時に一致しました（{names}）。実行は見送りました",
   "notify.probe_no_match": "診断完了: 現在のネットワークに一致する設定はありません",
+  "notify.probe_unread": "診断完了：ネットワーク識別情報が十分に読み取れませんでした（SSID / ゲートウェイ MAC / BSSID）。比較は行われませんでした",
   "popup.vpn": "VPN · 仮想アダプター",
   "popup.settings": "設定",
   "popup.logs": "ログ",

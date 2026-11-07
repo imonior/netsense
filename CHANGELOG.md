@@ -4,6 +4,13 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.8] - 2026-11-07
+
+### Fixed
+
+- **Tray-menu Probe now applies the fallback profile when no profile matches, and reports incomplete identity reads correctly.** Previously a manual Probe only logged "no profile matches" and never applied the fallback config, so a network with no matching profile kept whatever it had instead of switching to the fallback. Probe now reuses the same decide → apply → fallback chain as the automatic loop. It also distinguishes an unreadable identity: when the SSID / gateway MAC / BSSID cannot be fully sampled (for example Wi-Fi is dozing), Probe keeps the current configuration and shows "network identity could not be fully read; no comparison was performed" instead of falsely reporting a match result. One new i18n key (`notify.probe_unread`) ships in all five languages, bringing the table to 721 keys. (`src-tauri/src/engine.rs`)
+- **The Settings window now remembers its position and size between sessions.** The Settings window is borderless, so closing it only runs the `close_settings` IPC command (never the native close path); its geometry was therefore never saved. `close_settings` now records the window geometry before hiding, and the window restores to the last size and position on the next open (converged to the work area). The default window width was also narrowed from 720 to 600 so it no longer overflows on smaller screens. (`src-tauri/src/ipc.rs`, `src-tauri/src/popup.rs`, `src-tauri/src/main.rs`, `src-tauri/tauri.conf.json`)
+
 ## [1.9.7] - 2026-11-04
 
 ### Fixed
@@ -25,7 +32,7 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **Three new i18n keys for the Windows relaunch-stale path.** `popup.update_stale` (download finished but the installed app is still the old version — tells the user to reboot or click Restart now), `upd.exe_not_found`, and `upd.exe_stale` ship in all five languages, bringing the table to `720` keys. The frontend no longer swallows a relaunch failure: a failed `relaunch_app` now surfaces the real reason instead of claiming success. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+- **Three new i18n keys for the Windows relaunch-stale path.** `popup.update_stale` (download finished but the installed app is still the old version — tells the user to reboot or click Restart now), `upd.exe_not_found`, and `upd.exe_stale` ship in all five languages, bringing the table to `721` keys. The frontend no longer swallows a relaunch failure: a failed `relaunch_app` now surfaces the real reason instead of claiming success. (`frontend/popup.html`, `src-tauri/src/i18n/`)
 
 ## [1.9.4] - 2026-11-03
 
@@ -36,7 +43,7 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **A "Restart now" button in the update-success popup.** Auto-relaunch can still be defeated on some setups (e.g. a process killed but the new instance never launching); the button calls `relaunch_app` once more so the user is never stuck on a dead modal. Two new i18n keys ship in all five languages, bringing the table to `720` keys. (`frontend/popup.html`, `src-tauri/src/i18n/`)
+- **A "Restart now" button in the update-success popup.** Auto-relaunch can still be defeated on some setups (e.g. a process killed but the new instance never launching); the button calls `relaunch_app` once more so the user is never stuck on a dead modal. Two new i18n keys ship in all five languages, bringing the table to `721` keys. (`frontend/popup.html`, `src-tauri/src/i18n/`)
 
 ## [1.9.3] - 2026-11-01
 
@@ -80,7 +87,7 @@ All notable changes to NetSense are documented here. The format is based on
 
 ### Added
 
-- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 720 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
+- **The Settings → About page now credits the author and links the project's GitHub page.** The card used to show only the platform and the version. It now lists the author (`imonior`) and a `github.com/imonior/netsense` link that opens in the system browser via the existing `open_url` command (with `preventDefault` so the WebView never navigates away on its own). Two new i18n keys (`sett.author`, `sett.github`) ship in all five languages, bringing the table to 721 keys. (`frontend/settings.html`, `src-tauri/src/i18n/`)
 - **Every window now reports to the backend once its page has finished initializing.** All five windows call the new `frontend_ready` command (with their window label) at the end of init, and the backend logs `frontend ready: <win>`. A blank-window report can now be bisected from the log alone: ready lines present means the scripts ran and the failure is in the rendering layer; no ready lines at all means the WebView never executed them. The smoke test's first-paint command contract pins the heartbeat in place. (`frontend/*.html`, `ipc.rs`, `main.rs`, `scripts/editor-smoke.mjs`)
 - **The in-app upgrade's installation steps are now audited in the app log — including on success.** The macOS installer script echoes each step (removing the old bundle, copying the new one, relaunching as the logged-in user), and `install_macos` writes the script output to the log even when everything succeeds; previously the success path logged nothing at all, so a broken upgrade left a single verification line to investigate. (`src-tauri/src/update.rs`)
 
