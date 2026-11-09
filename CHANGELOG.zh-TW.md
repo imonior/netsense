@@ -4,6 +4,13 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [1.9.9] - 2026-11-10
+
+### Fixed
+
+- **應用結果彈窗在應用內升級後不再顯示過期的「未知」SSID。** 彈窗此前渲染的是視窗初始化時抓取的網路狀態快照裡的 SSID，而全新啟動時該快照為空，於是成功彈窗即使系統 SSID 已知也顯示「未知」。現在它每次收到 `netsense://applied` 事件時都會重新取樣網路（`get_status` 帶上 `needs_bssid`），並渲染剛剛取樣到的 SSID，消除了「差一拍」的誤顯示。 (`frontend/applied.html`)
+- **設定視窗預設寬度收窄，且升級時遷移已儲存的幾何資訊而不會丟棄使用者布局。** 預設寬度由 600 收窄到 480（`minWidth` 由 540 到 440），避免在較小螢幕上溢出。由於視窗本就記憶上次的尺寸與位置，一次性的 `geom_ver` 遷移現在只在升級時把過期的預設寬度（600 → 480）糾正過來，已儲存的位置或自訂尺寸一律不動 —— 不再強制重設已儲存的幾何資訊。 (`src-tauri/src/appconfig.rs`, `src-tauri/tauri.conf.json`, `src-tauri/src/ipc.rs`)
+
 ## [1.9.8] - 2026-11-07
 
 ### Fixed

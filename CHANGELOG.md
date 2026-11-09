@@ -4,6 +4,13 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.9] - 2026-11-10
+
+### Fixed
+
+- **The applied-result popup no longer shows a stale "Unknown" SSID after an in-app upgrade.** The popup rendered the SSID from the status snapshot taken at window init, which was empty on a fresh launch, so the success popup showed "Unknown" even though the system SSID was known. It now re-samples the network (`get_status` with `needs_bssid`) each time it receives a `netsense://applied` event and renders the freshly sampled SSID, eliminating the one-beat-late display. (`frontend/applied.html`)
+- **The Settings window default width is narrowed and the saved geometry is migrated without discarding the user's layout.** The default width was reduced from 600 to 480 (and `minWidth` from 540 to 440) so it no longer overflows on smaller screens. Because the window already remembers its last size and position, a one-time `geom_ver` migration now corrects only the stale default width (600 → 480) on upgrade and leaves any saved position or custom size untouched — it no longer force-resets the saved geometry. (`src-tauri/src/appconfig.rs`, `src-tauri/tauri.conf.json`, `src-tauri/src/ipc.rs`)
+
 ## [1.9.8] - 2026-11-07
 
 ### Fixed

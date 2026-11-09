@@ -287,6 +287,17 @@ pub struct AppConfig {
     /// 新版本新增的预设才不会被一份旧清单挡住。恢复默认时有处可去（一键恢复）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirror_hidden: Vec<String>,
+    /// 窗口几何的迁移版本。每次我们把某个窗口的默认宽度调窄（settings 窗口在
+    /// 1.9.x 里从 720 → 600 → 480 反复收窄），就把它撞 +1；加载时发现存盘版本落后，
+    /// 就把「宽度仍等于旧默认」的存盘收成新默认（位置与已个性化的尺寸不动）—— 否则旧的
+    /// 「默认宽度」会被当成用户偏好一直记着，新的更窄默认永远生效不了
+    /// （见 `AppConfig::migrate_geometry`）。
+    /// Migration version for window geometry. Bumped whenever a window's default width is
+    /// narrowed; a stale saved geometry is adjusted on load (only the width, only when it
+    /// still equals the old default) so the new default actually takes effect while a
+    /// personalized position/size is preserved (see `AppConfig::migrate_geometry`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub geom_ver: u32,
 }
 
 /// DNS 兜底：3A 下发之后系统里**一个 nameserver 都没有**时，改下这几台。
@@ -373,6 +384,14 @@ fn is_true(v: &bool) -> bool {
     *v
 }
 
+/// `geom_ver == 0` 不写进文件：刚装好、从没迁移过的配置里不该出现这个内部字段
+/// （与 `show_applied_popup` 同一条道理 —— 内部迁移标记而非用户配置）。
+/// `geom_ver == 0` is not written to disk: a freshly installed config that has never
+/// been migrated should not carry this internal marker in its file.
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -388,6 +407,7 @@ impl Default for AppConfig {
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
             mirror_hidden: Vec::new(),
+            geom_ver: 0,
         }
     }
 }
@@ -410,7 +430,9 @@ impl AppConfig {
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let cfg: AppConfig =
             serde_json::from_str(&data).map_err(|e| format!("{}: {}", path.display(), e))?;
-        Ok(cfg.clamped())
+        let mut cfg = cfg.clamped();
+        cfg.migrate_geometry();
+        Ok(cfg)
     }
 
     /// 把越界的保留天数收进允许区间。
@@ -441,6 +463,39 @@ impl AppConfig {
         self.dns_fallback = self.dns_fallback.clone().clamped();
         self.mirror_hidden = clamp_mirror_hidden(&self.mirror_hidden);
         self
+    }
+
+    /// 窗口几何迁移：settings 窗口的默认宽度在 1.9.x 里反复调窄（720 → 600 → 480）。
+    ///
+    /// 一旦用户关过一次窗口，那个尺寸/位置就被 `remember_geometry` 存盘、当成「用户偏好」
+    /// 一直记着 —— 于是新的更窄默认永远生效不了，`apply_geometry` 永远先命中存盘值。
+    /// 所以调窄默认要撞 `geom_ver`：加载时发现存盘版本落后，就**只把「宽度 == 旧默认」的
+    /// 存盘**（= 用户从没手动改过，只是开过一次被记住了那个默认）收成新默认；位置与其余
+    /// 尺寸一律不动，尊重 `remember_geometry` 记住的真实偏好。这避免了两件事：① 只改
+    /// `tauri.conf.json` 默认、用户本地永远看不到变化；② 用一刀切的 `= None` 覆盖掉用户
+    /// 真正个性化过的尺寸/位置。这只发生一次：迁移后 `geom_ver` 已是当前值，之后用户手动
+    /// 拖窄/拖宽/挪位置都会被正常记住。
+    ///
+    /// Window geometry migration: the settings window default width was narrowed repeatedly
+    /// across 1.9.x (720 → 600 → 480). A size/position is persisted the first time the window
+    /// is closed, so the new narrower default can never take effect unless the stale saved
+    /// geometry is adjusted. Bump `CURRENT_GEOM_VER` on every default change; when the saved
+    /// version lags, narrow only the saved width if it still equals the old default (i.e. the
+    /// user never personalized it), leaving position and other dimensions untouched. Runs once.
+    fn migrate_geometry(&mut self) {
+        const CURRENT_GEOM_VER: u32 = 1;
+        const OLD_DEFAULT_WIDTH: u32 = 600; // 1.9.8 默认；用户从未手动改过时的存盘宽度
+        const NEW_DEFAULT_WIDTH: u32 = 480; // 1.9.9 默认
+        if self.geom_ver < CURRENT_GEOM_VER {
+            // 只收「宽度 == 旧默认」的存盘（= 用户从没个性化过，只是被记住了默认）；
+            // 位置与其余尺寸一律不动，尊重 remember_geometry 记住的真实偏好。
+            if let Some(size) = self.window_sizes.settings.as_mut() {
+                if size.0 == OLD_DEFAULT_WIDTH {
+                    size.0 = NEW_DEFAULT_WIDTH;
+                }
+            }
+            self.geom_ver = CURRENT_GEOM_VER;
+        }
     }
 
     /// 此刻该展示的预置镜像：代码里那份减去用户删掉的。
@@ -913,6 +968,7 @@ mod tests {
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
             mirror_hidden: Vec::new(),
+            geom_ver: 1,
         };
         cfg.save(&p).unwrap();
         assert_eq!(AppConfig::load(&p).unwrap(), cfg);
@@ -928,6 +984,42 @@ mod tests {
         // 缺 theme 是「跟随系统」。一份从来没有过这个字段的文件不该在升级后被钉死成
         // 某一套配色 —— 用户要的是界面跟着他自己系统的样子走。
         assert_eq!(got.theme, DEFAULT_THEME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 几何迁移：旧配置（没有 `geom_ver`，即 settings 宽度被当成「用户偏好」记着的 600）
+    /// 加载后 settings 的存盘宽度应被收成新默认 480、高度与位置原样保留；其余窗口
+    /// （main / logs）的几何不受影响，且 `geom_ver` 升到当前值（之后同版本内不再重复迁移）。
+    #[test]
+    fn geometry_migration_drops_stale_settings_size_on_upgrade() {
+        let dir = std::env::temp_dir().join(format!("netsense-geomver-{}", std::process::id()));
+        let p = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 一份「升级前」的配置：settings 记得 600×600，main / logs / 位置都有值，但没有 geom_ver。
+        let raw = r#"{
+            "window_sizes": { "main": [1180, 700], "settings": [600, 600], "logs": [900, 620] },
+            "window_spots": { "main": [10, 10], "settings": [20, 20] }
+        }"#;
+        std::fs::write(&p, raw).unwrap();
+
+        let got = AppConfig::load(&p).unwrap();
+        // settings 宽度被收成新默认 480，高度保留；位置不动。
+        assert_eq!(got.window_sizes.settings, Some((480, 600)), "settings width should narrow to 480, height kept");
+        assert_eq!(got.window_spots.settings, Some((20, 20)), "settings spot must be preserved");
+        // 其余窗口的几何原样保留。
+        assert_eq!(got.window_sizes.main, Some((1180, 700)));
+        assert_eq!(got.window_sizes.logs, Some((900, 620)));
+        assert_eq!(got.window_spots.main, Some((10, 10)));
+        // 版本升到当前值。
+        assert_eq!(got.geom_ver, 1);
+
+        // 幂等：同版本内再次保存 + 加载，settings 宽度保持 480（迁移已跑过，不再变），版本不变。
+        got.save(&p).unwrap();
+        let again = AppConfig::load(&p).unwrap();
+        assert_eq!(again.geom_ver, 1);
+        assert_eq!(again.window_sizes.settings, Some((480, 600)));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -950,6 +1042,7 @@ mod tests {
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
             mirror_hidden: Vec::new(),
+            geom_ver: 1,
         }
         .clamped();
         assert_eq!(bad.proxy, ProxySetting::Direct);
@@ -968,6 +1061,7 @@ mod tests {
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
             mirror_hidden: Vec::new(),
+            geom_ver: 1,
         }
         .clamped();
         assert_eq!(
@@ -1231,16 +1325,17 @@ mod tests {
             AppConfig {
                 language: None,
                 theme: DEFAULT_THEME.into(),
-                log_retention_days: 0,
-                log_level: "info".into(),
-                proxy: ProxySetting::default(),
-                window_sizes: WindowSizes::default(),
-                window_spots: WindowSpots::default(),
-                silent_execution: false,
-                update_mirror: UpdateMirror::default(),
-                dns_fallback: DnsFallback::default(),
-                show_applied_popup: true,
-                mirror_hidden: Vec::new(),
+            log_retention_days: 0,
+            log_level: "info".into(),
+            proxy: ProxySetting::default(),
+            window_sizes: WindowSizes::default(),
+            window_spots: WindowSpots::default(),
+            silent_execution: false,
+            update_mirror: UpdateMirror::default(),
+            dns_fallback: DnsFallback::default(),
+            show_applied_popup: true,
+            mirror_hidden: Vec::new(),
+            geom_ver: 1,
             }
             .clamped()
             .log_retention_days,

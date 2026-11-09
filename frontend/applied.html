@@ -282,6 +282,21 @@
       } catch (e) { /* 取不到就只靠 status */ }
     }
 
+    /// 取一份最新网络现场（含 SSID / BSSID）：`get_status` 带 needs_bssid +
+    /// 主网卡详情 `refreshPrimary`。init 与每次收到 `netsense://applied` 都复用它，
+    /// 保证结果弹窗的「当前网络」卡永远用最新可读的 SSID，而不是 init 那一份可能还没
+    /// 采样到 SSID 的快照（升级 relaunch 首轮、Wi-Fi 重新关联前都撞得到）。
+    /// Re-sample the freshest snapshot (SSID/BSSID included) + primary NIC details.
+    /// Shared by init and the `netsense://applied` handler so the card never freezes on
+    /// a stale "Unknown" captured before the SSID became readable.
+    async function sampleNetwork() {
+      try {
+        const s = JSON.parse((await invoke("get_status", { needs_bssid: true })) || "{}");
+        if (s.status) { netInfo = s.status; netV6 = s.v6mode === undefined ? null : s.v6mode; }
+      } catch (e) { /* 取不到就靠现有缓存 */ }
+      try { await refreshPrimary(); } catch (e) { /* 取不到就只靠 status */ }
+    }
+
     /// 静态占位：真实内容由事件（`netsense://applied`）驱动，在应用外直接查看这份文件
     /// 时没有 Tauri 桥、事件永远不会来 —— 一只空盒子读作「坏了」。占位文案走 i18n 字典。
     /// Static placeholder: the real content is event-driven (`netsense://applied`), and
@@ -379,12 +394,10 @@
       try { strings = await invoke("get_strings"); } catch (e) { /* 浏览器直开：显示 key 本身 */ }
       // 播种一份网络状态：这扇窗在启动时就建好了，第一轮 `netsense://status` 完全可能
       // 早于页面监听完成 —— 等到真有应用发生再取，第一轮就白等了。
-      try {
-        const s = JSON.parse((await invoke("get_status", { needs_bssid: true })) || "{}");
-        if (s.status) { netInfo = s.status; netV6 = s.v6mode === undefined ? null : s.v6mode; }
-      } catch (e) { /* 浏览器直开 / 取不到：清单退回只显示改动项 */ }
-      // 当前网络卡要 mac / ipv6 / prefix6 / gateway6，这些在 `get_interfaces` 里 —— 与托盘菜单同来源。
-      try { await refreshPrimary(); } catch (e) { /* 取不到就只靠 status */ }
+      // 播种一份网络状态：这扇窗在启动时就建好了，第一轮 `netsense://status` 完全可能
+      // 早于页面监听完成 —— 等到真有应用发生再取，第一轮就白等了。每次都取最新现场
+      // （含 SSID / BSSID），避免 init 那一份在 SSID 可读前就被缓存、卡里定格成「未知」。
+      try { await sampleNetwork(); } catch (e) { /* 浏览器直开 / 取不到：清单退回只显示改动项 */ }
       // 主动取一次最近的应用结果：窗口页面加载可能晚于引擎第一轮 pass 的广播
       // （冷启动首次应用就是这种情形），那一发事件送不到刚开的页面上。取回来就画，
       // 取不到说明此刻没有可显示的内容 —— 画占位并把自己收起来，绝不留一扇空窗。
@@ -445,7 +458,11 @@
       // 自动化应用了某个配置（首次连上 / 网络变化 / 配置变更，且 3A 成功）：弹窗展示
       // 当前应用的配置与网络信息。轮询中若无规则触发改变，后端不发此事件。
       window.__TAURI__.event.listen("netsense://applied", (e) => {
-        renderApplied(e.payload || {});
+        // 重新采样网络身份（含 SSID / BSSID）再画：结果弹窗可能在 SSID 可读之前就收到
+        // applied 事件（升级 relaunch 首轮最常见），那时 `netInfo` 还是空卡 → 显示「未知」。
+        // 每次都拿最新现场，把这次「差一拍」的误显示压掉；但 TCC 授权被重置、整段会话都
+        // 读不到 SSID 时不在此列（那得用户去系统设置里授权 Location / 网络）。
+        sampleNetwork().then(() => renderApplied(e.payload || {}));
       });
       // 3B1 / 3B2 的动作结果陆续到达：把它们填进**已经打开**的结果弹窗。
       //
