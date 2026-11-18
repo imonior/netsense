@@ -22,7 +22,7 @@
     html, body { margin: 0; height: 100%; }
     body {
       background: var(--bg); color: var(--fg);
-      font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font: var(--text-body);
       display: flex; flex-direction: column;
     }
     /* WireGuard Plus 风格：左侧固定导航栏 + 右侧内容区。导航切换 section 显隐，
@@ -99,7 +99,7 @@
       display: block; width: 100%; margin-top: 8px; resize: vertical;
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
       border-radius: var(--t-r-sm); padding: 6px 8px;
-      font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 11px/1.6 var(--font-mono);
     }
     input[type=number] { width: 78px; }
     button {
@@ -114,7 +114,7 @@
     /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 —— 允许换行、允许选中复制 */
     .path {
       margin-top: 6px; padding: 6px 8px; background: var(--t-sunken); border: 1px solid var(--line);
-      border-radius: var(--t-r-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      border-radius: var(--t-r-sm); font-family: var(--font-mono);
       font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text;
     }
     .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
@@ -159,15 +159,17 @@
        elsewhere); hover adds an underline only. */
     .red-link { color: var(--t-err); text-decoration: none; font-size: 12px; width: fit-content; }
     .red-link:hover { text-decoration: underline; }
-    /* About 头部：图标在左，右侧四行（名称 / 简介 / 版本+检测状态 / 检查按钮+上次时间）
-       与图标**高度平齐** —— stretch + 两端对齐让四行正好填满图标那格高度。
-       About header: icon on the left, four lines on the right (name / tagline /
-       version+check status / check button+last time) aligned to the icon's height —
-       stretch + space-between makes the four lines fill exactly that height. */
-    .about-head { display: flex; align-items: stretch; gap: 12px; margin-top: 2px; }
-    .about-icon { width: 64px; height: 64px; flex: none; align-self: center; }
-    .about-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 3px; }
+    /* About header: icon on the left, details on the right. The old stretch +
+       space-between forced four lines into the icon's 64px height, so the status
+       wrapped into three lines and the name climbed above the icon. Let the
+       column size itself instead.
+       About 头部：图标在左、详情在右。原来 stretch + space-between 要把四行塞进
+       图标的 64px 高度，状态被挤成三行、名称还跑到图标上方；改为自然高度。 */
+    .about-head { display: flex; align-items: flex-start; gap: 12px; margin-top: 2px; }
+    .about-icon { width: 64px; height: 64px; flex: none; }
+    .about-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
     .about-name { font-size: 15px; font-weight: 600; }
+    .about-lines .row { flex-wrap: wrap; }
     /* 检测状态两档：绿 = 已是最新；红 = 网络上有更新的版本。检查中与未检查保持默认色。 */
     #v-upd-status.ok { color: var(--ok); }
     #v-upd-status.bad { color: var(--t-err); }
@@ -185,12 +187,63 @@
     .about-intro { margin: 12px 0 0; font-size: 12px; line-height: 1.7; }
     /* 第三部分：链接横排一行（窄窗自动换行），全部红色。 */
     .about-links { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; }
+    /* A single-select list styled like wireguide-plus: capsule rows with a
+       green ring on the selected one. Addresses are facts (monospace, no
+       wrap, ellipsis), latency is the decision cue (right-aligned, green on
+       success and red on failure), and a compact × removes a row.
+       升级通路：一行一种走法，单行选中。行本身是胶囊底，选中时描一圈绿边 ——
+       地址是事实（等宽字体、不换行、省略），测速结果是判断依据（右对齐、成功绿、
+       失败红），删除是一颗 × 而不是一个文字按钮。 */
+    .path-list-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 8px; width: 100%; margin-top: 14px; padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .path-head-info { flex: 1; min-width: 0; }
+    .path-head-info .sub { margin: 0 0 4px; }
+    .path-list-head button { flex: none; }
+    /* 单选组的外框：让「Update path」这块读起来是一个可供选择的控制区，
+       而不是几行飘着的地址。框只画一次，行内不再各自加边。
+       One frame around the single-select group so it reads as a control, not
+       as loose rows of addresses. */
+    .path-list {
+      display: flex; flex-direction: column; gap: 4px;
+      padding: 4px; border: 1px solid var(--line); border-radius: var(--t-r-md);
+    }
+    .path-row {
+      display: flex; align-items: center; gap: 6px; width: 100%;
+      padding: 5px 7px; border: 1px solid transparent;
+      border-radius: var(--t-r-sm); background: var(--t-sunken); cursor: pointer;
+    }
+    .path-row:hover { background: var(--t-hover); }
+    .path-row.active { border-color: var(--ok); background: var(--t-mark-ok); }
+    .path-row input[type=radio] { flex: none; margin: 0; }
+    .path-label {
+      flex: 1; min-width: 0; font: 12px/16px var(--font-mono);
+      color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .path-note {
+      flex: 0 1 auto; max-width: 24%; font: 11px/16px var(--font-mono);
+      color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     /* 升级通路每行后面的测速结果：成功绿、失败红、「测速中…」灰。与 WireGuard Plus 同款语义，
        让「没测」和「测了但不通」一眼可分，而不是都挤成一条 `—`。 */
-    .path-ms { min-width: 66px; text-align: right; }
+    .path-ms { flex: none; min-width: 52px; text-align: right; font-size: 11px; white-space: nowrap; color: var(--muted); }
     .path-ms.ok { color: var(--ok); }
-    .path-ms.bad { color: var(--t-err); }
+    .path-ms.bad { color: var(--t-err); max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
     .path-ms.scan { color: var(--muted); }
+    .path-del {
+      flex: none; width: 20px; height: 20px; padding: 0; border: 0;
+      border-radius: var(--t-r-sm); background: transparent; color: var(--muted);
+      font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;
+    }
+    .path-del:hover { background: var(--t-hover); color: var(--fg); }
+    /* Compact add rows: fixed-width label, one flexible field, button at the end.
+       添加框：标签定宽，输入框吃掉余下宽度，按钮贴在最右 —— 一行一件事情。 */
+    .path-add { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .path-add-label { flex: none; min-width: 104px; font-size: 11px; color: var(--muted); }
+    .path-add input[type=text] { flex: 1; min-width: 140px; font-size: 12px; padding: 4px 8px; }
+    .hint + .hint { margin-top: 4px; }
     /* 报错回执（代理地址不合法、还原失败）比窗口还长时，`nowrap` 会把两头切到窗口外：限宽截断。 */
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -352,7 +405,7 @@
       <section data-section="proxy" hidden>
     <div class="card">
       <h3 id="sec-proxy" data-i18n="sett.section_proxy_title">Proxy</h3>
-      <div class="hint" id="hint-update-proxy" data-i18n="sett.proxy_hint">Two things reach out over the network: the update check and the installer download. This choice applies to both, and to nothing else.</div>
+      <div class="hint" id="hint-update-proxy" data-i18n="sett.proxy_hint">For update checks and installer downloads only.</div>
 
       <!-- 出口 IP 与归属地置顶：探的是**当前选中的那条升级通路**的出口，换路时跟着变，
            让用户看到「选这个会从哪出去、归属地是哪」。读不到也给一句话：静悄悄的「—」
@@ -367,29 +420,36 @@
       </div>
       <div class="path" id="v-proxy-ip">—</div>
       <div class="hint" id="hint-proxy-now" hidden></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chk-public-ip"><span id="k-public-ip" data-i18n="sett.public_ip_toggle">Look up my public IP</span></label>
+      </div>
+      <div class="hint" id="hint-public-ip" data-i18n="sett.public_ip_hint">Shows where this app connects from. Off: no lookup is sent.</div>
 
-      <!-- 升级通路：互斥的分类，每行一条，后面跟真实测速结果。选哪一行同时决定出口与地址。 -->
-      <h4 class="sub" id="sub-path" data-i18n="sett.section_proxy">Update path</h4>
-      <div id="path-list"></div>
-      <div class="row" style="margin-top:8px">
+      <!-- 升级通路：互斥的分类，每行一条，后面跟真实测速结果。选哪一行同时决定出口与地址。
+           测速按钮摆在这一段的标题行右侧（与 wireguide-plus 一致），不再独占一行。 -->
+      <div class="path-list-head">
+        <div class="path-head-info">
+          <h4 class="sub" id="sub-path" data-i18n="sett.section_proxy">Update path</h4>
+          <div class="hint" id="hint-path-speed" data-i18n="sett.proxy_speed_hint">Real request timing per path — pick the fastest.</div>
+        </div>
         <button id="btn-path-test" data-i18n="sett.speed_test">Test speed</button>
       </div>
-      <div class="hint" id="hint-path-speed" data-i18n="sett.proxy_speed_hint">Times the real download through each path, so you can pick whichever is actually fastest right now.</div>
+      <div class="path-list" id="path-list"></div>
       <div class="err" id="err-path" hidden></div>
 
       <!-- 手动添加通路：代理或镜像，填了即持久化保存（写入 settings.json）。 -->
-      <div class="row" style="margin-top:12px">
-        <span class="k" id="k-add-proxy" data-i18n="sett.proxy_manual">Manual address</span>
+      <div class="path-add">
+        <span class="path-add-label" id="k-add-proxy" data-i18n="sett.proxy_manual">Manual address</span>
         <input type="text" id="in-custom-proxy" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.proxy_placeholder" placeholder="http://127.0.0.1:7890">
         <button id="btn-add-proxy" data-i18n="sett.path_add">Add</button>
       </div>
-      <div class="row">
-        <span class="k" id="k-add-mirror" data-i18n="sett.mirror_custom">Custom prefix</span>
+      <div class="path-add">
+        <span class="path-add-label" id="k-add-mirror" data-i18n="sett.mirror_custom">Custom prefix</span>
         <input type="text" id="in-custom-mirror" spellcheck="false" autocomplete="off" data-i18n-placeholder="sett.mirror_placeholder" placeholder="https://gh-proxy.com/">
         <button id="btn-add-mirror" data-i18n="sett.path_add">Add</button>
       </div>
-      <div class="hint" id="hint-path-proxy" data-i18n="sett.path_proxy_hint">Common local proxies: http://127.0.0.1:7890, http://127.0.0.1:10809, http://127.0.0.1:8889, socks5://127.0.0.1:10808 (ports vary by client).</div>
-      <div class="hint" id="hint-mirror" data-i18n="sett.mirror_hint">Both the installer and its checksum and signature travel through the mirror. The signature is checked against a key built into this app, so a mirror can slow or break a download, but it cannot make a fake installer pass.</div>
+      <div class="hint" id="hint-path-proxy" data-i18n="sett.path_proxy_hint">Local proxies: 7890 / 10809 / 8889 (HTTP), 10808 (SOCKS5).</div>
+      <div class="hint" id="hint-mirror" data-i18n="sett.mirror_hint">Mirrors carry the installer and signature; the built-in key still verifies it.</div>
       <div class="row" id="row-mirror-restore" hidden>
         <span class="k"></span>
         <button id="btn-mirror-restore" data-i18n="sett.mirror_restore">Restore removed presets</button>
@@ -437,7 +497,7 @@
 
       <!-- 第二部分：软件详细介绍。 -->
       <!-- Part 2: what this app actually does, in full sentences. -->
-      <p class="about-intro" data-i18n="sett.about_intro"></p>
+      <p class="about-intro" data-i18n="sett.about_intro">NetSense keeps your network configuration in step with where you are. A profile describes where you are - the SSID, the gateway, the VPN tunnels in use - and which IP address, DNS servers, routes and proxy actions to apply when a match fires. The engine watches every network change, applies the matching profile on its own, reads the result back from the system, and reports exactly what was written - and restores it when a step fails. On top of that: one-shot and persistent actions (including your own scripts, checked against an allow-list), a popup that reports what the last change actually did, a searchable log with level and category filters, daily backups of the whole configuration, and in-app updates whose downloads are checksum- and signature-verified. Everything runs locally; nothing about your machine leaves it.</p>
 
       <!-- 第三部分：相关链接，全部红色。i18n-exempt 不适用 —— 链接文字要翻译。
            Part 3: related links, all red. -->
@@ -570,6 +630,8 @@
       // 手动代理要把 URL 也收进来（不只模式字串）：buildPaths 用它补「自定义代理」可删行，
       // activePathId 用它拼出 "proxy:<url>" 选中态。模式为 direct/system 时照旧只存字串。
       proxyOnDisk = d.proxy_mode === "manual" ? (d.proxy_url || "") : (d.proxy_mode || "system");
+      publicIpLookup = d.public_ip_lookup !== false;
+      el("chk-public-ip").checked = publicIpLookup;
       el("row-mirror-restore").hidden = !(mirrorHidden > 0);
       renderPaths();
     }
@@ -718,8 +780,10 @@
     let presetAll = [];        // 完整的预置镜像清单（不受删除影响）：区分预置与自定义
     let ipIsMainland = false;  // 当前公网 IP 归属地是否大陆：决定是否摆出预置镜像
     let paths = [];            // 当前渲染的升级通路行
+    let systemProxyAddr = null;// Proxy address reported by the OS when following system: null=unread, ""=none set / "跟随系统"读到的实际代理地址：null=未读、""=系统没配
     let pathSpeed = {};        // id -> { ms, ok, error }（测速结果，不随聚焦刷新清空）
     let pathScanning = false;  // 是否正在跑测速：按钮变「测速中…」、每行也显示「测速中…」
+    let pathScanQueued = false;// A path list changed mid-scan: rerun after this one lands. / 在途又换了通路清单：跑完立刻再来一遍
 
     // 把磁盘上的设置翻成一行行的列表。镜像行用直连出口；代理行用直连 GitHub（无镜像）。
     function buildPaths() {
@@ -775,29 +839,40 @@
       box.innerHTML = "";
       for (const p of paths) {
         const row = document.createElement("label");
-        row.className = "row path-row";
-        row.style.marginTop = "6px";
+        row.className = "path-row" + (p.id === active ? " active" : "");
         const radio = document.createElement("input");
         radio.type = "radio";
         radio.name = "update-path";
         radio.checked = p.id === active;
         radio.onchange = () => selectPath(p);
         const lab = document.createElement("span");
-        lab.className = "k";
-        lab.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, monospace";
+        lab.className = "path-label";
         lab.textContent = p.label;   // 地址/前缀是事实，不翻译
         const st = pathRowState(p);
         const sp = document.createElement("span");
-        sp.className = "mv path-ms " + st.cls;
-        sp.style.minWidth = "66px";
+        sp.className = "path-ms " + st.cls;
         sp.textContent = st.text;
         row.appendChild(radio);
         row.appendChild(lab);
+        // "跟随系统"那一行把系统实际报出来的地址摆在旁边：这一行不能靠猜，
+        // 用户得看见「跟的是谁」（wireguide-plus 同一条做法）。
+        if (p.kind === "system" && systemProxyAddr !== null) {
+          const note = document.createElement("span");
+          note.className = "path-note";
+          note.textContent = systemProxyAddr || t("sett.proxy_system_none", "No system proxy");
+          note.title = note.textContent;
+          row.appendChild(note);
+        }
         row.appendChild(sp);
         if (p.deletable) {
           const del = document.createElement("button");
-          del.className = "tiny";
-          del.textContent = t("sett.mirror_delete", "Delete");
+          del.className = "path-del";
+          del.type = "button";
+          del.textContent = "×";
+          // × is a glyph; screen readers and hover still need a translatable
+          // "Delete" — which also keeps the key referenced.
+          // × 是图形，读屏与鼠标悬停仍要有可翻译的「删除」说明；key 也由此保持被引用。
+          del.title = t("sett.mirror_delete", "Delete");
           del.onclick = (e) => { e.preventDefault(); e.stopPropagation(); deletePath(p); };
           row.appendChild(del);
         }
@@ -835,7 +910,24 @@
     async function afterPathChange() {
       await load();          // 重取 settings，重建列表与选中态
       renderPaths();
+      loadSystemProxy();     // 通路换了，"跟随系统"那行的实况可能变了
       loadPublicIp();        // 出口变了，IP 行跟着重探
+      runPathScan();         // 换了路，旧的毫秒数不再描述这条路 —— 立刻重测
+    }
+
+    // "跟随系统"那一行显示系统此刻实际报出来的代理地址。get_proxy_state 后端已有，
+    // 只在设置窗口打开与保存之后各调一次（Linux 上读系统代理是好几条 gsettings）。
+    async function loadSystemProxy() {
+      if (!hasTauri()) return;
+      try {
+        const raw = await invoke("get_proxy_state");
+        const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+        systemProxyAddr = d.system_proxy === null || d.system_proxy === undefined
+          ? "" : String(d.system_proxy);
+      } catch (e) {
+        systemProxyAddr = "";
+      }
+      renderPaths();
     }
 
     async function deletePath(p) {
@@ -857,37 +949,107 @@
         }
         show("err-path", "");
         renderPaths();
+        loadSystemProxy();
         loadPublicIp();
+        runPathScan();         // 删了一行，剩下各行的毫秒数仍有效，但列表变了 —— 重测一遍
       } catch (e) { show("err-path", String(e)); }
     }
 
     // 出口 IP 与归属地：探的是**当前选中的那条升级通路**的出口（还没保存也算）——
     // 换路时这一行跟着变，让用户看到「选这个会从哪出去、归属地是哪」。判定与保存共用后端
     // 同一句 choice_from_ui：探测走的必须是保存后将会走的那条路。读不到也给一句话。
+    let publicIpLookup = true;   // Toggle: off sends no query and discloses no public IP / 开关：关掉就不发任何查询，公网 IP 不外泄
+    let publicIpShown = null;    // Last good reading {ip,location}: kept on failure instead of falling back to a dash / 上一次成功读数 {ip,location}：失败时留着它，不倒退回「—」
+    let publicIpFailedAt = 0;    // Time of the last failure: shown by the reading to mark it stale / 最近一次失败时刻：留在读数旁边说明「这是旧值」
+    let publicIpSeq = 0;         // Sequence token: a newer query invalidates the in-flight one / 序号令牌：新一次查询作废在途的旧查询
+
     async function loadPublicIp() {
       if (!hasTauri()) return;
+      if (!publicIpLookup) {
+        // 关掉查询：公开的是「我不想知道」，不是「探测失败」——文案分开。
+        publicIpSeq++;
+        show("v-proxy-ip", t("sett.ip_disabled", "Lookup is off"));
+        show("hint-proxy-now", "");
+        el("hint-proxy-now").hidden = true;
+        return;
+      }
       const ap = paths.find((p) => p.id === activePathId());
       const mode = ap ? ap.proxy_mode : "system";
       const url = ap ? (ap.proxy_url || "") : "";
+      const seq = ++publicIpSeq;
+      const lang = el("sel-lang").value === "system"
+        ? (navigator.language || "en").split("-")[0]
+        : el("sel-lang").value;
       show("v-proxy-ip", t("sett.ip_probing", "Probing…"));
       // 是否大陆由后端算好（is_mainland）：HK / 澳门 / 台湾的归属地是各自独立国名，
       // 后端用「中国」开头判断已自然排除。预置镜像只在大陆摆出，归属地变了就重建列表让显隐跟上。
       const applyRegion = (mainland) => {
-        if (mainland !== ipIsMainland) { ipIsMainland = mainland; renderPaths(); }
+        if (mainland !== ipIsMainland) {
+          ipIsMainland = mainland;
+          renderPaths();
+          // A region change reveals or hides preset mirror rows. The new rows
+          // have no timing yet, so rescan instead of leaving addresses the
+          // user cannot judge.
+          // 归属地一变，预置镜像行随之出现或消失：新摆出来的行还没有测速结果，
+          // 不补测就会留下一排没有判断依据的地址（用户没法挑哪条真的快）。
+          runPathScan();
+        }
       };
-      try {
-        const raw = await invoke("probe_public_ip", { mode, url });
-        const d = typeof raw === "string" ? JSON.parse(raw) : raw;
-        show("v-proxy-ip", d.location
-          ? tf("sett.ip_line", "{ip} ({loc})", { ip: d.ip, loc: d.location })
-          : tf("sett.ip_line_noloc", "{ip}", { ip: d.ip }));
-        applyRegion(!!d.is_mainland);
-      } catch (e) {
-        show("v-proxy-ip", t("sett.ip_unreachable", "Could not read the egress IP"));
-        applyRegion(false);   // 探不到归属地：按非大陆处理，收起预置镜像
-      }
+      const attempt = async () => {
+        try {
+          const raw = await invoke("probe_public_ip", { mode, url, lang });
+          if (seq !== publicIpSeq) return false;
+          const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+          publicIpShown = { ip: d.ip, location: d.location || "" };
+          publicIpFailedAt = 0;
+          const line = d.location
+            ? tf("sett.ip_line", "{ip} ({loc})", { ip: d.ip, loc: d.location })
+            : tf("sett.ip_line_noloc", "{ip}", { ip: d.ip });
+          show("v-proxy-ip", line);
+          show("hint-proxy-now", "");
+          el("hint-proxy-now").hidden = true;
+          applyRegion(!!d.is_mainland);
+          return true;
+        } catch (e) {
+          if (seq !== publicIpSeq) return false;
+          publicIpFailedAt = Date.now();
+          // 保留上次成功的读数：一分钟前还是对的 IP 好过空的「—」，失败时刻标在旁边。
+          if (publicIpShown) {
+            const line = publicIpShown.location
+              ? tf("sett.ip_line", "{ip} ({loc})", { ip: publicIpShown.ip, loc: publicIpShown.location })
+              : tf("sett.ip_line_noloc", "{ip}", { ip: publicIpShown.ip });
+            show("v-proxy-ip", line);
+            show("hint-proxy-now", tf("sett.ip_stale", "Last read at {time}", {
+              time: new Date(publicIpFailedAt).toLocaleTimeString(),
+            }));
+            el("hint-proxy-now").hidden = false;
+          } else {
+            show("v-proxy-ip", t("sett.ip_unreachable", "Could not read the egress IP"));
+            applyRegion(false);   // No region from the lookup: treat as non-mainland and hide the preset mirrors / 探不到归属地：按非大陆处理，收起预置镜像
+          }
+          return false;
+        }
+      };
+      if (await attempt()) return;
+      // 一次静默重试：隧道上下线切换时，同一查询两秒后常就能成功（实测）。
+      // 只有序列没被更新的查询顶掉才重试，避免过期的读数覆盖新状态。
+      if (seq !== publicIpSeq) return;
+      await new Promise((r) => setTimeout(r, 2000));
+      if (seq === publicIpSeq) await attempt();
     }
     el("btn-proxy-ip").onclick = () => loadPublicIp();
+    el("chk-public-ip").onchange = async (ev) => {
+      const want = ev.target.checked;
+      try {
+        await invoke("set_public_ip_lookup", { enable: want });
+        publicIpLookup = want;
+        show("err-path", "");
+        if (want) loadPublicIp(); else { publicIpSeq++; show("v-proxy-ip", t("sett.ip_disabled", "Lookup is off")); }
+      } catch (e) {
+        ev.target.checked = !want;
+        show("err-path", String(e));
+      }
+    };
 
     // 测速：列表每一项各发一次更新时真会用的真实请求（经镜像时拼前缀、出口用该项自己的选择），
     // 并行探测。显示的每一行数字就是「选这条路去升级实际要多久」；成败与原因分行着色，
@@ -897,7 +1059,12 @@
     // 跑测速：手动按与开窗口自动跑都走这里。扫描态期间按钮与每行都显示「测速中…」；
     // 结果按 id 收进 `pathSpeed`（存全字段，不随聚焦刷新清空），再重绘每行着色。
     async function runPathScan() {
-      if (!hasTauri() || pathScanning) return;
+      if (!hasTauri()) return;
+      // If the path list changed while a scan was in flight, returning here
+      // would leave the new rows untimed. Queue one more pass instead.
+      // 换路 / 归属地把新行摆出来时旧扫描往往还在途：直接 return 会让新行永远没有
+      // 测速结果。记一次「待跑」，等这一趟落地后按最新清单再测一遍。
+      if (pathScanning) { pathScanQueued = true; return; }
       pathScanning = true;
       renderPaths();          // 立刻把所有行与按钮刷成「测速中…」
       show("err-path", "");
@@ -913,13 +1080,37 @@
         });
         renderPaths();
       } catch (e) { show("err-path", String(e)); }
-      finally { pathScanning = false; renderPaths(); }
+      finally {
+        pathScanning = false;
+        renderPaths();
+        if (pathScanQueued) { pathScanQueued = false; runPathScan(); }
+      }
     }
 
     // 手动添加：代理或镜像，填了即持久化保存（写进 settings.json）。
+    // 先做与后端 `normalize_proxy_url` 同一套前置校验：非法地址在保存之前就被挡住，
+    // 并把「为什么不合法」当场说出来，而不是等一次失败的 invoke 才报错。
+    const PROXY_SCHEMES = ["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
+    function proxyUrlLooksValid(raw) {
+      const s = String(raw || "").trim();
+      if (!s || s.length > 512) return false;
+      if (/[\s\u0000-\u001f\u007f]/.test(s)) return false;
+      const at = s.indexOf("://");
+      if (at <= 0) return false;
+      const scheme = s.slice(0, at).toLowerCase();
+      if (!PROXY_SCHEMES.includes(scheme)) return false;
+      const rest = s.slice(at + 3);
+      return rest.length > 0 && !rest.includes("/");
+    }
+    function mirrorPrefixLooksValid(raw) {
+      const s = String(raw || "").trim();
+      try { const u = new URL(s); return u.protocol === "http:" || u.protocol === "https:"; }
+      catch (e) { return false; }
+    }
     el("btn-add-proxy").onclick = async () => {
       const u = el("in-custom-proxy").value.trim();
       show("err-path", "");
+      if (!proxyUrlLooksValid(u)) { show("err-path", t("sett.proxy_rejected", "That is not a usable proxy address.")); return; }
       try {
         await invoke("set_update_proxy", { mode: "manual", url: u });
         await invoke("set_update_mirror", { prefix: "" });
@@ -930,6 +1121,7 @@
     el("btn-add-mirror").onclick = async () => {
       const m = el("in-custom-mirror").value.trim();
       show("err-path", "");
+      if (!mirrorPrefixLooksValid(m)) { show("err-path", t("sett.mirror_not_preset", "That is not a usable mirror prefix.")); return; }
       try {
         await invoke("set_update_mirror", { prefix: m });   // 不合法退回直连
         await invoke("set_update_proxy", { mode: "direct", url: "" });
@@ -1302,7 +1494,9 @@
       // 打开时探一次出口 IP（含归属地），并自动跑一次升级通路测速 —— 让窗口一开就看到
       // 哪条路现在通、哪条不通（参考 WireGuard Plus 的 proxy 测速）。只在此处跑一次：
       // 下面的 focus 刷新只重拉设置、不重跑测速，避免切窗口时狂打请求。
-      loadPublicIp();
+      if (publicIpLookup) loadPublicIp();
+      else show("v-proxy-ip", t("sett.ip_disabled", "Lookup is off"));
+      loadSystemProxy();
       runPathScan();
       // 检测状态列的初始文案：还没检查过就如实说明，而不是留一片空白。
       // Initial status text: say "not checked yet" plainly instead of leaving it blank.

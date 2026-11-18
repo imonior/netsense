@@ -101,7 +101,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 721 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 726 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -216,7 +216,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，65 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，66 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -233,7 +233,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `apply_profile` | `id` | 请求「立即应用」。**不绕过条件**：引擎重评该 Profile 自己的 Rules/Conditions，禁用中直接拒、冲突中拒绝并回 `netsense://action` |
 | `force_dhcp` | — | 把当前网络（主网卡）切回 DHCP **并让自动化暂停**：引擎停止自动评估、下发与健康监测，直到网络下一次变化（采样照旧，变化即解除；面板/编辑器显示 PAUSED）。异步，结果走 `netsense://action` |
 | `get_public_ip` | — | 现探现回当前出口公网 IP 与归属地（架构 Egress / Public IP 层，独立于任何网卡）：走**软件设置里存着的那一个出口**（与更新下载同一套代理判定），返回 JSON 字符串 `{"ip":..,"location":..,"country_code":..,"is_mainland":..}`，取不到回 `null`。归属地可选 —— 四个 geo 端点（ipip.net / ip.sb / ipapi.co / ipwho.is）顺序回退，全被挡时才退到只回 IP 的 ipify。`is_mainland` 供设置页「仅大陆摆出预置镜像」，判据是 ISO 国家码 `CN` 优先、中文前缀兜底。面板那一行只摆 IP（面板窄），设置页两者都摆。端点在 `ipc.rs` 的 `IP_ENDPOINTS` |
-| `probe_public_ip` | `mode`, `url` | 探测一个**还没存下来的**候选出口：`direct` / `system` / `manual` + 地址，判定与 `set_update_proxy` 共用 `netproxy::choice_from_ui` 一句 —— 探测走的必须是保存后将会走的那条路，否则这行数字本身就是错的。返回同 `get_public_ip` 的 JSON；出口认不出或探不到时报错（`sett.proxy_rejected` / `sett.ip_unreachable`） |
+| `probe_public_ip` | `mode`, `url`, `lang?` | 探测一个**还没存下来的**候选出口：`direct` / `system` / `manual` + 地址，判定与 `set_update_proxy` 共用 `netproxy::choice_from_ui` 一句 —— 探测走的必须是保存后将会走的那条路，否则这行数字本身就是错的。`lang` 是界面语言，用来把归属地与界面同语言的服务商排到前面（中文优先 ipip.net，其余优先西方端点）。返回同 `get_public_ip` 的 JSON；出口认不出或探不到时报错（`sett.proxy_rejected` / `sett.ip_unreachable`） |
 | `probe_network` | — | 重新采样并立即评估当前网络：唯一命中就走「立即应用」那条链路（网络 + 3B），多命中只报告名字、零命中只报告，都不动网卡。不受 DHCP 暂停约束，也不解除暂停（同上） |
 | `get_networks` | — | 系统已保存的无线网络列表（第 2 列 SSID 条件值的候选，仍可手输列表外的名字）。交的是**空中那个名字**，与面板「当前网络」那一格同源，判据见上面那段 |
 | `get_printers` | — | 本机打印机清单 `[{name, info, is_default}]`（第 4 列「设为默认打印机」的候选，只能从清单选：`name` 是下发用的队列名，`info` 是给人看的「说明 · 位置」，可能缺失）。枚举不到就是空表：没装打印系统的机器是正常状态 |
@@ -259,6 +259,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `update_path_speed_test` | `paths` | 把「选哪条升级通路」统一成一条命令：每项自带 `proxy_mode` + `proxy_url` + `mirror`（前缀式），并行对 `releases/latest/download/SHA256SUMS` 发真请求计时，返回 `[{proxy_mode,proxy_url,mirror,ms}]`；`ms` 为 `null` 表示这条路不通。它合并了原来分开的「代理测速」与「镜像测速」两条调用 —— 出口（代理）与地址（镜像）是正交的两维，必须合在一起测才有意义：单测代理会漏掉镜像那一维，单测镜像会漏掉代理那一维 |
 | `hide_update_mirror` | `prefix` | 删掉一个预置镜像（`appconfig::MIRROR_PRESETS` 之一）：记进软件配置的 `mirror_hidden`，而不是把自选列表整个存下来（预设跟着版本走，存一份清单就多一个会说谎的来源）。**正戴着它的那一个会同时退回直连**。返回新状态 `{presets,mirror,hidden_count}`，界面按它重建下拉 —— 否则会显示成「选着一个已经被删掉的镜像」 |
 | `restore_update_mirror_presets` | — | 恢复全部被删的预置镜像，不动当前选中的那个。返回同 `hide_update_mirror` 的新状态 |
+| `set_public_ip_lookup` | `enable` | 设是否允许查询出口公网 IP（默认开）。关掉后前端不再发 `probe_public_ip` / `get_public_ip`，公网 IP 不外泄，代理面板那一行显示「查询已关闭」。它只控制这次展示性查询，不改变升级请求走哪条路、也不改变任何下发内容 |
 | `get_proxy_state` | — | 升级请求出口的现状，JSON 字符串 `{mode,url,system_proxy}`：`mode` 是磁盘上那三态之一，`system_proxy` 只在 mode 为 system 时**现问**操作系统（macOS 一条 `scutil --proxy`，Linux 几条 `gsettings`），问不到就是 `null`。这条命令只在设置窗口打开与保存之后各调一次 —— 不进 `get_app_settings`，那个每次窗口获得焦点都会被调，popup.html 也调它 |
 | `set_update_proxy` | `mode`, `url` | 设升级请求走哪条出口：`direct` / `system` / `manual` + 一个 `scheme://host[:port]` 形状的地址。认不出的 mode 或地址一律拒绝（`sett.proxy_rejected`）而不是退回默认值 —— 这一句改的是这台机器的对外流量走哪条路。落盘 + 更新内存里的 `settings`，返回并记一条 `notify.proxy_set`；**不**惊动引擎，这份设置不参与条件求值与下发 |
 | `set_update_mirror` | `prefix` | 设安装包从哪儿下：空串 = 直连 GitHub，其余 = 前缀式镜像（`https://host/` + 原 URL，见 `appconfig::UpdateMirror`）。与 `set_update_proxy` 正交 —— 一个换出口、一个换**地址**，可同时生效。它不改「谁说了这个安装包是什么」：SHA256SUMS 与 `.sig` 也经镜像取回，但签名锚在**内置 root 公钥**上（两层信任链，见 `update::verify_trust_chain`）—— 镜像最坏只能让下载变慢或下坏，不能让一个假的安装包通过校验。形状不合法的前缀在保存时退回直连（`AppConfig::clamped`），返回值是**落盘后的真值**（直连为 `""`），界面按它回显 |

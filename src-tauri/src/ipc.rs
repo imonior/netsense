@@ -638,6 +638,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         update_mirror,
         dns_fallback,
         show_applied_popup,
+        public_ip_lookup,
     ) = {
         let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -650,6 +651,7 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
             s.update_mirror.clone(),
             s.dns_fallback.clone(),
             s.show_applied_popup,
+            s.public_ip_lookup,
         )
     };
     let (autostart_on, autostart_error) = match crate::appconfig::autostart_enabled() {
@@ -733,6 +735,9 @@ pub fn get_app_settings(state: State<'_, std::sync::Arc<AppState>>) -> String {
         // 应用后是否弹结果弹窗：默认开启；前端把它做成一个开关，关掉后自动与手动
         // 两条应用路径都不再弹 `netsense://applied` 弹窗（仍走 toast）。
         "show_applied_popup": show_applied_popup,
+        // 出口 IP 是否允许查询（默认开）。关掉时前端不再发 probe_public_ip，
+        // 这既省掉一次对外披露公网 IP，也让「—」有明确解释。
+        "public_ip_lookup": public_ip_lookup,
     });
     serde_json::to_string(&payload).unwrap_or_default()
 }
@@ -812,6 +817,25 @@ pub fn set_show_applied_popup(
         *s = next;
     }
     crate::state::publish_status(state.inner());
+    Ok(())
+}
+
+/// 设置是否允许查询出口公网 IP。存盘后返回落盘真值，界面按它回显。
+///
+/// 与 `show_applied_popup` 同一套「偏好而非配置」的存法：只控制一次展示性查询，
+/// 不改变升级请求走哪条路。关掉后前端不再发 `probe_public_ip`，公网 IP 不再外泄。
+#[tauri::command(async)]
+pub fn set_public_ip_lookup(
+    state: State<'_, std::sync::Arc<AppState>>,
+    enable: bool,
+) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = s.clone();
+        next.public_ip_lookup = enable;
+        next.save(&state.settings_path)?;
+        *s = next;
+    }
     Ok(())
 }
 
@@ -2125,14 +2149,40 @@ const IP_ENDPOINTS: [IpEndpoint; 5] = [
     ("https://api.ipify.org?format=json", parse_ipify),
 ];
 
+/// 按界面语言给端点排序：各服务的归属地是**固定语言**的（ipip.net 回中文，
+/// 其余 geo 端点回英文），谁先命中谁就决定了读数用的语言。界面是中文时把
+/// ipip.net 排第一，其余语言把它挪到只给 IP 的 ipify 之前 —— 这样既让读数
+/// 跟界面一致，又保留中文端点在西方端点全被挡时的兜底位置。
+///
+/// 只要判据是「前缀 = zh」：zh / zh-TW / zh-CN 都走中文优先，en/ja/ko 不走。
+/// 纯函数，任何架构都能单测 —— 探测结果不该取决于跑在哪台机器上。
+fn ordered_endpoints(lang: &str) -> Vec<IpEndpoint> {
+    let mut endpoints = IP_ENDPOINTS.to_vec();
+    if lang.trim().to_ascii_lowercase().starts_with("zh") {
+        return endpoints;
+    }
+    // 非中文界面：把中文端点移到最后（ipify 之前，仍作兜底）。
+    if let Some(pos) = endpoints.iter().position(|(url, _)| *url == "https://myip.ipip.net") {
+        let zh = endpoints.remove(pos);
+        let insert_at = endpoints
+            .iter()
+            .position(|(url, _)| *url == "https://api.ipify.org?format=json")
+            .unwrap_or(endpoints.len());
+        endpoints.insert(insert_at, zh);
+    }
+    endpoints
+}
+
 /// 探测当前出口的 IP 与归属地。走**给定的那个出口**（与更新下载同一套代理判定），
-/// 短超时；结果只用于展示，不落盘、不参与条件匹配。
-fn probe_ip(choice: &crate::netproxy::ProxyChoice) -> Option<IpInfo> {
+/// 短超时；结果只用于展示，不落盘、不参与条件匹配。`lang` 是界面语言，用来挑
+/// 归属地用哪种语言呈现（见 [`ordered_endpoints`]）。
+fn probe_ip(choice: &crate::netproxy::ProxyChoice, lang: &str) -> Option<IpInfo> {
+    let endpoints = ordered_endpoints(lang);
     // Windows 上「跟随系统」继续交给 PowerShell：它按 WinINET 的系统设置走，正是这个
     // 选择的意思（curl 在 Windows 上不读系统代理）。另外两态要求明确表态，走 curl。
     #[cfg(windows)]
     if matches!(*choice, crate::netproxy::ProxyChoice::Follow) {
-        for (url, parse) in IP_ENDPOINTS {
+        for (url, parse) in &endpoints {
             if let Ok(bytes) = fetch_url_powershell(url) {
                 if let Some(info) = parse(&String::from_utf8_lossy(&bytes)) {
                     return Some(mark_mainland(info));
@@ -2142,7 +2192,7 @@ fn probe_ip(choice: &crate::netproxy::ProxyChoice) -> Option<IpInfo> {
         return None;
     }
     let proxy = crate::netproxy::curl_proxy_args(choice);
-    for (url, parse) in IP_ENDPOINTS {
+    for (url, parse) in &endpoints {
         if let Ok(body) = fetch_text(url, &proxy) {
             if let Some(info) = parse(&body) {
                 return Some(mark_mainland(info));
@@ -2282,7 +2332,8 @@ fn parse_ipify(text: &str) -> Option<IpInfo> {
 /// 返回 JSON `{"ip":..,"location":..}`；取不到时 `null`，前端那一行显示「—」。
 #[tauri::command(async)]
 pub fn get_public_ip(state: State<'_, std::sync::Arc<AppState>>) -> Option<String> {
-    probe_ip(&proxy_choice_of(&state))
+    let lang = i18n::current().code().to_string();
+    probe_ip(&proxy_choice_of(&state), &lang)
         .and_then(|i| serde_json::to_string(&i).ok())
 }
 
@@ -2292,10 +2343,10 @@ pub fn get_public_ip(state: State<'_, std::sync::Arc<AppState>>) -> Option<Strin
 /// 三态 + 地址。判定抽成了 [`crate::netproxy::choice_from_ui`]，与保存（`set_update_proxy`）
 /// 共用一句 —— 探测走的必须是保存后将会走的那条路，否则这行数字本身就是错的。
 #[tauri::command(async)]
-pub fn probe_public_ip(mode: String, url: String) -> Result<String, String> {
+pub fn probe_public_ip(mode: String, url: String, lang: Option<String>) -> Result<String, String> {
     let choice = crate::netproxy::choice_from_ui(&mode, &url)
         .ok_or_else(|| i18n::t("sett.proxy_rejected"))?;
-    probe_ip(&choice)
+    probe_ip(&choice, lang.as_deref().unwrap_or("en"))
         .and_then(|i| serde_json::to_string(&i).ok())
         .ok_or_else(|| i18n::t("sett.ip_unreachable"))
 }
@@ -2366,9 +2417,10 @@ fn is_newer(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_matches, install_verdict, installable_ext, is_plausible_ip, mark_mainland, parse_ipapi,
-        parse_ipify, parse_ipip, parse_ipsb, parse_ipwho, pick_asset_for, pick_install_asset,
-        pick_install_asset_for, pick_verified_asset, platform_of, token_anchored, Sums,
+        asset_matches, install_verdict, installable_ext, is_plausible_ip, mark_mainland,
+        ordered_endpoints, parse_ipapi, parse_ipify, parse_ipip, parse_ipsb, parse_ipwho,
+        pick_asset_for, pick_install_asset, pick_install_asset_for, pick_verified_asset,
+        platform_of, token_anchored, IP_ENDPOINTS, Sums,
     };
     use serde_json::json;
 
@@ -2860,5 +2912,31 @@ mod tests {
         assert_eq!(platform_of("NetSense_1.0.3_x64-setup.exe"), "windows");
         assert_eq!(platform_of("NetSense_1.0.3_amd64.deb"), "linux");
         assert_eq!(platform_of("SHA256SUMS"), "other");
+    }
+
+    #[test]
+    fn the_egress_lookup_orders_providers_by_the_ui_language() {
+        // 中文界面先问中文端点（归属地与界面同语言）；其他语言把它挪到 ipify 之前，
+        // 既不让它抢答英文界面，又保留它在西方端点全挂时的兜底位置。
+        // The egress lookup prefers a provider whose answer language matches the UI.
+        let zh = ordered_endpoints("zh");
+        assert!(zh[0].0.contains("ipip.net"));
+        for lang in ["zh-TW", "zh-CN", "ZH ", "zh-TW-x"] {
+            assert!(
+                ordered_endpoints(lang)[0].0.contains("ipip.net"),
+                "lang={lang} should prefer the Chinese-language provider"
+            );
+        }
+        for lang in ["en", "ja", "ko"] {
+            let list = ordered_endpoints(lang);
+            assert!(list[0].0.contains("ip.sb"), "lang={lang}");
+            let last = &list[list.len() - 2];
+            assert!(last.0.contains("ipip.net"), "lang={lang}");
+            assert!(list[list.len() - 1].0.contains("ipify"), "lang={lang}");
+        }
+        // 空的/异常语言按非中文处理，端点数恒定 —— 排序不能把服务丢掉。
+        for lang in ["", "  ", "EN"] {
+            assert_eq!(ordered_endpoints(lang).len(), IP_ENDPOINTS.len());
+        }
     }
 }

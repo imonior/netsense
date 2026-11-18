@@ -22,7 +22,7 @@
     html, body { margin: 0; height: 100%; }
     body {
       background: var(--card); color: var(--fg);
-      font: 12px/1.3 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font: var(--text-compact);
       border: 1px solid var(--line); border-radius: var(--t-r-md);
       /* 整扇窗就是这张弹窗：本体不滚，只有中间的清单滚，让标题与关闭按钮永远看得见。 */
       display: flex; flex-direction: column; overflow: hidden; padding: 11px 12px;
@@ -83,9 +83,37 @@
     let strings = {};
     const t = (k, d) => strings[k] || d || k;
 
+    /// Popup state. `base` is the `netsense://applied` payload; `actions` / `workers`
+    /// arrive later on `netsense://evaluation` (3B1 outcomes / 3B2 live status).
+    ///
+    /// `pendingEvaluation` holds an evaluation that landed before any state existed.
+    /// It matters on slow machines: the applied handler used to await SSID sampling
+    /// (1.6-3.4s of `system_profiler` on macOS 15.7.7) before creating `apState`, and
+    /// every evaluation arriving in that window was dropped — the popup then showed
+    /// 3A but never 3B. Now the state is created synchronously; this buffer only
+    /// covers events preceding the very first applied payload.
+    ///
     /// 弹窗当前状态。`base` 是 `netsense://applied` 的载荷；`actions` / `workers`
     /// 来自后续的 `netsense://evaluation`（3B1 逐条结果 / 3B2 实时状态）。
+    /// `pendingEvaluation` 存的是「状态还没建好就先到」的 evaluation：慢机上原来的
+    /// applied 处理要等 SSID 采样（15.7.7 上 1.6~3.4s 的 system_profiler 降级链）
+    /// 才建 apState，窗口期内的 evaluation 全被丢，弹窗于是只有 3A 没有 3B。
+    /// 现在状态同步建立，这个缓冲只覆盖第一轮 applied 之前到达的少数事件。
     let apState = null;
+    let pendingEvaluation = null;
+
+    /// Copy the action part of an evaluation payload into a state object.
+    /// 把一条 evaluation 的动作部分填进状态对象。
+    function absorbEvaluation(state, v) {
+      const lr = v && v.last_run;
+      state.actions = lr ? {
+        running: !!lr.running,
+        total: lr.total || 0,
+        outcomes: lr.outcomes || [],
+      } : null;
+      state.workers = Array.isArray(v && v.workers) ? v.workers : [];
+    }
+
 
     /// 最新一份网络状态：`netsense://status` 的 `status` 段（主网卡实测值）+ `v6mode`。
     ///
@@ -102,9 +130,24 @@
     let netV6 = null;
     let netPrimary = null;  // 主网卡（来自 get_interfaces，补 mac / ipv6 / prefix6 / gateway6）
 
-    /// 收到应用结果：记住这一轮的载荷，动作结果陆续到达时重画同一张弹窗。
+    /// 收到应用结果：立刻建状态并画一遍，网络采样完成后只刷新顶部网络卡。
+    /// The state must exist the moment `applied` arrives: a targeted resend of the
+    /// same payload is not a new round, so keep any 3B results already received.
     function renderApplied(d) {
-      apState = { base: d || {}, actions: null, workers: null };
+      const base = d || {};
+      // 同一轮定向重发（`show_applied_window`）的载荷与首次一字不差：保留已收到的
+      // 3B 结果，别重置成 null —— 否则用户看到的是「只有 3A」的半张弹窗。
+      const sameRound = apState && JSON.stringify(apState.base) === JSON.stringify(base);
+      const carried = sameRound
+        ? { actions: apState.actions, workers: apState.workers }
+        : null;
+      apState = {
+        base,
+        actions: carried ? carried.actions : null,
+        workers: carried ? carried.workers : null,
+      };
+      // 只有首次建状态时才播种「先到一步」的 evaluation；后续轮次由事件直接写入。
+      if (!sameRound && pendingEvaluation) absorbEvaluation(apState, pendingEvaluation);
       renderAppliedNow();
     }
 
@@ -458,11 +501,11 @@
       // 自动化应用了某个配置（首次连上 / 网络变化 / 配置变更，且 3A 成功）：弹窗展示
       // 当前应用的配置与网络信息。轮询中若无规则触发改变，后端不发此事件。
       window.__TAURI__.event.listen("netsense://applied", (e) => {
-        // 重新采样网络身份（含 SSID / BSSID）再画：结果弹窗可能在 SSID 可读之前就收到
-        // applied 事件（升级 relaunch 首轮最常见），那时 `netInfo` 还是空卡 → 显示「未知」。
-        // 每次都拿最新现场，把这次「差一拍」的误显示压掉；但 TCC 授权被重置、整段会话都
-        // 读不到 SSID 时不在此列（那得用户去系统设置里授权 Location / 网络）。
-        sampleNetwork().then(() => renderApplied(e.payload || {}));
+        // 先同步建状态再画：SSID 采样慢（macOS 15.7.7 要么 1.6s 降级、要么 TCC 授权）
+        // 不能挡住 3A 清单与 3B 结果的呈现，否则窗口期内到达的 evaluation 会被丢。
+        // Render synchronously; refresh the network card when sampling finishes.
+        renderApplied(e.payload || {});
+        sampleNetwork().then(() => { if (apState) renderAppliedNow(); });
       });
       // 3B1 / 3B2 的动作结果陆续到达：把它们填进**已经打开**的结果弹窗。
       //
@@ -470,17 +513,12 @@
       // 结果从 `netsense://evaluation` 到达 —— 弹窗先开、结果后到是常态。
       // 弹窗没开时不留状态（下一轮 applied 会重新建一份），省得把上一轮的结果挂到这一轮上。
       window.__TAURI__.event.listen("netsense://evaluation", (e) => {
-        if (!apState) return;
         const v = e.payload || {};
-        const lr = v.last_run || null;
-        if (lr) {
-          apState.actions = {
-            running: !!lr.running,
-            total: lr.total || 0,
-            outcomes: lr.outcomes || [],
-          };
-        }
-        apState.workers = Array.isArray(v.workers) ? v.workers : [];
+        // 先缓冲再判断：状态可能还没建（页面刚加载、applied 还在路上），这一发不能丢。
+        // Buffer first: an event landing before the first `applied` must survive.
+        pendingEvaluation = v;
+        if (!apState) return;
+        absorbEvaluation(apState, v);
         renderAppliedNow();
       });
     }

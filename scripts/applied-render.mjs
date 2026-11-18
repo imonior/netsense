@@ -67,14 +67,18 @@ window.__TAURI__ = {
   core: {
     invoke: async (cmd) => {
       if (cmd === 'get_strings') return STRINGS;
-      if (cmd === 'get_status') return JSON.stringify({
+      if (cmd === 'get_status') {
+        // 慢机模拟：15.7.7 上 system_profiler 降级链要 1.6s+。默认 0，不影响原测试。
+        if (window.__SLOW_STATUS_MS__) await new Promise(r => setTimeout(r, window.__SLOW_STATUS_MS__));
+        return JSON.stringify({
         status: {
           ssid: 'Home-5G', iface: 'en0', ipv4: '192.168.1.50',
           netmask: '255.255.255.0', gateway: '192.168.1.1',
           dns: '223.5.5.5', v6mode: 'automatic', connected: true,
         },
         v6mode: 'automatic',
-      });
+        });
+      }
       if (cmd === 'get_interfaces') return JSON.stringify([
         {
           kind: 'wireless', name: 'en0', label: 'Wi-Fi', ssid: 'Home-5G',
@@ -84,7 +88,7 @@ window.__TAURI__ = {
         },
         { kind: 'vpn', name: 'utun3', label: 'Tailscale', ipv4: '100.64.0.5' },
       ]);
-      if (cmd === 'get_last_applied') return JSON.stringify({ success: true, groups: [] });
+      if (cmd === 'get_last_applied') return window.__NO_LAST__ ? null : JSON.stringify({ success: true, groups: [] });
       return null;
     },
   },
@@ -123,9 +127,47 @@ const bodyLen = (await page.textContent("#ap-body"))?.trim().length || 0;
 
 await page.screenshot({ path: "/tmp/appliedtest/applied-render.png" });
 
+const fail = [];
+
+const APPLIED_PAYLOAD = {
+  success: true, profile: 'home',
+  groups: [{ title: 'IPv4', rows: [{ label: 'popup.ip', value: '192.168.1.50', ok: true }] }],
+};
+const EVAL_PAYLOAD = {
+  last_run: { running: false, total: 1, outcomes: [{ label: 'WireGuard', ok: true }] },
+  workers: [{ label: 'mosdns', state: 'satisfied' }],
+};
+for (const scenario of ["evaluation-during-slow-sample", "targeted-resend"]) {
+  const rp = await browser.newPage({ viewport: { width: 360, height: 620 } });
+  await rp.addInitScript(() => { window.__SLOW_STATUS_MS__ = 400; window.__NO_LAST__ = true; });
+  await rp.addInitScript(STUB);
+  await rp.goto(url, { waitUntil: "load" });
+  await rp.waitForFunction(() => (window.__NS_LISTENERS__["netsense://applied"] || []).length > 0);
+  if (scenario === "evaluation-during-slow-sample") {
+    // 3B lands while SSID sampling is still in flight — apState must already exist.
+    await rp.evaluate(([a, e]) => {
+      window.__dispatch("netsense://applied", a);
+      window.__dispatch("netsense://evaluation", e);
+    }, [APPLIED_PAYLOAD, EVAL_PAYLOAD]);
+  } else {
+    // 3B lands, then the backend re-sends the same payload to show the window.
+    await rp.evaluate((a) => window.__dispatch("netsense://applied", a), APPLIED_PAYLOAD);
+    await rp.waitForTimeout(50);
+    await rp.evaluate(([a, e]) => {
+      window.__dispatch("netsense://evaluation", e);
+      window.__dispatch("netsense://applied", a);
+    }, [APPLIED_PAYLOAD, EVAL_PAYLOAD]);
+  }
+  await rp.waitForTimeout(700);
+  const rbody = (await rp.textContent("#ap-body")) || "";
+  if (!rbody.includes("WireGuard") || !rbody.includes("mosdns")) {
+    fail.push(`${scenario}: 3B results missing from popup body`);
+  }
+  await rp.close();
+}
+
 await browser.close();
 
-const fail = [];
 if (mac !== EXPECT_MAC) fail.push(`MAC: expected "${EXPECT_MAC}", got "${mac}"`);
 if (netmask !== EXPECT_NETMASK) fail.push(`netmask: expected "${EXPECT_NETMASK}", got "${netmask}"`);
 if (errors.length) fail.push(`console errors: ${JSON.stringify(errors)}`);

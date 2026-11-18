@@ -22,7 +22,7 @@
     html, body { margin: 0; height: 100%; }
     body {
       background: var(--bg); color: var(--fg);
-      font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font: var(--text-body);
       display: flex; flex-direction: column;
     }
     header {
@@ -60,14 +60,14 @@
     /* 路径是这台机器上的事实，不该被翻译，但要能被完整看清 */
     .path {
       padding: 5px 8px; background: var(--t-sunken); border: 1px solid var(--line);
-      border-radius: var(--t-r-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      border-radius: var(--t-r-sm); font-family: var(--font-mono);
       font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text; flex: none;
     }
     pre {
       /* 底下多留一段：toast 贴在窗口下沿，不留就是它亮起来的那一刻挡住最后几行日志。 */
       flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 8px 10px 40px;
       background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--t-r-md);
-      font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 11px/1.55 var(--font-mono);
       white-space: pre-wrap; word-break: break-word; user-select: text;
     }
     /* 一天的日志可以很长，所以按级别上色只给行首的那一段标记，正文保持可读 */

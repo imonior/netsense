@@ -271,6 +271,11 @@ pub struct AppConfig {
     /// 不改变任何 Profile 的匹配结果、也不改变任何下发内容。
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_applied_popup: bool,
+    /// 是否查询出口公网 IP 与归属地：默认开启。查询必然把公网 IP 暴露给第三方服务，
+    /// 关掉它等于选择不披露 —— 代理面板那一行改为「—」，不再发出任何查询请求。
+    /// 它只控制这次展示性查询，不改变升级请求走哪条路、也不改变任何下发内容。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub public_ip_lookup: bool,
     /// 升级安装包的下载镜像。缺省 = 直连 GitHub。
     ///
     /// 它改变的是「去哪儿取安装包」，与 `proxy`（走哪条出口）正交：两者可以同时生效，
@@ -406,6 +411,7 @@ impl Default for AppConfig {
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
+            public_ip_lookup: true,
             mirror_hidden: Vec::new(),
             geom_ver: 0,
         }
@@ -967,6 +973,7 @@ mod tests {
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
+            public_ip_lookup: true,
             mirror_hidden: Vec::new(),
             geom_ver: 1,
         };
@@ -1041,6 +1048,7 @@ mod tests {
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
+            public_ip_lookup: true,
             mirror_hidden: Vec::new(),
             geom_ver: 1,
         }
@@ -1060,6 +1068,7 @@ mod tests {
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
+            public_ip_lookup: true,
             mirror_hidden: Vec::new(),
             geom_ver: 1,
         }
@@ -1334,6 +1343,7 @@ mod tests {
             update_mirror: UpdateMirror::default(),
             dns_fallback: DnsFallback::default(),
             show_applied_popup: true,
+            public_ip_lookup: true,
             mirror_hidden: Vec::new(),
             geom_ver: 1,
             }

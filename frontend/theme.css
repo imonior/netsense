@@ -78,6 +78,39 @@
   --t-mask: rgba(0, 0, 0, .5);
   --t-shadow: 0 10px 30px rgba(0, 0, 0, .4);        /* 居中大弹层 */
   --t-shadow-pop: 0 3px 10px rgba(0, 0, 0, .28);    /* 贴在内容上的小浮层（候选清单） */
+
+  /* Shared scale tokens: font stacks, an AppKit-like type scale, an 8pt grid,
+     row heights and motion. Non-color names are inherited by the light theme.
+     — 非配色尺度：五扇窗口共用一份真相。这些名字不带 `--t-` 前缀，所以只在
+     `:root` 写一遍、浅色档靠层叠继承（validate.py 只要求成对的 `--t-*` 两档都有）；
+     字体、字阶、8pt 网格和行高集中在这里，窗口内联样式只做别名与布局。 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+               "Microsoft YaHei", "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic",
+               "Noto Sans", "Noto Sans CJK SC", "Noto Sans CJK KR", "Helvetica Neue",
+               Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco,
+               "Cascadia Mono", Consolas, monospace;
+
+  /* 12px is the body size of this compact UI: the tray is only 360px wide.
+     12px 是这套紧凑界面的正文档：托盘只有 360px 宽，13px 放不下同样多的信息。 */
+  --text-title-2:  600 14px/19px var(--font-sans);
+  --text-headline: 600 12px/17px var(--font-sans);
+  --text-body:     400 12px/1.45 var(--font-sans);
+  --text-compact:  400 12px/1.3 var(--font-sans);   /* Result popup: tight leading. / 结果弹窗：行距压到最小，一屏多列几项 */
+  --text-callout:  400 11px/15px var(--font-sans);
+  --text-footnote: 400 10px/13px var(--font-sans);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+
+  --row-compact: 24px;
+  --row-std: 28px;
+
+  --ease-out: cubic-bezier(0.2, 0, 0.1, 1);
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
 }
 
 html[data-theme="light"] {
@@ -188,4 +221,49 @@ html[data-theme="light"] {
   flex: 1 1 auto; min-width: 0; max-width: none; margin-left: 8px; text-align: right;
   overflow: visible; text-overflow: clip;
   white-space: normal; word-break: break-word; overflow-wrap: anywhere; line-height: 1.35;
+}
+
+/* Control baseline shared by all five windows. Each window still paints its
+   own buttons; only the removal of the native look happens here, otherwise
+   macOS WebKit's Aqua bezel shows through transparent backgrounds.
+   — 五扇窗口共用的控件基线。每扇窗口仍各自画按钮的样子，只把「抹掉系统原生外观」
+   这件事集中在这里：否则 macOS WebKit 的 Aqua 圆框会从半透明背景底下透出来。 */
+button {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  line-height: inherit;
+}
+button::-moz-focus-inner { border: 0; padding: 0; }
+
+/* :root disables selection so dragging across the chrome never highlights a
+   label; inputs and log bodies opt back in so they can be copied.
+   :root 关掉了全局选中（拖过导航不会高亮），但输入框和日志正文要能复制。 */
+input, textarea { user-select: text; -webkit-user-select: text; }
+
+/* Long lists should not fall back to the platform scrollbar: on Windows it is
+   a grey block that stands out badly in the light theme.
+   长列表不该落回各平台默认滚动条：Windows 上是灰方块，浅色档尤其突兀。 */
+* { scrollbar-width: thin; scrollbar-color: var(--t-line-hi) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--t-line-hi); border: 2px solid transparent;
+  background-clip: content-box; border-radius: var(--t-r-pill);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--t-fg-dim); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Motion can be turned off: focus and state changes still read through color
+   and shape, never through animation alone.
+   动效可以关：键盘焦点与状态变化仍然靠颜色/形状区分，不靠动画传达。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

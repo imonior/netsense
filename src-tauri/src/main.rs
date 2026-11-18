@@ -357,6 +357,7 @@ fn main() {
             ipc::uninstall_priv_channel,
             ipc::set_silent_execution,
             ipc::set_show_applied_popup,
+            ipc::set_public_ip_lookup,
             ipc::open_config_folder,
             ipc::open_app_settings_folder,
             ipc::get_proxy_state,
