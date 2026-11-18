@@ -555,7 +555,10 @@
     // `nicList` 补的是这两份都没有的东西 —— 这张口叫什么、它自己的 MAC —— 而它们只在
     // 换卡、换关联时才变，所以也只有那时才重取（见 [`refreshNics`]）。
     const primary = nicList[0] || null;
-    const s = Object.assign({}, statusSnap, (view && view.snapshot) || {});
+    // 实时采样 `statusSnap` 必须胜过引擎快照 `view.snapshot`：后者是引擎上一轮评估留下的，
+    // 网络刚切换时还是旧网卡的旧地址。谁盖谁决定了这一格跟不跟得上真实网络 ——
+    // 让 statusSnap 后写入胜出（pollNet 每 3s 与每条 status 广播都会刷新它）。
+    const s = Object.assign({}, (view && view.snapshot) || {}, statusSnap || {});
     const wireless = !primary || primary.kind === "wireless";
     const ssid = s.ssid || (primary && primary.ssid) || "";
     const ssidDisplay = ssid || t("status.ssid_unknown");
@@ -589,9 +592,10 @@
     if (primary && primary.ipv6) rows.push([t("popup.ipv6"), primary.ipv6, true]);
     if (primary && primary.prefix6) rows.push([t("popup.prefix6"), primary.prefix6, true]);
     if (gw6) rows.push([t("popup.gateway6"), gw6, true]);
-    // DNS
+    // DNS：始终显示，空值给「—」（与托盘面板、应用弹窗同一口径）。
+    // 空行要回答的问题正是「DNS 是空的，还是没读到？」——不能整行藏掉。
     const dns = s.dns || (primary && primary.dns);
-    if (dns) rows.push([t("popup.dns"), dns, true]);
+    rows.push([t("popup.dns"), dns || "—", !!dns]);
 
     // 第三列「当前网络」：地址类值行（IP / 掩码 / 网关 / IPv6 三项 / DNS）右侧一枚
     // 「复制」按钮。旧版这里是「use」（一键把该值填进条件区），但 IP / 掩码 / 网关 /

@@ -72,14 +72,19 @@
       if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
       if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
       if (routes) rows.push([t("popup.routes", "Routes"), routes]);
-      if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
+      // DNS 行始终显示：空值给「—」，让用户分得清「没有 DNS」和「没读到这一项」。
+      // The DNS row is always shown: an empty value renders as "—", so the user can tell
+      // "no DNS" apart from "this field was never read".
+      rows.push([t("popup.dns", "DNS"), n.dns || "—"]);
     } else {
       if (n.ssid) rows.push([t("status.ssid", "SSID"), n.ssid]);
       if (n.mac) rows.push([t("popup.mac", "MAC"), n.mac]);
       if (n.ipv4) rows.push([t("popup.ip", "IPv4"), n.ipv4 + (n.netmask ? " / " + n.netmask : "")]);
       if (n.ipv6) rows.push([t("popup.ipv6", "IPv6"), n.ipv6]);
       if (n.gateway) rows.push([t("popup.gateway", "Gateway"), n.gateway]);
-      if (n.dns) rows.push([t("popup.dns", "DNS"), n.dns]);
+      // DNS 行始终显示，空值给「—」（理由同上）。
+      // The DNS row is always shown; an empty value renders as "—" (same reason as above).
+      rows.push([t("popup.dns", "DNS"), n.dns || "—"]);
     }
     return `<div class="nic-card">
       <div class="nic-head">

@@ -1599,6 +1599,21 @@ fn is_noise_device(dev: &str) -> bool {
     false
 }
 
+/// 从一份 `ifconfig` 输出里取某张口的 IPv4 —— 回读校验采样 [`read_status`] 的兜底来源。
+///
+/// `ipconfig getifaddr` 在接口刚重新关联的瞬间会返回空，而同一时刻 `ifconfig` 的
+/// `inet` 行通常已经带上地址（netmask 与 `list_interfaces` 早已靠它兜底）。把它抽成
+/// 纯函数，好让「回读采样读不到 IP 时从 ifconfig 顶上」这件事有单测钉住。
+///
+/// Read an interface's IPv4 from an `ifconfig` snapshot — the fallback source for the
+/// read-back sample. `ipconfig getifaddr` goes empty while an interface re-associates;
+/// the `inet` line is usually already present, so use it when the primary read fails.
+fn ipv4_from_ifconfig(out: &str, dev: &str) -> Option<String> {
+    parse_iface_snapshot(out)
+        .get(dev)
+        .and_then(|s| s.inet.clone())
+}
+
 /// 一次路由表采样的三份产物：两个地址族的默认网关，和每张网卡的 IPv4 前缀。
 struct RouteTables {
     /// `设备名 -> 默认网关 IP`（IPv4）。只有**带网关**的 default 行才进这张表。
@@ -2233,6 +2248,18 @@ fn read_status(needs_bssid: bool) -> InterfaceStatus {
                 .ok()
                 .map(|o| o.trim().to_string())
                 .filter(|s| !s.is_empty())
+                // `ipconfig getifaddr` 在接口刚重新关联（3A 下发静态地址 / DHCP 重租的瞬间）
+                // 会短暂读不到 —— 回读校验的 `got.ipv4` 于是是 None，被误判成「地址没写进去」
+                // 而回滚。netmask 与 `list_interfaces` 都有 ifconfig 的 inet 行兜底，唯独这条
+                // 校验用的采样没有：拿同一份 ifconfig 快照的 inet 顶上，消除这个竞态误判。
+                // `ipconfig getifaddr` returns empty while an interface re-associates right
+                // after an apply; fall back to the inet line from the same ifconfig snapshot
+                // (the netmask read and list_interfaces already do this).
+                .or_else(|| {
+                    run("ifconfig", &[dev.as_str()])
+                        .ok()
+                        .and_then(|o| ipv4_from_ifconfig(&o, dev.as_str()))
+                })
         });
         let h_netmask = s.spawn(|| {
             run("ipconfig", &["getoption", dev.as_str(), "subnet_mask"])
@@ -3389,6 +3416,28 @@ mod tests {
         assert_eq!(en5.inet.as_deref(), Some("192.168.1.100"));
         assert_eq!(en5.netmask.as_deref(), Some("255.255.255.0"));
         assert_eq!(m.get("utun3").unwrap().netmask, None);
+    }
+
+    /// 回读校验在接口刚重新关联时读不到 IP 是偶发失败的头号现场：primary 采样
+    /// (`ipconfig getifaddr`) 空了，但 ifconfig 的 `inet` 行已经有新地址。这个兜底
+    /// 必须拿到那一行，否则 3A 会把一次成功的下发误判成失败并回滚。
+    #[test]
+    fn readback_ipv4_falls_back_to_ifconfig_when_getifaddr_is_empty() {
+        let out = concat!(
+            "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n",
+            "\tinet 192.168.110.108 netmask 0xfffffe00 broadcast 192.168.111.255\n",
+            "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n",
+            "\tinet6 fd1c:b7b7:1::2 prefixlen 64\n",
+        );
+        // 目标口有 inet → 兜底拿到刚下发的新地址，回读校验得以通过。
+        assert_eq!(
+            ipv4_from_ifconfig(out, "en0").as_deref(),
+            Some("192.168.110.108")
+        );
+        // 只有 IPv6 的隧道没有 IPv4 → 兜底如实给 None，不伪造地址。
+        assert_eq!(ipv4_from_ifconfig(out, "utun3"), None);
+        // 输出里没有这张口 → None（而不是错拿别的口的地址）。
+        assert_eq!(ipv4_from_ifconfig(out, "en9"), None);
     }
 
     #[test]

@@ -4,6 +4,14 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-11-18
+
+### Fixed
+
+- **DNS is now shown in every network summary even when empty, using a dash placeholder.** The status-tray menu, the applied-result popup, and the current-network column of the automation editor all hid the DNS row entirely when no DNS servers were configured. The DNS row is now always rendered, with a dash for an empty value, so the absence of DNS is explicit rather than ambiguous. (`frontend/netinfo.js`, `frontend/editor.html`)
+- **The current-network column in the automation editor now updates live when the underlying network changes.** The editor polls the system every three seconds, but the merge order let a stale engine snapshot carried by a broadcast overwrite the freshly sampled status, so a Wi-Fi or wired switch appeared not to refresh while the window stayed open. The merge now lets the live sample win, so IP, DNS and SSID follow the new network. (`frontend/editor.html`)
+- **Applying a static address no longer fails spuriously when the IP cannot be read back for an instant.** The macOS read-back verification sampled IPv4 through `ipconfig getifaddr` alone, with no fallback; right after a manual address is written the interface can briefly report no address, so all three samples came back empty and the apply was wrongly judged failed and rolled back — replaying the snapshot's static routes each time, which made the route count climb. Read-back now falls back to the `ifconfig` inet snapshot (the same source netmask and interface enumeration already use), with a unit test pinning the contract. (`src-tauri/src/platform/macos.rs`)
+
 ## [1.9.9] - 2026-11-10
 
 ### Fixed
