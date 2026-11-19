@@ -22,36 +22,36 @@
     html, body { margin: 0; height: 100%; }
     body {
       background: var(--bg); color: var(--fg);
-      font: var(--text-body);
+      font: var(--text-wide-body);
       display: flex; flex-direction: column;
     }
     header {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
       padding: 12px 16px 10px; border-bottom: 1px solid var(--line); flex: none;
     }
-    header b { font-size: 14px; letter-spacing: .2px; }
+    header b { font: var(--text-wide-title); letter-spacing: .2px; }
     /* 头部那一行装的是文件选择器 + 三颗按钮；日志文件名带时间戳，长过窗口时宁可换行，
        也不把按钮挤出可见区（挤出去就等于「刷新」没了）。 */
     .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     select, input[type=text] {
       background: var(--bg-card); color: var(--fg); border: 1px solid var(--line);
-      border-radius: var(--t-r-sm); padding: 5px 8px; font: inherit; font-size: 12px;
+      border-radius: var(--t-r-sm); padding: 5px 8px; font: var(--text-wide-callout);
       min-width: 0; max-width: 100%;
     }
     button {
-      padding: 5px 12px; font-size: 12px; border-radius: var(--t-r-sm); cursor: pointer;
+      padding: 5px 12px; font: var(--text-wide-callout); border-radius: var(--t-r-sm); cursor: pointer;
       border: 1px solid var(--line); background: var(--bg-card); color: var(--fg);
-      font-family: inherit;
+      font-family: var(--font-sans);
     }
-    button.tiny { padding: 3px 9px; font-size: 11px; color: var(--muted); }
+    button.tiny { padding: 3px 9px; font: var(--text-wide-footnote); color: var(--muted); }
     button:active { transform: translateY(1px); }
     label.chk { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); }
     main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 16px 14px; gap: 8px; }
     .bar { display: flex; align-items: center; gap: 10px; flex: none; }
     .bar input[type=text] { flex: 1; min-width: 0; }
     /* 级别筛选：一组切换按钮，选中的那颗高亮（accent 实底）。 */
-    .bar .lbl { color: var(--muted); font-size: 11px; }
-    .bar .lvl { padding: 4px 10px; font-size: 11px; }
+    .bar .lbl { color: var(--muted); font: var(--text-wide-callout); }
+    .bar .lvl { padding: 4px 10px; font: var(--text-wide-callout); }
     .bar .lvl.on { background: var(--accent); color: var(--t-on-accent); border-color: var(--accent); }
     /* 「已显示 N / 共 M 行 · 更旧的…」是本地化句子，五种语言长度差很多：让它截断，
        而不是把同一行的筛选框挤到 0 宽。 */
@@ -63,19 +63,40 @@
       border-radius: var(--t-r-sm); font-family: var(--font-mono);
       font-size: 11px; color: var(--t-fg-accent); word-break: break-all; user-select: text; flex: none;
     }
-    pre {
-      /* 底下多留一段：toast 贴在窗口下沿，不留就是它亮起来的那一刻挡住最后几行日志。 */
-      flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 8px 10px 40px;
-      background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--t-r-md);
-      font: 11px/1.55 var(--font-mono);
-      white-space: pre-wrap; word-break: break-word; user-select: text;
+    /* 日志正文从裸 `<pre>` 改成列网格：时间/级别/类别各占固定列，消息吃掉余宽。
+       扫读一屏日志时眼睛不再每次重新找列；`contain` 把超长列表的布局与绘制关在这一块里，
+       500 行到 5000 行都不会带着整个窗口重排。
+       Log body is a column grid instead of a bare <pre>: fixed time/level/category
+       columns, message takes the rest. `contain` keeps long lists from relayouting
+       the whole window. */
+    .log-body {
+      flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 6px 8px 40px;
+      background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--t-r-lg);
+      font: 12px/1.45 var(--font-mono);
+      user-select: text; -webkit-user-select: text; cursor: text;
+      contain: content;
     }
-    /* 一天的日志可以很长，所以按级别上色只给行首的那一段标记，正文保持可读 */
-    .l-E { color: var(--err); }
-    .l-W { color: var(--warn); }
-    .l-I { color: var(--fg); }
-    .l-D { color: var(--muted); }
-    .hit { background: var(--t-hit); border-radius: var(--t-r-sm); }
+    .log-row {
+      display: grid;
+      grid-template-columns: 84px 48px 48px minmax(0, 1fr);
+      column-gap: var(--space-2); align-items: baseline;
+      padding: 2px var(--space-1); border-bottom: .5px solid var(--line);
+      min-width: 0;
+    }
+    .log-row[hidden] { display: none; }   /* display:grid 会盖掉 UA 的 [hidden] */
+    .log-row > span { min-width: 0; }
+    .log-time { color: var(--muted); font-variant-numeric: var(--numeric-tabular); white-space: nowrap; }
+    .log-level { font-weight: 700; letter-spacing: .02em; }
+    .log-cat { color: var(--t-fg-accent); font-size: 11px; letter-spacing: .02em; text-transform: lowercase; }
+    .log-msg { color: var(--fg); overflow-wrap: anywhere; white-space: pre-wrap; }
+    /* 只染级别列，正文保持原色：整行刷红会让一屏日志没法读。 */
+    .l-E .log-level { color: var(--err); }
+    .l-W .log-level { color: var(--warn); }
+    .l-I .log-level { color: var(--fg); }
+    .l-D .log-level { color: var(--muted); }
+    .l-X .log-level { color: var(--err); }
+    .log-empty { padding: 8px var(--space-1); color: var(--muted); }
+    mark.hit { background: var(--t-hit); color: var(--t-fg); border-radius: var(--t-r-xs); }
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
       background: var(--t-toast-bg); border: 1px solid var(--line); color: var(--t-on-accent);
@@ -129,7 +150,7 @@
       <span class="val" id="v-status"></span>
     </div>
     <div class="path" id="p-dir">—</div>
-    <pre id="out"></pre>
+    <div id="out" class="log-body" role="log" aria-live="off"><div id="rows"></div><div id="empty" class="log-empty" hidden></div></div>
   </main>
 
   <div class="toast" id="toast"></div>
@@ -238,55 +259,113 @@
       renderBody();
     }
 
+    /* ——— 解析一次、过滤多次 ———
+       旧版每次敲一个过滤字都把整段原文 split、跑两遍正则、再拼几千行 innerHTML。
+       5000 行时那是每次按键几千次正则 + 整棵子树重建。现在只在重新读盘时解析一次，
+       按键和切筛选都只走缓存好的结构。
+       Parse once on disk read; keystrokes and filter toggles only scan cached rows. */
+    const LINE_RE = /^\[(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})\] \[(ERROR|WARN|INFO|DEBUG|PANIC)\](?: \[([a-z]{2,4})\])? (.*)$/;
+    const LEVEL_SHORT = { ERROR: "E", WARN: "W", INFO: "I", DEBUG: "D", PANIC: "X" };
+    let parsed = [];
+    let parsedBody = null;
+
+    function parseBody() {
+      if (parsedBody === body) return;
+      parsedBody = body;
+      parsed = (body ? body.split("\n") : []).map((raw) => {
+        const m = LINE_RE.exec(raw);
+        if (!m) {
+          // 旧版本写的行与 panic 行没有分类：按 app 兜底，级别未知（过滤时保留）。
+          return { raw, time: "", level: "", cat: "app", msg: raw };
+        }
+        // 文件按天轮转，文件名自带日期，所以列里只留时分秒 —— 90px 一列放得下。
+        return { raw, time: m[4], level: LEVEL_SHORT[m[5]], cat: m[6] || "app", msg: m[7] };
+      });
+    }
+
+    /* ——— 行节点复用 ———
+       只在第一次需要时建节点，之后改文字与 class，不拆 DOM。滚动位置与屏幕阅读器
+       的焦点不会因为整棵子树被替换而跳掉。
+       Reuse row nodes instead of rebuilding innerHTML on every filter change. */
+    const rowHost = el("rows");
+    const emptyNode = el("empty");
+    const rowPool = [];
+    function makeRow() {
+      const n = document.createElement("div");
+      const time = document.createElement("span"); time.className = "log-time";
+      const level = document.createElement("span"); level.className = "log-level";
+      const cat = document.createElement("span"); cat.className = "log-cat";
+      const msg = document.createElement("span"); msg.className = "log-msg";
+      n.append(time, level, cat, msg);
+      n._c = { time, level, cat, msg };
+      rowHost.appendChild(n);
+      return n;
+    }
+    function fillMsg(node, text, q) {
+      node.textContent = "";
+      if (!q) { node.textContent = text; return; }
+      const i = text.toLowerCase().indexOf(q);
+      if (i < 0) { node.textContent = text; return; }
+      node.appendChild(document.createTextNode(text.slice(0, i)));
+      const hit = document.createElement("mark");
+      hit.className = "hit"; hit.textContent = text.slice(i, i + q.length);
+      node.appendChild(hit);
+      node.appendChild(document.createTextNode(text.slice(i + q.length)));
+    }
+
     function renderBody() {
+      parseBody();
       const q = el("in-filter").value.trim().toLowerCase();
-      const pre = el("out");
-      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-      const lines = body ? body.split("\n") : [];
+      const out = el("out");
+      const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
       const allowed = LEVEL_MIN[levelFilter];
-      let kept = q ? lines.filter(l => l.toLowerCase().includes(q)) : lines;
-      // 级别筛选：与子串过滤叠加。无法识别级别的辅助行在过滤时保留，免得误删真实日志。
-      if (allowed) kept = kept.filter(l => {
-        const m = /\] \[([EWDI])/.exec(l);
-        if (!m) return true;
-        return allowed.includes(m[1]);
-      });
-      // 分类筛选：与级别、子串过滤交叉生效。行内没有分类标记的（旧版本写的行、panic 行）
-      // 按 app 兜底 —— 与后端「归不进其余四层的都算应用层」同一条规则，于是「全部」
-      // 永远等于五类之和，任何一行都不会在过滤里失踪。
-      // Category filter: crosses with level and substring filters. Lines without a tag
-      // (written by older versions, the panic line) fall back to app — the same rule the
-      // backend applies to anything outside the other four layers, so "All" always equals
-      // the union of the five filters and no line disappears.
-      if (catFilter) kept = kept.filter(l => {
-        const m = /\] \[[A-Z]+\](?: \[([a-z]{2,4})\])?/.exec(l);
-        return (m && m[1] ? m[1] : "app") === catFilter;
-      });
-      const mark = (line) => {
-        const i = q ? line.toLowerCase().indexOf(q) : -1;
-        if (i < 0) return esc(line);
-        return esc(line.slice(0, i)) + '<span class="hit">' + esc(line.slice(i, i + q.length))
-          + "</span>" + esc(line.slice(i + q.length));
-      };
-      // 一行一个 span：级别只染行首的那段标记，整行刷红会让一屏日志没法读。
-      pre.innerHTML = kept.length
-        ? kept.map(l => {
-            const m = /\] \[([EWDI])/.exec(l);
-            return `<span class="${m ? "l-" + m[1] : ""}">${mark(l)}</span>`;
-          }).join("\n")
-        : (kept.length || q ? "" : esc(t("logs.empty", "Nothing to show")));
+      // 级别/分类筛选与子串过滤交叉生效；无法识别级别的辅助行在过滤时保留，
+      // 分类缺失的旧行按 app 兜底 —— 与后端「归不进其余四层的都算应用层」同一条规则。
+      const kept = parsed.filter(r =>
+        (!q || r.raw.toLowerCase().includes(q)) &&
+        (!allowed || !r.level || allowed.includes(r.level)) &&
+        (!catFilter || r.cat === catFilter));
+
+      while (rowPool.length < kept.length) rowPool.push(makeRow());
+      for (let i = 0; i < rowPool.length; i++) {
+        const n = rowPool[i];
+        if (i >= kept.length) { n.hidden = true; continue; }
+        n.hidden = false;
+        const r = kept[i];
+        const cls = r.level ? "log-row l-" + r.level : "log-row";
+        if (n.className !== cls) n.className = cls;
+        const c = n._c;
+        if (c.time.textContent !== r.time) c.time.textContent = r.time;
+        if (c.level.textContent !== r.level) c.level.textContent = r.level;
+        if (c.cat.textContent !== r.cat) c.cat.textContent = r.cat;
+        // 未变的行不要重刷正文：长日志里绝大多数行在相邻两次过滤之间是同一批。
+        if (n._msgRaw !== r.msg || n._msgQ !== q) {
+          n._msgRaw = r.msg; n._msgQ = q;
+          fillMsg(c.msg, r.msg, q);
+        }
+      }
+      emptyNode.hidden = kept.length > 0;
+      if (kept.length === 0) emptyNode.textContent = t("logs.empty", "Nothing to show");
       el("v-status").textContent = q
         ? tf("logs.showing", "{shown} of {total} lines", { shown: kept.length, total: shown })
         : tf("logs.read", "{total} lines", { total: shown })
           + (truncated ? " · " + t("logs.truncated", "older lines not read") : "");
       // 「跟随」的整个意义就是看见最新一行，所以只有本来就贴着底部时才自动滚。
-      if (el("chk-auto").checked || atBottom) pre.scrollTop = pre.scrollHeight;
+      if (el("chk-auto").checked || atBottom) out.scrollTop = out.scrollHeight;
+    }
+
+    // 连续输入合并到下一帧：一秒敲十个字不会画十次 5000 行。
+    let renderQueued = false;
+    function requestRender() {
+      if (renderQueued) return;
+      renderQueued = true;
+      requestAnimationFrame(() => { renderQueued = false; renderBody(); });
     }
 
     /* —————————————————————— 交互 —————————————————————— */
     el("sel-file").onchange = (ev) => { name = ev.target.value; body = ""; renderBody(); readBody(); };
     el("sel-lines").onchange = () => readBody();
-    el("in-filter").oninput = () => renderBody();
+    el("in-filter").oninput = () => requestRender();
     el("chk-auto").onchange = (ev) => { if (ev.target.checked) readBody(); };
     el("btn-refresh").onclick = async () => { await loadFiles(true); await readBody(); };
     el("btn-dir").onclick = () => invoke("open_logs").catch(e => toast(String(e)));
@@ -296,7 +375,7 @@
       b.onclick = () => {
         levelFilter = b.dataset.lvl || "";
         document.querySelectorAll("#level-bar .lvl").forEach(x => x.classList.toggle("on", x === b));
-        renderBody();
+        requestRender();
       };
     });
     // 分类筛选切换：与级别筛选独立工作，交叉生效。
@@ -305,7 +384,7 @@
       b.onclick = () => {
         catFilter = b.dataset.cat || "";
         document.querySelectorAll("#cat-bar .lvl").forEach(x => x.classList.toggle("on", x === b));
-        renderBody();
+        requestRender();
       };
     });
 

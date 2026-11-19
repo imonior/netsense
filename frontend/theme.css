@@ -15,17 +15,21 @@
    核对过 —— 只有占位符是例外（它是提示不是内容，3:1 一级就够）。`scripts/validate.py` 按
    成对 token 实算比值，不达标就红：这一句从前只是注释，所以深色档里有五处悄悄掉到 3.7~4.4。
 
-   尺度也在这份里：圆角只有三档 —— `--t-r-sm`（控件）、`--t-r-md`（容器）、`--t-r-pill`（徽标与
-   toast）。四扇窗口从前各写各的（实测 7 种值：2/4/5/6/8/10/999），同一个角色在不同窗口圆得不
-   一样，看着就是没对齐。阴影分两档：居中弹层用 `--t-shadow`，贴在内容上的小浮层用
-   `--t-shadow-pop` —— 后者从前在编辑器里硬写成黑色，切到浅色档就变成一块灰边。 */
+   尺度也在这份里：圆角分四档 —— `--t-r-xs`（细控件）、`--t-r-sm`（控件）、`--t-r-md`
+   （容器）、`--t-r-lg`（整块面板 / NSWindow 的 10px），外加 `--t-r-pill`（徽标与 toast）。
+   四扇窗口从前各写各的（实测 7 种值：2/4/5/6/8/10/999），同一个角色在不同窗口圆得不
+   一样，看着就是没对齐。阴影分四档 `--t-shadow-xs/sm/md/lg`，按所在底色取同色相而不是
+   纯黑 rgba —— 后者切到浅色档就变成一块灰边；`--t-shadow` / `--t-shadow-pop` 是给旧
+   markup 留的两枚别名，仍指向同一套值。 */
 
 :root {
   color-scheme: dark;
 
-  /* — 尺度：全站只有这三档圆角 — */
+  /* — 尺度：全站只有这四档圆角 + 一枚 pill — */
+  --t-r-xs: 2px;              /* 细控件：徽标内的小色块、分隔条端点 */
   --t-r-sm: 4px;              /* 控件：输入框、按钮、小卡片 */
   --t-r-md: 8px;              /* 容器：卡片、面板、弹层 */
+  --t-r-lg: 10px;             /* 整块面板：与 NSWindow 的圆角同值 */
   --t-r-pill: 999px;          /* 徽标与 toast：只有一粒字的高度 */
 
   /* — 面 — */
@@ -76,8 +80,20 @@
   --t-selection: rgba(31, 111, 235, .32);   /* 跟着 `--t-accent` 走，别留在旧的主色上 */
   --t-toast-bg: rgba(0, 0, 0, .82);
   --t-mask: rgba(0, 0, 0, .5);
-  --t-shadow: 0 10px 30px rgba(0, 0, 0, .4);        /* 居中大弹层 */
-  --t-shadow-pop: 0 3px 10px rgba(0, 0, 0, .28);    /* 贴在内容上的小浮层（候选清单） */
+  /* 阴影跟着底色走同色相：深底用近黑的蓝 slate，浅底用中明度蓝灰。纯黑 rgba
+     在浅色档会变成一块脏灰边 —— 这里两档各自给值，窗口只引用 token。
+     Hue-matched shadows: the dark set uses near-black blue slate, the light set
+     mid-tone blue grey. Plain black shifts to a dirty grey on light surfaces. */
+  --t-shadow-xs: 0 0 0 .5px rgba(100, 110, 180, .14),
+                 0 1px 2px hsla(230, 40%, 4%, .50);
+  --t-shadow-sm: 0 1px 3px hsla(230, 40%, 5%, .45),
+                 0 2px 6px hsla(230, 40%, 4%, .35);
+  --t-shadow-md: 0 4px 12px hsla(230, 40%, 4%, .55),
+                 0 16px 48px hsla(230, 40%, 3%, .40);
+  --t-shadow-lg: 0 8px 24px hsla(230, 40%, 3%, .65),
+                 0 24px 64px hsla(230, 40%, 2%, .50);
+  --t-shadow: var(--t-shadow-lg);      /* 旧名字：居中大弹层 */
+  --t-shadow-pop: var(--t-shadow-md);  /* 旧名字：贴在内容上的小浮层 */
 
   /* Shared scale tokens: font stacks, an AppKit-like type scale, an 8pt grid,
      row heights and motion. Non-color names are inherited by the light theme.
@@ -99,6 +115,25 @@
   --text-compact:  400 12px/1.3 var(--font-sans);   /* Result popup: tight leading. / 结果弹窗：行距压到最小，一屏多列几项 */
   --text-callout:  400 11px/15px var(--font-sans);
   --text-footnote: 400 10px/13px var(--font-sans);
+
+  /* Wide-window type scale. 1180px editors and 900px log windows have room for
+     AppKit's 13px body; the 360px tray and 480px settings keep the 12px set
+     above. Only the large windows opt in, so no narrow window loses a row.
+     — 宽屏字阶：1180px 编辑器与 900px 日志窗用 13px 正文，托盘与设置仍走 12px。
+     只在大窗口里显式取用，窄窗的行密度不受影响。 */
+  --text-wide-title:   600 17px/22px var(--font-sans);
+  --text-wide-headline:600 14px/19px var(--font-sans);
+  --text-wide-body:    400 13px/1.45 var(--font-sans);
+  --text-wide-compact: 400 13px/1.3 var(--font-sans);
+  --text-wide-callout: 400 12px/16px var(--font-sans);
+  --text-wide-footnote:400 11px/14px var(--font-sans);
+
+  /* Line heights and numeric alignment are roles, not one-off values.
+     — 行高与等宽数字也是角色，不是随手写的数字。 */
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-relaxed: 1.6;
+  --numeric-tabular: tabular-nums;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -158,8 +193,16 @@ html[data-theme="light"] {
   --t-selection: rgba(26, 99, 201, .22);
   --t-toast-bg: rgba(35, 38, 47, .94);
   --t-mask: rgba(28, 32, 46, .34);
-  --t-shadow: 0 10px 30px rgba(28, 34, 58, .18);
-  --t-shadow-pop: 0 3px 10px rgba(28, 34, 58, .16);
+  --t-shadow-xs: 0 0 0 .5px rgba(100, 116, 139, .14),
+                 0 1px 2px hsla(225, 25%, 40%, .08);
+  --t-shadow-sm: 0 1px 3px hsla(225, 25%, 50%, .10),
+                 0 2px 8px hsla(225, 25%, 40%, .08);
+  --t-shadow-md: 0 4px 12px hsla(225, 25%, 40%, .12),
+                 0 16px 48px hsla(225, 25%, 35%, .08);
+  --t-shadow-lg: 0 8px 24px hsla(225, 25%, 35%, .18),
+                 0 24px 64px hsla(225, 25%, 30%, .12);
+  --t-shadow: var(--t-shadow-lg);
+  --t-shadow-pop: var(--t-shadow-md);
 }
 
 /* 选中的字要看得清：默认的蓝色高亮在深底上会把字吃掉，浅底上又和主色撞车。

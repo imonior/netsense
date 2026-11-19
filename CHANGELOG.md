@@ -4,6 +4,19 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.2] - 2026-11-19
+
+### Added
+
+- **The automation editor now opens on the profile that is actually in effect.** Previously the first profile in the file was selected regardless of which one the engine reported as live, so the other three columns showed a configuration that was not running. The editor now waits for the engine view and selects the active (or fallback) profile automatically — the same state as if the user had clicked that row — so conditions, network and actions are filled in without a click. A profile the user picked by hand is never overridden by later status broadcasts. A regression case in `scripts/editor-smoke.mjs` pins both the automatic choice and the fact that a manual pick survives broadcasts. (`frontend/editor.html`, `scripts/editor-smoke.mjs`)
+
+### Fixed
+
+- **The public-IP readout shows its location again in the Chinese interface.** The `myip.ipip.net` endpoint actually returns "当前 IP：…  来自于：…" (lái zì yú), but the parser only recognized the reversed "自来于" (zì lái yú); the IP was read while the location stayed empty, leaving a bare address in Settings. Both word orders are now accepted, and a unit test pins the real response shape. (`src-tauri/src/ipc.rs`)
+- **The log window uses aligned columns and stays responsive on long files.** The plain text block is replaced by time / level / category / message columns, with levels colored in their own column and search hits highlighted in place. Log lines are parsed once per file read and cached, rows reuse their DOM nodes instead of rebuilding the whole subtree on each keystroke, consecutive filter changes are coalesced into a single frame, and layout is contained to the log body — so filtering thousands of lines stays responsive. (`frontend/logs.html`)
+- **Update-path addresses are no longer cut off in the narrow Settings window.** Each path row became a grid: the address wraps instead of being ellipsized, the "follow system" row puts the detected proxy address on a second line, and timing has its own right-aligned column with the full text on hover. (`frontend/settings.html`)
+- **Large windows get a readable type scale without crowding the tray.** The editor and log windows use a larger body size and headings, while the tray, Settings and result popup keep their compact text. Four radius tiers plus a pill, four surface-matched shadow tiers, named line-height roles and tabular numerals are now shared scale tokens enforced by `scripts/validate.py` and documented in `DEVELOPMENT.md` and `frontend/README.md`. (`frontend/theme.css`, `frontend/editor.html`, `frontend/logs.html`, `scripts/validate.py`, `DEVELOPMENT.md`, `frontend/README.md`)
+
 ## [2.0.1] - 2026-11-18
 
 ### Added

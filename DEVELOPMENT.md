@@ -121,7 +121,7 @@ netsense/
 │   ├── logs.html              # 日志窗口（窗口 label = logs）：按天文件下拉 / 尾部行 / 级别上色 / 级别×分类过滤 / 跟随
 │   ├── icon.png               # About 页展示用的应用图标（256px，从 src-tauri/icons/128x128@2x.png 复制）
 │   ├── applied.html           # 「配置已应用」结果弹窗（窗口 label = applied）：独立置顶、不抢焦点，与面板/编辑器/设置/日志互不隶属
-│   ├── theme.css              # 四座窗口共用的一套：配色 `--t-*` 两档（深色在 :root，浅色在 html[data-theme="light"]）+ 尺度（圆角三档、阴影两档）
+│   ├── theme.css              # 五座窗口共用的一套：配色 `--t-*` 两档（深色在 :root，浅色在 html[data-theme="light"]）+ 尺度（圆角四档 + pill、阴影四档、宽屏字阶）
 │   ├── README.md              # frontend notes + IPC command table
 │   └── serve.sh               # dev static server on :1420
 ├── scripts/
@@ -1034,8 +1034,7 @@ SSID comparison **stays case-sensitive** (802.11 SSID is itself case-sensitive).
   或由 `get_theme` 现问一次（软件设置、日志窗口，以及编辑器的首屏 —— 窗口是按 CSS 默认档建起来的，
   配色若只跟着快照来，浅色档的用户会先看一眼深色再被闪一下）。
 - **`theme.css` 不只管颜色，也管尺度**：深、浅两档的 `--t-*`（面、字、状态点、徽标、浮层）加上圆角
-  三档（`--t-r-sm` 控件 / `--t-r-md` 容器 / `--t-r-pill` 徽标与 toast）和阴影两档（`--t-shadow` 居中
-  大弹层 / `--t-shadow-pop` 贴在内容上的小浮层）都写在这一份里，四扇窗口的内联 `:root` 只做别名。
+  五档（四档 + pill：`--t-r-xs` 细部 / `--t-r-sm` 控件 / `--t-r-md` 容器 / `--t-r-lg` 整块面板 / `--t-r-pill` 徽标与 toast）和四档阴影（`--t-shadow-xs/sm/md/lg`，两档底色各自取同色相；`--t-shadow` / `--t-shadow-pop` 是旧 markup 的别名）都写在这一份里，五扇窗口的内联 `:root` 只做别名。字阶同理：窄窗（托盘 360px / 设置 480px / 结果弹窗 340px）用 12px 正文，宽窗（编辑器 1180px / 日志 900px）显式取 13px 的 `--text-wide-*`。
   校验的第 [12] 组把这句话从注释变成检查：界面上真实存在的「字 + 它所在的那块底」成对算对比度，
   深、浅各算一次取更低的那个，低于 4.5:1 就红（占位符按 3:1 —— 它是提示不是内容）；前端出现的
   `border-radius` / `box-shadow` 只准引用上面那批 token。它看不见的：半透明底要合成才知道值（toast、
@@ -1231,8 +1230,8 @@ Logs: the **user log dir** (`paths::user_log_dir()`, see §10.2) when it is writ
   literal, and no CJK literal may sit in backend source — both rules accept an `i18n-exempt` marker) and
   **theme** (each foreground/background `--t-*` pair the windows actually paint is recomputed against
   WCAG AA — 4.5:1, 3.0:1 for the placeholder — in *both* the dark and the light block, and every
-  `border-radius` / `box-shadow` in `frontend/*.html` must resolve to the three-step radius scale or a
-  shadow token, while a window's inline `:root` may only *alias* `--t-*`, never define a colour of its
+  `border-radius` / `box-shadow` in `frontend/*.html` must resolve to the five-step radius scale (four steps + pill) or a
+  hue-matched shadow token, while a window's inline `:root` may only *alias* `--t-*`, never define a colour of its
   own; what it cannot see is spelled out in `check_theme`'s docstring — translucent backgrounds, hover
   and selected states, and all real geometry)
   Each check group is worth 10 points and the run prints a total out of

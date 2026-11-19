@@ -14,11 +14,14 @@
       --text-accent: var(--t-fg-accent); --btn-primary: var(--t-accent); --btn-danger: var(--t-danger);
       --btn-warning: var(--t-warning); --radius-md: var(--t-r-md); --radius-sm: var(--t-r-sm);
       --ok: var(--t-ok); --warn: var(--t-warn); --err: var(--t-err); --off: var(--t-off);
+      /* 1180px 的编辑器走宽屏字阶：正文 13px、标题 14px、标签 12px、提示 11px。
+         托盘与设置仍是 12px 正文，不受这里影响。 */
+      --fs-body: 13px; --fs-head: 14px; --fs-label: 12px; --fs-hint: 11px;
     }
     body {
       background-color: var(--bg-main); color: var(--text-main);
-      font-family: var(--font-sans);
-      margin: 0; padding: 8px; font-size: 12px; user-select: none; overflow: hidden;
+      font: var(--text-wide-body);
+      margin: 0; padding: 8px; user-select: none; overflow: hidden;
     }
     /* 三层：当前状态条 / 四列编辑区 / 命令按钮。
        第一层的四格与第二层的四列用**同一套** grid-template-columns，所以每一格正好压在
@@ -35,7 +38,7 @@
       overflow-y: auto; min-height: 0;
     }
     .cell-k {
-      font-size: 10px; color: var(--text-accent); text-transform: uppercase;
+      font-size: var(--fs-hint); color: var(--text-accent); text-transform: uppercase;
       letter-spacing: 1px; font-weight: 700; margin-bottom: 3px;
     }
     .panel {
@@ -45,7 +48,7 @@
     }
     .panel-header {
       padding: 8px 10px; border-bottom: 1px solid var(--border-color);
-      font-weight: bold; font-size: 12px; display: flex; justify-content: space-between;
+      font-weight: bold; font-size: var(--fs-head); display: flex; justify-content: space-between;
       align-items: center; gap: 6px; flex: none;
     }
     .panel-content { padding: 10px; flex: 1; overflow-y: auto; min-height: 0; }
@@ -54,7 +57,7 @@
     /* Profile 行：勾选框、名字、状态、快速切换勾选全在一行；选中行把名字换成输入框 */
     .prow {
       padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--border-color);
-      border-left: 3px solid transparent; font-size: 12px;
+      border-left: 3px solid transparent; font-size: var(--fs-body);
       display: flex; align-items: center; gap: 6px;
     }
     .prow:hover { background: var(--t-hover); }
@@ -72,7 +75,7 @@
     .li-off { opacity: .55; }
     .badge-slot { display: flex; align-items: center; }
     .group-title {
-      font-size: 11px; color: var(--text-accent); margin: 10px 0 5px 0;
+      font-size: var(--fs-label); color: var(--text-accent); margin: 10px 0 5px 0;
       padding-bottom: 3px; border-bottom: 1px dashed var(--border-color); font-weight: bold;
       display: flex; justify-content: space-between; align-items: center; gap: 6px;
     }
@@ -80,16 +83,16 @@
     /* 分支标题（THEN / ELSE）：本列先 THEN 后 ELSE，与执行顺序一致 */
     .branch-title {
       margin: 12px 0 6px; padding: 3px 7px; border-radius: var(--radius-sm);
-      background: var(--t-raised); color: var(--t-fg-accent); font-size: 11px; font-weight: 700;
+      background: var(--t-raised); color: var(--t-fg-accent); font-size: var(--fs-label); font-weight: 700;
       letter-spacing: .3px;
     }
     .branch-title:first-child { margin-top: 0; }
     .branch-title.else { color: var(--t-on-raised); }
     .form-group { margin-bottom: 5px; display: grid; grid-template-columns: 84px 1fr; gap: 6px; align-items: center; }
-    label { color: var(--text-label); font-size: 11px; text-align: right; line-height: 1.2; }
+    label { color: var(--text-label); font-size: var(--fs-label); text-align: right; line-height: var(--leading-tight); }
     input, select, textarea {
       background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main);
-      padding: 3px 5px; border-radius: var(--radius-sm); font-size: 11px; width: 100%; box-sizing: border-box;
+      padding: 3px 5px; border-radius: var(--radius-sm); font-size: var(--fs-label); width: 100%; box-sizing: border-box;
       font-family: inherit;
     }
     input[type=checkbox] { width: auto; }
@@ -117,7 +120,7 @@
        让位、挂 `.up` 朝上长，并把 max-height 收到这一边的余量（见 comboPlan / comboFlip）。 */
     .combo-list.up { top: auto; bottom: 100%; }
     .combo-list.open { display: block; }
-    .combo-opt { display: block; padding: 3px 6px; font-size: 11px; cursor: pointer;
+    .combo-opt { display: block; padding: 3px 6px; font-size: var(--fs-label); cursor: pointer;
                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .combo-opt:hover { background: var(--t-tint-live); }
     /* 启动程序那一行：组合框占满余下宽度，「浏览…」按钮不自缩。position: relative 是浮层的
@@ -129,15 +132,15 @@
     /* 这里从前写着 `outline: none`：它比 theme.css 的 `:focus-visible` 更具体，于是把键盘
        焦点环一起吃掉了 —— 同一件事在另外三扇窗口里是一圈描边，只有编辑器剩一条边框变色。 */
     textarea { resize: vertical; min-height: 90px; font-family: ui-monospace, Menlo, monospace; }
-    .hint { color: var(--text-label); font-size: 10px; line-height: 1.35; margin: 2px 0 6px; }
+    .hint { color: var(--text-label); font-size: var(--fs-hint); line-height: 1.35; margin: 2px 0 6px; }
     .card {
       border: 1px solid var(--border-color); border-radius: var(--radius-sm);
       padding: 5px 6px; margin-bottom: 5px; background: var(--t-inset);
     }
     .card-head { display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-bottom: 4px; }
-    .card-title { font-size: 10px; color: var(--t-tint-warn-fg); font-weight: bold; overflow: hidden;
+    .card-title { font-size: var(--fs-hint); color: var(--t-tint-warn-fg); font-weight: bold; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
-    .kv { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; line-height: 1.7; }
+    .kv { display: flex; justify-content: space-between; gap: 6px; font-size: var(--fs-hint); line-height: 1.7; }
     .kv .k { color: var(--text-label); flex: none; }
     /* 省略号挂在真正装文字的那一层：`.v` 是 flex 容器，它自己的 `text-overflow` 管不到匿名
        文本项，长路径 / 打印机名从前是被硬裁成两截，不出「…」。 */
@@ -155,8 +158,8 @@
        形状和位置都留着。 */
     .mini-btn:disabled { color: var(--t-fg-dim); border-color: var(--t-line);
       cursor: default; background: var(--t-sunken); }
-    .empty { color: var(--text-label); font-size: 10px; padding: 4px 0; }
-    .switch { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
+    .empty { color: var(--text-label); font-size: var(--fs-hint); padding: 4px 0; }
+    .switch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-label); margin-bottom: 6px; }
     .switch.inline { margin: 0; }
     .switch label, .switch span { text-align: left; color: var(--text-main); }
     /* 条件行：勾选框、类型、值、状态、删除，全部一行。
@@ -186,7 +189,7 @@
     .achip.run { background: var(--t-tint-warn); color: var(--t-tint-warn-fg); }
     /* 失败原因摊在动作行下面：只进 toast 或 title 的话，用户一眨眼就没了，
        而这正是他要拿去排障的那句话 */
-    .aerr { color: var(--t-err); font-size: 10px; margin-top: 3px; word-break: break-word; }
+    .aerr { color: var(--t-err); font-size: var(--fs-hint); margin-top: 3px; word-break: break-word; }
     .rule-box { border-left: 3px solid var(--t-line-hi); }
     .rule-box.r-match { border-left-color: var(--ok); }
     .rule-box.r-nomatch { border-left-color: var(--err); }
@@ -199,7 +202,7 @@
     }
     button {
       background: var(--btn-primary); color: var(--t-on-accent); border: none; padding: 5px 12px;
-      border-radius: var(--radius-sm); cursor: pointer; font-size: 11px;
+      border-radius: var(--radius-sm); cursor: pointer; font-size: var(--fs-label);
     }
     button:hover { opacity: .9; }
     button.danger { background: var(--btn-danger); }
@@ -208,7 +211,7 @@
     button.ghost { background: var(--t-raised); color: var(--t-on-raised); border: 1px solid var(--border-color); }
     .banner {
       background: var(--t-tint-warn); color: var(--t-tint-warn-fg); border: 1px solid var(--t-tint-warn-line);
-      border-radius: var(--radius-sm); padding: 6px 10px; font-size: 11px; flex: none;
+      border-radius: var(--radius-sm); padding: 6px 10px; font-size: var(--fs-label); flex: none;
     }
     .banner.info { background: var(--t-note-bg); color: var(--t-note-fg); border-color: var(--t-note-line); }
     .banner[hidden] { display: none; }
@@ -218,7 +221,7 @@
     #toast {
       position: fixed; left: 50%; bottom: 58px; transform: translateX(-50%); z-index: 60;
       background: var(--t-toast-bg); border: 1px solid var(--border-color); color: var(--t-on-accent);
-      padding: 6px 14px; border-radius: var(--t-r-pill); font-size: 11px; opacity: 0;
+      padding: 6px 14px; border-radius: var(--t-r-pill); font-size: var(--fs-label); opacity: 0;
       transition: opacity .2s; pointer-events: none; max-width: 92vw; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap;
     }
@@ -229,12 +232,12 @@
     .modal { width: 400px; max-width: 92%; background: var(--bg-panel);
       border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; }
     .modal.wide { width: 520px; max-height: 86vh; overflow-y: auto; }
-    .modal h3 { margin: 0 0 8px; font-size: 13px; }
-    .modal .mv { font-size: 11px; color: var(--text-label); line-height: 1.5; }
+    .modal h3 { margin: 0 0 8px; font-size: var(--fs-head); }
+    .modal .mv { font-size: var(--fs-label); color: var(--text-label); line-height: 1.5; }
     .tun-row { display: flex; gap: 6px; margin: 4px 0; align-items: center; }
     .tun-row .tun-dev { flex: 0 0 38%; }
     .tun-row .tun-name { flex: 1; }
-    .modal ul, .modal ol { margin: 8px 0; padding-left: 18px; font-size: 12px; }
+    .modal ul, .modal ol { margin: 8px 0; padding-left: 18px; font-size: var(--fs-body); }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
   </style>
 </head>
@@ -378,6 +381,14 @@
   let sel = null;       // { kind: 'profile' | 'fallback', id }
   let draft = null;     // 选中 Profile 的可编辑副本
   let dirty = false;
+  // Whether the user has manually picked a row. The engine view (`view`) arrives after the
+  // config, so first paint can only select the first profile; once the view lands we auto-select
+  // the active one — but only if the user has not touched anything yet.
+  //
+  // 用户是否手动点过配置行。打开窗口时引擎视图比配置晚到，首绘只能先选第一条；视图一到
+  // 就自动切到「当前生效」那条（等于用户点了它），但只在用户还没动手时做，否则会把用户
+  // 正在看的另一条悄悄换掉。
+  let userPicked = false;
   // DNS 三态下拉的「当前选中项」记忆：数据模型只有一个 `net.dns` 字段（undefined=保持 /
   // ""=系统给 / 非空=指定），「指定但还没填」与「系统给」在模型里都是 `""`，无法区分。
   // 用户点了「指定」后 net.dns 仍是空串，重渲染会把它读回「系统给」、下拉跳回去。这条
@@ -1487,10 +1498,41 @@
   async function pick(kind, id) {
     if (dirty && !(sel && sel.kind === kind && sel.id === id) &&
         !(await askDiscard(t("editor.confirm_switch_dirty")))) return;
+    userPicked = true;
     dirty = false;
     sel = { kind, id };
     draft = kind === "profile" ? clone((cfg.profiles || []).find(p => p.id === id)) : null;
     if (kind === "profile" && !draft) sel = null;
+    renderAll();
+  }
+
+  /// The engine view lands after first paint; select whichever profile is currently active,
+  /// the same as the user clicking it in the first column. Columns 2-4 (conditions / 3A
+  /// network / 3B actions) are all driven by `sel` + `draft`, so selecting it fills all four
+  /// columns with the live config.
+  /// Only step in when the user has not picked anything, has no unsaved edits, and no reload
+  /// is in flight — any of those means this slot belongs to the user and auto-switching would
+  /// clobber their work.
+  /// 视图到达后，把选中态切到「当前生效」的那一条 —— 等价于用户点了第一行里的它。后三列
+  /// （条件 / 3A 网络 / 3B 动作）都由 `sel` + `draft` 驱动，选中它就能让四列一起显示生效
+  /// 配置。只在用户没手动选过、没有未保存改动、配置也不在重读中时介入。
+  function autoSelectActive() {
+    if (userPicked || dirty || cfgFetching || !cfgLoaded) return;
+    const aid = activeId();
+    // Nothing is active (DHCP paused, or no match and no fallback): leave first paint's pick
+    // alone — better than clearing what the user is already looking at.
+    // 没有任何配置生效（DHCP 暂停 / 零命中又无兜底）时不动，保留首绘那条。
+    if (!aid && !fallbackActive()) return;
+    const kind = aid ? "profile" : "fallback";
+    const id = aid || null;
+    // Already selected: skip the repaint. Status broadcasts arrive repeatedly and a redundant
+    // renderAll would steal focus from the field being edited.
+    // 已经选中就不重画：广播会反复来，重复 renderAll 会夺走正在填的焦点。
+    if (sel && sel.kind === kind && sel.id === id) return;
+    sel = { kind, id };
+    draft = kind === "profile" ? clone(savedProfile(id)) : null;
+    if (kind === "profile" && !draft) sel = null;
+    if (kind === "fallback" && !globalDraft.fallback) globalDraft.fallback = { enabled: true };
     renderAll();
   }
 
@@ -1725,6 +1767,11 @@
       langShown = st.language || langShown;
       setLang(langShown);
       applyTheme(st.theme);
+      // Auto-select the active profile when the view lands (unless the user already picked) —
+      // the same as clicking it, filling columns 2-4. It repaints only if the selection changed.
+      // 视图一到就自动选中生效那条（用户没手动选过时），后三列随之填好；仅在选中态真的
+      // 改变时才重画。
+      autoSelectActive();
       // 状态徽标出自上面这几份，所以要重画一次才出现。用户正在编辑时不抢焦点（走 `refreshLive`
       // 原地更新）；停手后的下一次自然重画里出现，不影响手上这一条。
       if (dirty) refreshLive(); else renderAll();
@@ -2385,6 +2432,11 @@
         // 界面跟着它变新，不需要为「IP 下发了」再问一次后端。
         if (p.status) statusSnap = p.status;
         view = p.engine;
+        // The active profile may first appear in a broadcast (window opened before the
+        // engine's first decision): auto-select it unless the user already picked one.
+        // 生效配置可能第一次出现在广播里（窗口比引擎首轮判定开得早）：用户没手动选过时
+        // 自动选中它，让四列一起反映当前生效配置。
+        autoSelectActive();
         refreshLive();
         // 网络变了，条件命中徽标（第 2 列那个绿标）必须跟着重算：它来自 `preview_match`，
         // 而预览只在表单改动时跑。不在这里也触发，`view` 虽然更新了，徽标却要等到用户手动

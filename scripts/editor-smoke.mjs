@@ -678,9 +678,17 @@ group("第一层：当前状态条与四列一一对应");
 eq("四格的小标题取自字典", ["sk-1", "sk-2", "sk-3", "sk-4"].map((id) => findById(id).textContent),
   [strings["editor.state_active_profile"], strings["editor.state_conditions"],
    strings["editor.state_network"], strings["editor.state_actions"]]);
-// 状态条讲的是引擎的事实：它说「现在生效的是谁」，与用户正在编辑哪一条无关。
-check("格 1 讲的是「现在生效的是谁」，与用户正在编辑哪一条无关（此刻选中的是 home）",
+// 状态条讲的是引擎的事实：它说「现在生效的是谁」。视图到达后编辑器会自动选中这一条
+// （等于用户点了它），所以此刻选中的就是生效的 office —— 四列编辑区与状态条指向同一套。
+check("视图到达后自动选中生效配置（office），状态条也讲它",
+  h.sel.id === "office" && findById("st-profile").textContent.includes("Office_5G"));
+// 这条契约不能被后续广播悄悄改掉：用户手动选过之后即使再收到状态广播，也不该被自动切走。
+click(findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "home")[0]);
+await broadcast("netsense://status", { engine: viewFixture, language: "en", theme: "light" });
+check("用户手动选过之后，状态广播不会把选中态自动切回生效配置",
   h.sel.id === "home" && findById("st-profile").textContent.includes("Office_5G"));
+// 复位到 office，供下面「选中与表单回填」组继续验证。
+click(findAll((e) => e.dataset?.act === "sel-profile" && e.dataset?.id === "office")[0]);
 check("格 2 摊开的是它命中所用的条件值", findById("st-cond").textContent.includes("Office_5G"));
 check("格 3 是当前网络信息", findById("st-net").textContent.includes("Office_5G"));
 eq("格 4：后端什么都没跑过 → 列出 Active 的 THEN 动作，但不给任何成败徽标",

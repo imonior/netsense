@@ -1052,12 +1052,14 @@ _TEXT_PAIRS: list[tuple[str, str, float]] = [
     ("--t-note-fg", "--t-note-bg", 4.5),
 ]
 
-# 全站只有这三档圆角，值就钉在这里：改一档等于改一次设计口径，不该是一次顺手的手滑。
-_SCALE_EXPECT = {"--t-r-sm": "4px", "--t-r-md": "8px", "--t-r-pill": "999px"}
-# 窗口内允许出现的圆角写法：三档 token、编辑器那对历史别名（markup 与冒烟测试绑着它们），
+# 全站只有这四档圆角加一枚 pill，值就钉在这里：改一档等于改一次设计口径，
+# 不该是一次顺手的手滑。
+_SCALE_EXPECT = {"--t-r-xs": "2px", "--t-r-sm": "4px", "--t-r-md": "8px",
+                 "--t-r-lg": "10px", "--t-r-pill": "999px"}
+# 窗口内允许出现的圆角写法：五档 token、编辑器那对历史别名（markup 与冒烟测试绑着它们），
 # 以及状态点那种真正的圆。
-_ALLOWED_RADIUS = {"var(--t-r-sm)", "var(--t-r-md)", "var(--t-r-pill)",
-                   "var(--radius-sm)", "var(--radius-md)", "50%"}
+_ALLOWED_RADIUS = {"var(--t-r-xs)", "var(--t-r-sm)", "var(--t-r-md)", "var(--t-r-lg)",
+                   "var(--t-r-pill)", "var(--radius-sm)", "var(--radius-md)", "50%"}
 
 
 def _theme_block_bodies() -> dict[str, str] | None:
@@ -1076,7 +1078,7 @@ def _theme_block_bodies() -> dict[str, str] | None:
 
 
 def check_theme() -> None:
-    """[12] 主题：成对 token 的对比度 + 全站圆角只有三档。
+    """[12] 主题：成对 token 的对比度 + 全站圆角只有五档（四档加 pill）
 
     为什么要有这一组：theme.css 的头注释早就写着「文字与它所在的那块底至少要差 4.5:1」，
     但那是一句话而不是检查 —— 深色档里因此有五处掉到 3.7~4.4 而没人发现。四扇窗口的圆角
@@ -1091,7 +1093,7 @@ def check_theme() -> None:
          这些 CSS 里查不到 —— 无边框窗口（`decorations: false`）在 macOS 上是直角方窗，
          这件事只有装出来的 app 能看出来。
     """
-    group("[12] 主题：成对 token 的对比度 + 全站圆角只有三档")
+    group("[12] 主题：成对 token 的对比度 + 全站圆角只有五档（四档加 pill）")
     bodies = _theme_block_bodies()
     if bodies is None:
         bad("frontend/theme.css 缺失，或两档选择器（:root / html[data-theme=\"light\"]）被改写")
@@ -1135,7 +1137,7 @@ def check_theme() -> None:
     if drift:
         bad(f"圆角刻度被改动: {drift}")
     else:
-        ok("圆角刻度就是三档：4px / 8px / 999px")
+        ok("圆角刻度就是五档：2px / 4px / 8px / 10px / 999px")
 
     for path in sorted(glob.glob(os.path.join(ROOT, "frontend", "*.html"))):
         rel = os.path.relpath(path, ROOT).replace(os.sep, "/")

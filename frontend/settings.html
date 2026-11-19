@@ -211,29 +211,41 @@
       padding: 4px; border: 1px solid var(--line); border-radius: var(--t-r-md);
     }
     .path-row {
-      display: flex; align-items: center; gap: 6px; width: 100%;
+      display: grid;
+      grid-template-columns: 14px minmax(0, 1fr) auto 20px;
+      grid-template-areas: "radio label ms del";
+      column-gap: 6px; row-gap: 0; align-items: center; width: 100%;
       padding: 5px 7px; border: 1px solid transparent;
       border-radius: var(--t-r-sm); background: var(--t-sunken); cursor: pointer;
     }
+    /* 「跟随系统」行多带一条实测地址：让它落到第二行，不再和地址、耗时抢那一行的宽度。 */
+    .path-row.has-note {
+      grid-template-areas: "radio label ms del" ". note note note";
+      row-gap: 2px;
+    }
     .path-row:hover { background: var(--t-hover); }
     .path-row.active { border-color: var(--ok); background: var(--t-mark-ok); }
-    .path-row input[type=radio] { flex: none; margin: 0; }
+    .path-row input[type=radio] { grid-area: radio; margin: 0; }
     .path-label {
-      flex: 1; min-width: 0; font: 12px/16px var(--font-mono);
-      color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      grid-area: label; min-width: 0; font: 12px/15px var(--font-mono);
+      color: var(--fg); overflow-wrap: anywhere; white-space: normal;
     }
     .path-note {
-      flex: 0 1 auto; max-width: 24%; font: 11px/16px var(--font-mono);
+      grid-area: note; min-width: 0; font: 11px/15px var(--font-mono);
       color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     /* 升级通路每行后面的测速结果：成功绿、失败红、「测速中…」灰。与 WireGuard Plus 同款语义，
        让「没测」和「测了但不通」一眼可分，而不是都挤成一条 `—`。 */
-    .path-ms { flex: none; min-width: 52px; text-align: right; font-size: 11px; white-space: nowrap; color: var(--muted); }
+    .path-ms {
+      grid-area: ms; min-width: 52px; max-width: 168px; text-align: right;
+      font-size: 11px; white-space: nowrap; color: var(--muted);
+      font-variant-numeric: var(--numeric-tabular);
+    }
     .path-ms.ok { color: var(--ok); }
-    .path-ms.bad { color: var(--t-err); max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+    .path-ms.bad { color: var(--t-err); overflow: hidden; text-overflow: ellipsis; }
     .path-ms.scan { color: var(--muted); }
     .path-del {
-      flex: none; width: 20px; height: 20px; padding: 0; border: 0;
+      grid-area: del; width: 20px; height: 20px; padding: 0; border: 0;
       border-radius: var(--t-r-sm); background: transparent; color: var(--muted);
       font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;
     }
@@ -848,15 +860,19 @@
         const lab = document.createElement("span");
         lab.className = "path-label";
         lab.textContent = p.label;   // 地址/前缀是事实，不翻译
+        lab.title = p.label;         // 窄窗里仍可能折行，悬停给完整原文
         const st = pathRowState(p);
         const sp = document.createElement("span");
         sp.className = "path-ms " + st.cls;
         sp.textContent = st.text;
+        sp.title = st.text;          // 失败的完整原因不该被 168px 上限吃掉
         row.appendChild(radio);
         row.appendChild(lab);
         // "跟随系统"那一行把系统实际报出来的地址摆在旁边：这一行不能靠猜，
-        // 用户得看见「跟的是谁」（wireguide-plus 同一条做法）。
+        // 用户得看见「跟的是谁」（wireguide-plus 同一条做法）。第二行单独放它，
+        // 免得把上面的地址挤成 `Direct (GitHu…`。
         if (p.kind === "system" && systemProxyAddr !== null) {
+          row.classList.add("has-note");
           const note = document.createElement("span");
           note.className = "path-note";
           note.textContent = systemProxyAddr || t("sett.proxy_system_none", "No system proxy");

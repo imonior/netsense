@@ -2202,10 +2202,16 @@ fn probe_ip(choice: &crate::netproxy::ProxyChoice, lang: &str) -> Option<IpInfo>
     None
 }
 
-/// `myip.ipip.net` 的纯文本：「当前 IP：1.2.3.4  自来于：中国 湖北 武汉  电信」。
+/// The service returns plain text like "当前 IP：1.2.3.4  来自于：中国 湖北 武汉  电信".
+/// `myip.ipip.net` 的纯文本：「当前 IP：1.2.3.4  来自于：中国 湖北 武汉  电信」。
 ///
 /// 锚「IP」后面那个全角冒号，取其后第一个空白分隔的词：那句话的前缀（「当前」）与归属地
-/// 都是会变的文案，锚错一次就会把「自来于」当成 IP。IPv6 含冒号，所以按空白切词。
+/// 都是会变的文案，锚错一次就会把「来自于」当成 IP。IPv6 含冒号，所以按空白切词。
+/// 归属地锚点两种写法都认：服务实际回的是「来自于」（来/自/于），旧代码只认「自来于」
+/// （自/来/于），于是 IP 解析成功、location 却是 None，界面只剩一个裸 IP。两种都收，
+/// 兼容服务改版前后；单测钉住这两种与真实响应。
+/// Both word orders are accepted: the live service says "来自于", while older code only
+/// matched "自来于" — the IP parsed but the location stayed empty, leaving a bare IP in the UI.
 /// （服务返回的是中文文案，而源码里不写中文字面量 —— 锚点用转义写。）
 fn parse_ipip(text: &str) -> Option<IpInfo> {
     let rest = text.split("IP\u{ff1a}").nth(1)?;
@@ -2213,12 +2219,16 @@ fn parse_ipip(text: &str) -> Option<IpInfo> {
     if !is_plausible_ip(ip) {
         return None;
     }
-    let location = rest
-        .split("\u{81ea}\u{6765}\u{4e8e}\u{ff1a}")
-        .nth(1)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    // 先认现行「来自于」，再退回旧「自来于」；取到第一个非空结果即止。
+    // Try the current "来自于" first, then fall back to the old "自来于".
+    let anchors = ["\u{6765}\u{81ea}\u{4e8e}\u{ff1a}", "\u{81ea}\u{6765}\u{4e8e}\u{ff1a}"];
+    let location = anchors.iter().find_map(|a| {
+        rest.split(a)
+            .nth(1)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
     Some(IpInfo {
         ip: ip.to_string(),
         location,
@@ -2433,11 +2443,16 @@ mod tests {
     #[test]
     fn ip_probe_parsers_accept_real_shapes_and_reject_junk() {
         // ipip.net：IP 与中文归属地在一行里，锚点是「IP：」之后第一个词。
+        // 服务实际回「来自于」（来/自/于）—— 这是线上真实形状；旧「自来于」（自/来/于）
+        // 也要兼容。两者都解析出 IP 与归属地，不能只认一个而让界面只剩裸 IP。
+        let live = parse_ipip("当前 IP：171.83.76.212  来自于：中国 湖北 武汉  电信").unwrap();
+        assert_eq!(live.ip, "171.83.76.212");
+        assert_eq!(live.location.as_deref(), Some("中国 湖北 武汉  电信"));
         let info = parse_ipip("当前 IP：171.83.70.248  自来于：中国 湖北 武汉  电信").unwrap();
         assert_eq!(info.ip, "171.83.70.248");
         assert_eq!(info.location.as_deref(), Some("中国 湖北 武汉  电信"));
         // IPv6 含冒号：按空白切词才切得对。
-        let v6 = parse_ipip("当前 IP：2001:db8::1  自来于：美国 加州").unwrap();
+        let v6 = parse_ipip("当前 IP：2001:db8::1  来自于：美国 加州").unwrap();
         assert_eq!(v6.ip, "2001:db8::1");
         assert_eq!(v6.location.as_deref(), Some("美国 加州"));
         // 没有归属地段（服务只回了 IP）→ 位置为空，不算失败。
