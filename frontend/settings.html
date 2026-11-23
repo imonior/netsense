@@ -82,6 +82,14 @@
     .row { display: flex; align-items: center; gap: 10px; }
     .row + .row { margin-top: 8px; }
     .row .k { flex: 1; min-width: 0; }
+    /* 默认脚本文件夹那一行的三颗按钮：窗口只有 480 宽，沿用通用按钮的 12px 内边距
+       会把文字挤成两行、按钮反而更高。这里只收紧这一行，并让按钮整颗换行而不是
+       在词中间折行 —— 窄窗口下仍是紧凑的一行或两行。
+       The three buttons in the script-folder row need tighter padding at 480px;
+       otherwise their labels wrap inside the button and make it taller. Let whole
+       buttons wrap instead of breaking a phrase mid-word. */
+    .row.script-folder-row { flex-wrap: wrap; gap: 6px; }
+    .row.script-folder-row button { padding: 4px 6px; font-size: 11px; white-space: nowrap; }
     select, input[type=text], input[type=number] {
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
       border-radius: var(--t-r-sm); padding: 5px 8px; font: inherit; font-size: 12px;
@@ -338,9 +346,10 @@
       <h4 class="sub" id="sec-script-folder" data-i18n="sett.script_folder">Default script folder</h4>
       <div class="hint" id="hint-script-folder" data-i18n="sett.script_folder_hint">Where new scripts are saved. Scripts created here are added to the allow-list so they can run.</div>
       <div class="path" id="p-script-folder">—</div>
-      <div class="row" style="margin-top:6px">
+      <div class="row script-folder-row" style="margin-top:6px">
         <span class="k"></span>
         <button id="btn-script-folder-pick" data-i18n="sett.script_folder_pick">Choose folder</button>
+        <button id="btn-script-folder-open" data-i18n="sett.open_folder">Open folder</button>
         <button id="btn-script-folder-reset" data-i18n="sett.script_folder_reset">Use default</button>
       </div>
       <textarea id="in-scripts" rows="4" spellcheck="false" data-i18n-placeholder="sett.scripts_paths" placeholder="One absolute path per line"></textarea>
@@ -1370,6 +1379,12 @@
         toast(t("sett.saved", "Saved"));
       } catch (e) { show("err-scripts", String(e)); }
     };
+    // 打开的是后端按当前设置算出的目录，不是照着上面那行文字自己拼 —— 手改过
+    // settings.json 或刚恢复备份时，显示值与真实路径必须始终来自同一处。
+    // Open the folder resolved by the backend, not a path rebuilt from the label above:
+    // display and filesystem action share one source even after a manual config edit or restore.
+    el("btn-script-folder-open").onclick = () =>
+      invoke("open_script_folder").catch(e => toast(String(e)));
     el("btn-script-folder-reset").onclick = async () => {
       try {
         el("p-script-folder").textContent = await invoke("set_script_folder", { path: "" });

@@ -4,6 +4,12 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [2.1.1] - 2026-11-23
+
+### Added
+
+- **设置页现在可以直接打开默认脚本文件夹。** 「选择文件夹」旁的新按钮复用已有的 `sett.open_folder` 文案，调用 `open_script_folder`；后端解析 `script_dir` 或缺省的 `<config>/scripts`，目录不存在就先建好，再用系统文件管理器打开 —— 设置里显示的路径与实际打开的目录出自同一处解析，手改配置或恢复备份后也不会分叉。（`frontend/settings.html`、`src-tauri/src/ipc.rs`、`src-tauri/src/main.rs`）
+
 ## [2.1.0] - 2026-11-23
 
 ### Added

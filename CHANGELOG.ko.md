@@ -4,6 +4,12 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [2.1.1] - 2026-11-23
+
+### Added
+
+- **설정에서 기본 스크립트 폴더를 바로 열 수 있습니다.** "폴더 선택" 옆의 새 버튼은 기존 `sett.open_folder` 문구를 재사용하고 `open_script_folder`를 호출합니다. 백엔드가 `script_dir` 또는 기본값 `<config>/scripts`를 해석하고, 필요하면 폴더를 만든 뒤 시스템 파일 관리자로 엽니다. 설정에 표시되는 경로와 실제로 열리는 폴더가 같은 해석 함수에서 나오므로 설정 파일을 직접 수정하거나 백업을 복원한 뒤에도 어긋나지 않습니다. (`frontend/settings.html`, `src-tauri/src/ipc.rs`, `src-tauri/src/main.rs`)
+
 ## [2.1.0] - 2026-11-23
 
 ### Added

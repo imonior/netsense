@@ -347,6 +347,7 @@ fn main() {
             ipc::pick_script_folder,
             ipc::get_script_folder,
             ipc::set_script_folder,
+            ipc::open_script_folder,
             ipc::save_script,
             ipc::open_logs,
             ipc::get_log_files,

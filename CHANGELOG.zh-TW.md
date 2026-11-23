@@ -4,6 +4,12 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [2.1.1] - 2026-11-23
+
+### Added
+
+- **設定頁現在可以直接開啟預設指令碼資料夾。** 「選擇資料夾」旁的新按鈕沿用既有 `sett.open_folder` 文案並呼叫 `open_script_folder`；後端解析 `script_dir` 或預設的 `<config>/scripts`，資料夾不存在就先建立，再用系統檔案管理員開啟 —— 設定裡顯示的路徑與實際開啟的目錄出自同一處解析，手動改設定或還原備份後也不會分叉。（`frontend/settings.html`、`src-tauri/src/ipc.rs`、`src-tauri/src/main.rs`）
+
 ## [2.1.0] - 2026-11-23
 
 ### Added

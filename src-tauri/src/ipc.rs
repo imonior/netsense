@@ -12,6 +12,7 @@
 
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
 
 use crate::automation::{is_script_allowed, resolve_script, AllowedScripts};
@@ -596,7 +597,19 @@ pub fn pick_script_folder(
     state.plat.pick_script_folder()
 }
 
-/// 新建脚本的**默认存储文件夹**。缺省 = 自动化配置旁的 `<配置目录>/scripts` —— 那正是
+/// Resolve the default script folder: the configured path wins, otherwise the
+/// `<config>/scripts` directory next to the automation configuration.
+///
+/// 默认脚本文件夹只有这一处解析：读取、写入、建脚本、打开文件夹都走它。
+/// 空串也按「没设置」处理，免得界面或手改配置留下一个指向当前目录的空路径。
+fn script_folder_path(configured: Option<&str>, fallback: &Path) -> PathBuf {
+    configured
+        .filter(|p| !p.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+/// 新建脚本的**默认存储文件夹**。缺省 = 自动化配置旁的 `<config>/scripts` —— 那正是
 /// 引擎已经授信的目录；返回值永远是绝对路径，界面照它回显。
 #[tauri::command]
 pub fn get_script_folder(state: State<'_, std::sync::Arc<AppState>>) -> String {
@@ -606,9 +619,7 @@ pub fn get_script_folder(state: State<'_, std::sync::Arc<AppState>>) -> String {
         .unwrap_or_else(|e| e.into_inner())
         .script_dir
         .clone();
-    configured
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| state.scripts_dir.clone())
+    script_folder_path(configured.as_deref(), &state.scripts_dir)
         .display()
         .to_string()
 }
@@ -637,11 +648,33 @@ pub fn set_script_folder(
         cfg.save(&state.settings_path)?;
         *s = cfg;
     }
-    Ok(next
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| state.scripts_dir.clone())
+    Ok(script_folder_path(next.as_deref(), &state.scripts_dir)
         .display()
         .to_string())
+}
+
+/// Open the default script folder in the system file manager so the scripts
+/// inside can be managed directly. The folder is resolved on the backend with
+/// the same helper as `get_script_folder`; the frontend never builds the path.
+///
+/// 设置页「打开文件夹」：路径由后端按当前设置现算，前端不自己拼 —— 界面显示的
+/// 和实际打开的必须是同一个目录。目录还不存在时先建好：新安装或刚改过设置也能
+/// 直接点开，不必先新建一个脚本才有目录。创建失败同样按 `notify.open_failed` 报，
+/// 用户看到的错误里带着目标路径，便于排查是权限还是路径写错。
+#[tauri::command(async)]
+pub fn open_script_folder(state: State<'_, std::sync::Arc<AppState>>) -> Result<(), String> {
+    let configured = state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .script_dir
+        .clone();
+    let dir = script_folder_path(configured.as_deref(), &state.scripts_dir);
+    let text = dir.display().to_string();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::tf("notify.open_failed", &[("path", &text), ("error", &e.to_string())]))?;
+    crate::platform::open_path(&text)
+        .map_err(|e| i18n::tf("notify.open_failed", &[("path", &text), ("error", &e)]))
 }
 
 /// 纯文件名校验：只接受一段普通文件名，不接受任何能改变落盘位置的写法。
@@ -679,17 +712,13 @@ pub fn save_script(
     if !valid_script_name(name) {
         return Err(i18n::t("editor.script_bad_name"));
     }
-    let dir = {
-        let configured = state
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .script_dir
-            .clone();
-        configured
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| state.scripts_dir.clone())
-    };
+    let configured = state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .script_dir
+        .clone();
+    let dir = script_folder_path(configured.as_deref(), &state.scripts_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| i18n::tf("upd.script_write", &[("prefix", "folder"), ("error", &e.to_string())]))?;
     let path = dir.join(name);
@@ -2640,11 +2669,14 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::{
         allowed_scripts_with, asset_matches, install_verdict, installable_ext, is_plausible_ip,
         mark_mainland, ordered_endpoints, parse_ipapi, parse_ipify, parse_ipip, parse_ipsb,
         parse_ipwho, pick_asset_for, pick_install_asset, pick_install_asset_for,
-        pick_verified_asset, platform_of, token_anchored, valid_script_name, IP_ENDPOINTS, Sums,
+        pick_verified_asset, platform_of, script_folder_path, token_anchored, valid_script_name,
+        IP_ENDPOINTS, Sums,
     };
     use crate::config::Config;
     use serde_json::json;
@@ -3183,6 +3215,25 @@ mod tests {
         ] {
             assert!(!valid_script_name(name), "must be rejected: {name:?}");
         }
+    }
+
+    #[test]
+    fn the_script_folder_used_for_opening_is_the_one_that_was_configured() {
+        // The browse, create and open buttons must resolve to the same directory.
+        // 「选择 / 新建 / 打开」三条路必须解析到同一个目录：设置优先，空值回缺省。
+        let fallback = Path::new("/Users/me/.config/netsense/scripts");
+        assert_eq!(
+            script_folder_path(None, fallback),
+            PathBuf::from("/Users/me/.config/netsense/scripts")
+        );
+        assert_eq!(
+            script_folder_path(Some("  "), fallback),
+            PathBuf::from("/Users/me/.config/netsense/scripts")
+        );
+        assert_eq!(
+            script_folder_path(Some("/Volumes/Scripts/office"), fallback),
+            PathBuf::from("/Volumes/Scripts/office")
+        );
     }
 
     #[test]

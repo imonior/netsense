@@ -219,7 +219,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，73 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，74 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -249,6 +249,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `pick_script_folder` | — | 设置里「默认脚本文件夹」的「选择文件夹」：系统目录选择器。取消回 `null` |
 | `get_script_folder` | — | 新建脚本的默认存储文件夹（绝对路径）。缺省 = 自动化配置旁的 `<配置目录>/scripts` |
 | `set_script_folder` | `path` | 设默认脚本文件夹；`""` = 恢复缺省。只收绝对路径，落盘进 `settings.json`，返回生效后的真值 |
+| `open_script_folder` | — | 设置里「默认脚本文件夹」的「打开文件夹」：后端按 `script_dir` / 缺省 `<config>/scripts` 现算路径，目录不存在则先建，再用系统文件管理器打开 —— 显示的路径和打开的目录共用同一个解析函数 |
 | `save_script` | `name`, `content` | 在默认脚本文件夹新建脚本，**写盘成功后**才把绝对路径登记进 `config.allowed_scripts`：于是刚建的脚本立刻可执行，而写失败不会留下指向空文件的白名单项。`name` 只收纯文件名（无分隔符 / `..`），目录一律由后端定 —— 堵住一次「新建」变成任意路径写入。Unix 上补可执行位 |
 | `set_language` | `code` | 切换 UI 语言并写进**软件配置**；`code` 为 `system` 时是「跟随系统」—— 字段从 `settings.json` 里删掉，本次生效的语言现问操作系统。不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
 | `set_theme` | `code` | 切换界面配色并写进**软件配置**：`system` / `light` / `dark` 三档之一，存的就是用户选的这一档，返回值才是当下生效的那一套（`light`/`dark`）。认不出的 `code` 一律拒绝（`sett.theme_rejected`）而不是退回默认档 —— 界面发出一个后端不认的值说明前端有 bug，静默收下只会把它藏起来。与语言同一条判据：不碰 `config.json`，不触发热重载，只广播一次 `netsense://status`（载荷里的 `theme` 是算出来的那一套），并记一条 `notify.theme_set` |

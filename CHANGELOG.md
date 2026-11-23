@@ -4,6 +4,12 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.1.1] - 2026-11-23
+
+### Added
+
+- **The Settings page can now open the default script folder directly.** The button beside "Choose folder" reuses the existing `sett.open_folder` label and calls `open_script_folder`. The backend resolves `script_dir` or the default `<config>/scripts`, creates the folder if needed, and opens it with the system file manager — the path shown in Settings and the folder actually opened therefore come from the same resolver, even after a manual config edit or a restore. (`frontend/settings.html`, `src-tauri/src/ipc.rs`, `src-tauri/src/main.rs`)
+
 ## [2.1.0] - 2026-11-23
 
 ### Added
