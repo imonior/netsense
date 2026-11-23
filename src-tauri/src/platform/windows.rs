@@ -1465,6 +1465,19 @@ fn pick_app_script(title: &str, filter: &str) -> String {
     )
 }
 
+/// 「挑一个**文件夹**」的脚本：`FolderBrowserDialog`。取消 → 空输出（调用方按
+/// `Ok(None)` 收）；标题走字典并经 [`psq`] 进单引号字面量。
+fn pick_folder_script(title: &str) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         Add-Type -AssemblyName System.Windows.Forms; \
+         $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+         $d.Description = {t}; \
+         if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($d.SelectedPath) }}",
+        t = psq(title),
+    )
+}
+
 /// 与 [`ps`] 同一套编码前缀，但显式要求 **STA** 单元：WinForms 的通用对话框要它
 /// （`powershell.exe` 5.1 的控制台宿主默认就是 STA，这里钉住是为了不依赖那个默认值）。
 fn ps_sta(script: &str) -> Result<String, String> {
@@ -1907,6 +1920,21 @@ if ($list.Count -eq 0) { '[]' } else { $list | ConvertTo-Json -Compress }"#;
             &i18n::t("pal.pick_app_title"),
             &i18n::t("pal.pick_app_filter"),
         ))?;
+        let p = out.trim();
+        Ok((!p.is_empty()).then(|| p.to_string()))
+    }
+
+    fn pick_script(&self) -> Result<Option<String>, String> {
+        let out = ps_sta(&pick_app_script(
+            &i18n::t("pal.pick_script_title"),
+            &i18n::t("pal.pick_script_filter"),
+        ))?;
+        let p = out.trim();
+        Ok((!p.is_empty()).then(|| p.to_string()))
+    }
+
+    fn pick_script_folder(&self) -> Result<Option<String>, String> {
+        let out = ps_sta(&pick_folder_script(&i18n::t("pal.pick_script_folder")))?;
         let p = out.trim();
         Ok((!p.is_empty()).then(|| p.to_string()))
     }

@@ -321,6 +321,14 @@ let backendRev = 1;
 /** 系统文件选择器这一次回什么：正常是一条路径，null 是取消，错误是「它起不来」。 */
 let pickAppResult = "/Users/me/Desktop/GreenThing.app";
 let pickAppError = null;
+let pickScriptResult = "/Users/me/scripts/office-vpn.sh";
+/** 选脚本时后端的只读授信判定。默认 true（授信目录内），不授信场景在用例里临时翻掉。 */
+let scriptTrusted = true;
+/** trust_script 登记的 canonical 路径：确认窗回填的是它，不是选择器给的拼写形式。 */
+let trustScriptResult = "/Users/me/other/office-vpn.sh";
+let trustScriptError = null;
+let saveScriptResult = "/Users/me/scripts/new-script.sh";
+let saveScriptError = null;
 
 const engineView = (profiles, state, lastRun, workers) => ({
   state,
@@ -505,6 +513,17 @@ function answerValue(cmd, args) {
       return pickAppError
         ? Promise.reject(new Error(pickAppError))
         : Promise.resolve(pickAppResult);
+    case "pick_script":
+      return Promise.resolve(pickScriptResult);
+    case "is_script_trusted":
+      return Promise.resolve(scriptTrusted);
+    case "trust_script":
+      if (trustScriptError) return Promise.reject(new Error(trustScriptError));
+      return Promise.resolve(trustScriptResult);
+    case "save_script":
+      // 替身只验证「编辑器把 name/content 送出来了」，写盘与白名单登记由 Rust 测试守。
+      if (saveScriptError) return Promise.reject(new Error(saveScriptError));
+      return Promise.resolve(saveScriptResult);
 
     case "get_status":
       return Promise.resolve(
@@ -1003,6 +1022,127 @@ resetSaves();
 await h.$("btn-save").onclick();
 p = saveOf("save_profile")?.payload;
 eq("手输的路径原样送达", p?.then?.one_shot?.[0]?.action, { type: "launch_app", app: "/opt/tools/foo" });
+group("3B 脚本：动作名显示 Script + 浏览挑现成脚本 + 新建脚本写进白名单");
+// 用户点「+ Script」加进来的那一张卡，标题与类型下拉都该说 Script，而不是旧的 Path。
+eq("run_script 的动作名取自字典里的 Script 文案",
+  strings["editor.action_path"], "Script");
+const scriptInp = byBind("then.one_shot.1.action.path");
+check("脚本路径是可手输的输入框，且与「浏览 / 新建」同一行",
+  scriptInp?.tagName === "INPUT" &&
+  !!findAll((e) => e.dataset?.act === "browse-script" && e.dataset?.path === "then.one_shot.1.action.path")[0] &&
+  !!findAll((e) => e.dataset?.act === "new-script" && e.dataset?.path === "then.one_shot.1.action.path")[0] &&
+  scriptInp.parent === findAll((e) => e.dataset?.act === "browse-script")[0].parent);
+const scriptBrowse = findAll((e) => e.dataset?.act === "browse-script" &&
+  e.dataset?.path === "then.one_shot.1.action.path")[0];
+eq("浏览按钮文案取自字典", scriptBrowse?.textContent, strings["editor.browse"]);
+const scriptPicksBefore = invokeLog.filter((c) => c.cmd === "pick_script").length;
+click(scriptBrowse);
+await settle();
+eq("点浏览问的是 pick_script", invokeLog.filter((c) => c.cmd === "pick_script").length, scriptPicksBefore + 1);
+eq("选到的路径抄进脚本格，草稿跟着改",
+  [scriptInp?.value, h.draft.then.one_shot[1].action.path],
+  [pickScriptResult, pickScriptResult]);
+
+// 不授信的脚本：选完先问一声，不能让「选了却不会跑」的配置静默落盘。
+const pickBefore = pickScriptResult;
+pickScriptResult = "/Users/me/other/outside.sh";
+scriptTrusted = false;
+const trustCallsBefore = invokeLog.filter((c) => c.cmd === "trust_script").length;
+const trustAllowBtn = () => findAll((e) => e.dataset?.act === "trust-allow")[0];
+click(scriptBrowse);
+await settle();
+check("选中不授信脚本弹出确认窗", findById("trust-mask")?.hidden === false);
+check("确认窗说清路径与后果，并给出允许按钮",
+  findById("trust-modal")?.textContent.includes(pickScriptResult) &&
+  findById("trust-modal")?.textContent.includes(strings["editor.script_trust_title"]) &&
+  trustAllowBtn()?.textContent === strings["editor.script_trust_confirm"]);
+click(byAct("trust-cancel"));
+check("取消后关窗、不回填、不登记白名单",
+  findById("trust-mask")?.hidden === true &&
+  byBind("then.one_shot.1.action.path")?.value === pickBefore &&
+  h.draft.then.one_shot[1].action.path === pickBefore &&
+  invokeLog.filter((c) => c.cmd === "trust_script").length === trustCallsBefore,
+  `mask=${findById("trust-mask")?.hidden} input=${JSON.stringify(byBind("then.one_shot.1.action.path")?.value)} ` +
+  `draft=${JSON.stringify(h.draft.then.one_shot[1].action.path)} want=${JSON.stringify(pickBefore)} ` +
+  `calls=${invokeLog.filter((c) => c.cmd === "trust_script").length}/${trustCallsBefore}`);
+
+// 同样一份脚本再选一次，这回点允许。
+click(scriptBrowse);
+await settle();
+click(trustAllowBtn());
+await settle();
+eq("允许时把选中的路径交给 trust_script 登记",
+  invokeLog.filter((c) => c.cmd === "trust_script").pop()?.args?.path, pickScriptResult);
+eq("回填的是后端 canonical 路径，不是选择器给的拼写形式",
+  [byBind("then.one_shot.1.action.path")?.value, h.draft.then.one_shot[1].action.path],
+  [trustScriptResult, trustScriptResult]);
+check("新登记的路径同步进两份 allow-list 内存副本（保存全局项不会踢掉它）",
+  h.cfg.allowed_scripts.includes(trustScriptResult) &&
+  h.globalDraft.allowed_scripts.includes(trustScriptResult));
+check("允许后关窗", findById("trust-mask")?.hidden === true);
+// 登记失败（文件刚被移走）：留在窗里就地报错，不回填假路径。
+click(scriptBrowse);
+await settle();
+trustScriptError = "gone";
+click(trustAllowBtn());
+await settle();
+check("登记失败就地报错并留在窗里",
+  findById("trust-mask")?.hidden === false &&
+  findById("trust-err")?.textContent.includes("gone") &&
+  byBind("then.one_shot.1.action.path")?.value === trustScriptResult,
+  `mask=${findById("trust-mask")?.hidden} err=${JSON.stringify(findById("trust-err")?.textContent)} ` +
+  `input=${JSON.stringify(byBind("then.one_shot.1.action.path")?.value)} want=${JSON.stringify(trustScriptResult)}`);
+trustScriptError = null;
+click(byAct("trust-cancel"));
+// 用例收尾：把桩与内存副本放回原样，后面「新建脚本」「保存全局项」的严格断言
+// 仍然按原配置比对，不受这段追加的白名单项影响。
+pickScriptResult = pickBefore;
+scriptTrusted = true;
+for (const list of [h.cfg.allowed_scripts, h.globalDraft.allowed_scripts]) {
+  const i = list.indexOf(trustScriptResult);
+  if (i >= 0) list.splice(i, 1);
+}
+
+// 「新建脚本」弹窗：填名字与内容 → save_script → 返回路径写回那一格并关窗。
+const scriptNew = findAll((e) => e.dataset?.act === "new-script" &&
+  e.dataset?.path === "then.one_shot.1.action.path")[0];
+click(scriptNew);
+check("新建按钮弹出脚本编辑窗", findById("script-mask")?.hidden === false);
+type(findById("script-name"), "new-script.sh");
+type(findById("script-body"), "#!/bin/sh\necho hi");
+const scriptCallsBefore = invokeLog.filter((c) => c.cmd === "save_script").length;
+await findById("script-create").onclick();
+eq("save_script 收到文件名与内容（目录一律由后端定）",
+  (() => { const c = invokeLog.filter((x) => x.cmd === "save_script").pop(); return [c?.args?.name, c?.args?.content]; })(),
+  ["new-script.sh", "#!/bin/sh\necho hi"]);
+eq(" save_script 调用数 +1", invokeLog.filter((c) => c.cmd === "save_script").length, scriptCallsBefore + 1);
+eq("写完后把返回的绝对路径写回脚本格，草稿跟着改",
+  [byBind("then.one_shot.1.action.path")?.value, h.draft.then.one_shot[1].action.path],
+  [saveScriptResult, saveScriptResult]);
+check("保存成功后关窗", findById("script-mask")?.hidden === true);
+// 创建脚本会置 dirty，代际广播因此不会让编辑器重读配置 —— 后端新登记的白名单项必须
+// 同步进内存副本，否则随后一次「保存全局项」会把刚建的脚本踢出白名单。
+check("新脚本同步进两份 allow-list 内存副本（保存全局项不会踢掉它）",
+  h.cfg.allowed_scripts.includes(saveScriptResult) &&
+  h.globalDraft.allowed_scripts.includes(saveScriptResult));
+
+// 纯文件名校验：带路径分隔符的名字要在前端就拦下，不发出 save_script。
+click(findAll((e) => e.dataset?.act === "new-script" &&
+  e.dataset?.path === "then.one_shot.1.action.path")[0]);
+type(findById("script-name"), "../escape.sh");
+type(findById("script-body"), "echo hi");
+const badCalls = invokeLog.filter((c) => c.cmd === "save_script").length;
+await findById("script-create").onclick();
+eq("带 .. 的文件名被拦下，不写盘", invokeLog.filter((c) => c.cmd === "save_script").length, badCalls);
+check("错误就地说明", findById("script-err")?.textContent === strings["editor.script_bad_name"]);
+click(findById("script-cancel"));
+resetSaves();
+await h.$("btn-save").onclick();
+p = saveOf("save_profile")?.payload;
+eq("新建脚本的路径原样送达配置（提权标记沿用当前草稿那一态）",
+  p?.then?.one_shot?.[1]?.action,
+  { type: "run_script", path: saveScriptResult, ...(h.draft.then.one_shot[1].action.elevated ? { elevated: true } : {}) });
+
 // 一台候选都没有（干净机器 / 枚举失败）：下拉整个不出现，但手输与浏览必须还在 ——
 // 少了候选只是少一条捷径，不是把这一格关掉。对照值现取草稿：上面那次保存会把表单
 // 从磁盘回填一遍（替身里的 get_config 不跟着 save 变），写死的路径会被它冲掉。

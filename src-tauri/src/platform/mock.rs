@@ -65,6 +65,8 @@ pub enum Call {
     SetDefaultPrinter { printer: String },
     ListInstalledApps,
     PickApp,
+    PickScript,
+    PickScriptFolder,
     ListKnownSsids,
     UiLanguage,
     UiPrefersDark,
@@ -366,6 +368,16 @@ impl NetworkPlatform for MockPlatform {
 
     fn pick_app(&self) -> Result<Option<String>, String> {
         self.record(Call::PickApp);
+        Ok(None)
+    }
+
+    fn pick_script(&self) -> Result<Option<String>, String> {
+        self.record(Call::PickScript);
+        Ok(None)
+    }
+
+    fn pick_script_folder(&self) -> Result<Option<String>, String> {
+        self.record(Call::PickScriptFolder);
         Ok(None)
     }
 

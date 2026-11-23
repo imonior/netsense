@@ -104,7 +104,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 ## 与后端的通信
 
 - 调用：`window.__TAURI__.core.invoke(cmd, args)`（依赖 `app.withGlobalTauri = true`）。
-- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 726 key，见 `src-tauri/src/i18n/`），
+- 文案：`get_strings` 一次性拉取当前语言的全部 key（5 语 × 750 key，见 `src-tauri/src/i18n/`），
   前端用 `t(key, vars)` 查表；语言只在**软件设置窗口**里改（`set_language`），面板与编辑器收到
   `netsense://status` 后比较 `language`，变了才重取词表。
   **模板里不内嵌任何文案对象。**
@@ -219,7 +219,7 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 `profile_id`，界面先按归属过滤（Active 的 THEN，或零命中的兜底组 `__fallback__`）再染徽标 ——
 不按归属过滤，两个 Profile 里同名的动作会互相串台。
 
-### 后端命令一览（`src-tauri/src/ipc.rs`，66 条）
+### 后端命令一览（`src-tauri/src/ipc.rs`，73 条）
 
 | 命令 | 入参 | 说明 |
 |------|------|------|
@@ -243,6 +243,13 @@ NetSense 的界面资源（纯静态 HTML/CSS/JS，无构建步骤，由 `tauri.
 | `get_editor_enumerations` | — | 编辑器开屏一次性枚举：已保存网络 / 在用网卡 / 本机网卡 / 打印机，合成一条 IPC（替代编辑器原本发的 `get_networks` / `get_interfaces` / `get_adapters` / `get_printers` 四条），省四趟往返；四条子进程采样在后端内部并发（`std::thread::scope`），不比前端 `Promise.all` 慢 —— 也就是说**省的是往返，不是子进程**（冷启动在时间上重叠，耗时仍是 `max(各条)` 而非 `sum`）。真正的提速来自另一处：`main.rs` 启动即后台预热这三项枚举（见 `platform::warm_enum_caches`），开屏通常直接命中 120 秒缓存。`list_adapters` 另有一份 2 秒 TTL 缓存（`cached_adapters`），只挡**同一轮内被问两遍**（刷新与开屏撞在一起），刻意做短，挡不住下一次开屏。**不含**已装程序（`get_installed_apps` 仍后台补拉）。返回 `{networks, interfaces, adapters, printers}` 的 JSON 字符串 |
 | `get_installed_apps` | — | 本机登记了启动项的程序 `[{name, path}]`（第 4 列「启动程序」动作的候选）：macOS 是 /Applications 一带的 `.app`，Windows 是**开始菜单两个根 + 当前用户桌面 + 公共桌面**里的 `.lnk`（`Start-Process` 直接受理它），Linux 是 XDG 目录里 `Type=Application` 的 `.desktop`。Windows 侧显示名取快捷方式自己的名字（即开始菜单 / 桌面上看到的那一个），目标是 `.exe` / `.bat` / `.cmd` —— 与 `pick_app` 的文件筛选器同一范围，手选得到的手输范围下拉也给得出；Microsoft Store 应用（AppX）**不**在列，它没有 `.lnk`、也没有可直接启动的路径，列进去只会多出一条点了没反应的候选。`path` 是平台自己受理的形状（`open -a` / `Start-Process` / exec），界面按 `name` 列出、选中的是它。枚举不到就是空表：候选只是捷径，手输与「浏览…」始终在 |
 | `pick_app` | — | 打开系统文件选择器挑一个可启动目标，返回选中路径。**取消回 `null`**（什么都不该发生）；选择器起不来才是错误，且错误原文就是给用户看的话 —— 两者分开报，才能把「用户反悔」与「这台机器没有可用的选择器」（Linux 上 zenity / kdialog 都没有时回 `pal.no_file_dialog`）分清楚 |
+| `pick_script` | — | 编辑器脚本路径那行的「浏览…」：系统文件选择器挑一个脚本文件，路径抄进输入框。取消回 `null`；这里**只填路径**，能不能跑仍由 `AllowedScripts` 白名单在执行时判定 |
+| `is_script_trusted` | `path` | 只读判定：选完脚本立刻问这条路径现在能不能跑。复用引擎执行时的 `resolve_script` + `is_script_allowed`（canonical 路径、按路径分量前缀），前端另写一份会分叉；不授信就弹确认窗，而不是等动作执行时才被引擎拒绝 |
+| `trust_script` | `path` | 用户确认后把这一条路径单独登记进 `config.allowed_scripts`。先看文件真实存在且是普通文件，再 canonical 化后登记（引擎按 canonical 比对，存拼写形式会留下永远命不中的规则）；整体替换配置时 `fallback` / `tunnel_names` 原样带上，否则编辑器随后「保存全局项」会抹掉刚加的这条。返回登记用的 canonical 路径供输入框回填 |
+| `pick_script_folder` | — | 设置里「默认脚本文件夹」的「选择文件夹」：系统目录选择器。取消回 `null` |
+| `get_script_folder` | — | 新建脚本的默认存储文件夹（绝对路径）。缺省 = 自动化配置旁的 `<配置目录>/scripts` |
+| `set_script_folder` | `path` | 设默认脚本文件夹；`""` = 恢复缺省。只收绝对路径，落盘进 `settings.json`，返回生效后的真值 |
+| `save_script` | `name`, `content` | 在默认脚本文件夹新建脚本，**写盘成功后**才把绝对路径登记进 `config.allowed_scripts`：于是刚建的脚本立刻可执行，而写失败不会留下指向空文件的白名单项。`name` 只收纯文件名（无分隔符 / `..`），目录一律由后端定 —— 堵住一次「新建」变成任意路径写入。Unix 上补可执行位 |
 | `set_language` | `code` | 切换 UI 语言并写进**软件配置**；`code` 为 `system` 时是「跟随系统」—— 字段从 `settings.json` 里删掉，本次生效的语言现问操作系统。不碰 `config.json`，因此不触发热重载，只广播一次 `netsense://status` |
 | `set_theme` | `code` | 切换界面配色并写进**软件配置**：`system` / `light` / `dark` 三档之一，存的就是用户选的这一档，返回值才是当下生效的那一套（`light`/`dark`）。认不出的 `code` 一律拒绝（`sett.theme_rejected`）而不是退回默认档 —— 界面发出一个后端不认的值说明前端有 bug，静默收下只会把它藏起来。与语言同一条判据：不碰 `config.json`，不触发热重载，只广播一次 `netsense://status`（载荷里的 `theme` 是算出来的那一套），并记一条 `notify.theme_set` |
 | `get_theme` | — | 界面**此刻**该用哪套配色（`light` / `dark`）。给的是算出来的那一套，不是 `settings.json` 里存的那一档：`system` 要说清现在是什么颜色必须问操作系统（`platform::ui_prefers_dark`，答案缓存 60s），而这一句问话属于后端 —— 决定做一次，五座窗口才是同一份答案。软件设置与日志窗口用它；编辑器在首屏那一批里问一次

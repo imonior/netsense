@@ -249,6 +249,16 @@ pub struct AppConfig {
     /// [`crate::netproxy`] 里，这里只管存什么。
     #[serde(default)]
     pub proxy: crate::netproxy::ProxySetting,
+    /// 编辑器「新建脚本」的默认存储文件夹（绝对路径）。缺省 = 用自动化配置旁的
+    /// `<配置目录>/scripts` —— 那正是引擎已经授信的目录。
+    ///
+    /// 它只决定**新脚本写到哪里**，不参与白名单判定：新建脚本写完后会把其绝对路径
+    /// 登记进 `config.allowed_scripts`（见 `ipc::save_script`），所以无论存到哪个目录，
+    /// 能否执行仍由那一条现成的安全边界说了算。这里不另造一个「受信目录」，免得两份
+    /// 信任规则分叉 —— 那份分叉正是 `resolve_script` / `is_script_allowed` 注释里反复警告的。
+    /// 手填的相对路径与坏值在 `clamped()` 里收成 `None`（回默认目录）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_dir: Option<String>,
     /// 三个主窗口上次关闭时的尺寸（见 [`WindowSizes`]）。
     ///
     /// 它改变的是界面怎么显示，不改任何下发内容 —— 与上面几个字段同一条判据。
@@ -405,6 +415,7 @@ impl Default for AppConfig {
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
             log_level: default_log_level(),
             proxy: crate::netproxy::ProxySetting::default(),
+            script_dir: None,
             window_sizes: WindowSizes::default(),
             window_spots: WindowSpots::default(),
             silent_execution: false,
@@ -464,6 +475,15 @@ impl AppConfig {
             },
             other => other.clone(),
         };
+        // 脚本存储目录只收绝对路径：相对路径会随进程 CWD 漂移，而新建脚本写下去之后
+        // 登记进白名单的是绝对路径 —— 两侧（写文件 / 登记）必须对同一份目录达成一致。
+        // 坏值退回缺省目录（None），而不是硬记一个永远走不到的路径。
+        self.script_dir = self.script_dir.take().and_then(|d| {
+            let d = d.trim().to_string();
+            std::path::Path::new(&d)
+                .is_absolute()
+                .then_some(d)
+        });
         self.window_sizes = self.window_sizes.clamped();
         self.update_mirror = self.update_mirror.clamped();
         self.dns_fallback = self.dns_fallback.clone().clamped();
@@ -967,6 +987,7 @@ mod tests {
             proxy: ProxySetting::Manual {
                 url: "http://127.0.0.1:7890".into(),
             },
+            script_dir: None,
             window_sizes: WindowSizes::default(),
             window_spots: WindowSpots::default(),
             silent_execution: false,
@@ -1042,6 +1063,7 @@ mod tests {
             proxy: ProxySetting::Manual {
                 url: "file:///etc/passwd".into(),
             },
+            script_dir: None,
             window_sizes: WindowSizes::default(),
             window_spots: WindowSpots::default(),
             silent_execution: false,
@@ -1062,6 +1084,7 @@ mod tests {
             proxy: ProxySetting::Manual {
                 url: "SOCKS5://10.0.0.1:1080".into(),
             },
+            script_dir: None,
             window_sizes: WindowSizes::default(),
             window_spots: WindowSpots::default(),
             silent_execution: false,
@@ -1337,6 +1360,7 @@ mod tests {
             log_retention_days: 0,
             log_level: "info".into(),
             proxy: ProxySetting::default(),
+            script_dir: None,
             window_sizes: WindowSizes::default(),
             window_spots: WindowSpots::default(),
             silent_execution: false,

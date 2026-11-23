@@ -14,7 +14,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use tauri::{Manager, State};
 
-use crate::config::{FallbackConfig, Profile};
+use crate::automation::{is_script_allowed, resolve_script, AllowedScripts};
+use crate::config::{Config, FallbackConfig, Profile};
 use crate::engine::{ActionKind, Msg};
 use crate::i18n;
 use crate::log;
@@ -508,6 +509,219 @@ pub fn get_editor_enumerations(state: State<'_, std::sync::Arc<AppState>>) -> St
 #[tauri::command(async)]
 pub fn pick_app(state: State<'_, std::sync::Arc<AppState>>) -> Result<Option<String>, String> {
     state.plat.pick_app()
+}
+
+/// 编辑器脚本路径那一行的「浏览…」：系统文件选择器挑一个脚本文件，把路径抄进输入框。
+/// 取消 → `Ok(None)`，界面什么都不做；起不来 → 原样报错。
+/// 与 `pick_app` 同一条纪律：这里只**填路径**，能不能执行由 `AllowedScripts` 在真正运行时判定。
+#[tauri::command(async)]
+pub fn pick_script(state: State<'_, std::sync::Arc<AppState>>) -> Result<Option<String>, String> {
+    state.plat.pick_script()
+}
+
+/// Read-only trust probe used right after the editor's script picker: can this path run as-is?
+/// 只读授信判定：编辑器选完脚本后立刻问一句「这条路径现在能跑吗」。
+///
+/// The engine's own resolver and allow-list must answer — a frontend reimplementation would
+/// drift on canonical paths and path-component prefixes, turning the warning into a lie.
+/// 判定必须复用引擎执行时的那套 resolve + is_script_allowed；前端另写一份会在 canonical
+/// 路径、按路径分量前缀这些细节上分叉，提示就成了假话。
+#[tauri::command(async)]
+pub fn is_script_trusted(
+    state: State<'_, std::sync::Arc<AppState>>,
+    path: String,
+) -> bool {
+    let allowed = {
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        AllowedScripts {
+            scripts_dir: state.scripts_dir.clone(),
+            explicit: cfg.allowed_scripts.clone(),
+        }
+    };
+    is_script_allowed(&resolve_script(&path, &allowed), &allowed)
+}
+
+/// Add one script path to the explicit allow-list after the user confirms the picker warning.
+/// 用户在「此脚本当前不会被执行」的确认窗里点允许后，把这条路径单独登记进白名单。
+///
+/// Canonicalize first: the engine compares canonical paths, so storing the spelled path would
+/// leave a rule that never matches (symlinks, `..`, trailing dots all break it).
+/// 先 canonical 再登记：引擎按 canonical 路径比对，存拼写形式会留下一条永远命不中的规则
+/// （符号链接、`..`、尾部句点都会踩到）。
+///
+/// Whole-config replacement, same as `save_script`: fallback and tunnel_names must survive,
+/// otherwise a later "save global" in the editor would silently drop what was just added.
+/// 与 `save_script` 同一套整体替换语义：fallback / tunnel_names 必须原样带上，
+/// 否则编辑器随后「保存全局项」会把刚加的这条悄悄抹掉。
+#[tauri::command(async)]
+pub fn trust_script(
+    state: State<'_, std::sync::Arc<AppState>>,
+    path: String,
+) -> Result<String, String> {
+    let abs = std::path::Path::new(path.trim())
+        .canonicalize()
+        .map_err(|_| i18n::t("editor.script_trust_missing"))?;
+    if !abs.is_file() {
+        return Err(i18n::t("editor.script_trust_missing"));
+    }
+    let abs = abs.display().to_string();
+    {
+        let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = cfg.clone();
+        next.allowed_scripts = allowed_scripts_with(&next, &abs);
+        next.validate()?;
+        next.save(&state.config_path)?;
+        *cfg = next;
+        state.config_replaced();
+    }
+    state::post(&state, Msg::Wake);
+    Ok(abs)
+}
+
+/// Return a copy of the allow-list with `path` present, without touching the input.
+/// 返回加上 `path` 后的白名单副本，不改入参 —— 纯函数，单测可钉住「不重复 / 不误删」。
+fn allowed_scripts_with(cfg: &Config, path: &str) -> Vec<String> {
+    let mut scripts = cfg.allowed_scripts.clone();
+    if !scripts.iter().any(|p| p == path) {
+        scripts.push(path.to_string());
+    }
+    scripts
+}
+
+/// 设置里「默认脚本文件夹」的「选择文件夹」：系统目录选择器。取消 → `Ok(None)`。
+#[tauri::command(async)]
+pub fn pick_script_folder(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    state.plat.pick_script_folder()
+}
+
+/// 新建脚本的**默认存储文件夹**。缺省 = 自动化配置旁的 `<配置目录>/scripts` —— 那正是
+/// 引擎已经授信的目录；返回值永远是绝对路径，界面照它回显。
+#[tauri::command]
+pub fn get_script_folder(state: State<'_, std::sync::Arc<AppState>>) -> String {
+    let configured = state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .script_dir
+        .clone();
+    configured
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.scripts_dir.clone())
+        .display()
+        .to_string()
+}
+
+/// 设「默认脚本文件夹」：`path` 必须是绝对路径（`""` = 恢复缺省，走配置旁的 scripts）。
+/// 落盘走 `AppConfig::save`（原子写 + fsync），并当场 `clamped()` —— 手填的坏值不会
+/// 留到下一次启动才被收掉，界面按返回值回显的就是落盘后的真值。
+#[tauri::command(async)]
+pub fn set_script_folder(
+    state: State<'_, std::sync::Arc<AppState>>,
+    path: String,
+) -> Result<String, String> {
+    let next = if path.trim().is_empty() {
+        None
+    } else {
+        let p = std::path::PathBuf::from(path.trim());
+        if !p.is_absolute() {
+            return Err(i18n::t("sett.script_folder_bad"));
+        }
+        Some(p.display().to_string())
+    };
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = s.clone();
+        cfg.script_dir = next.clone();
+        cfg.save(&state.settings_path)?;
+        *s = cfg;
+    }
+    Ok(next
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.scripts_dir.clone())
+        .display()
+        .to_string())
+}
+
+/// 纯文件名校验：只接受一段普通文件名，不接受任何能改变落盘位置的写法。
+///
+/// 路径分隔符与 `..` 必须挡住 —— 这是「新建脚本」变成任意路径写入的口子；
+/// `.` / `..` / 空串挡住 —— 那些指向目录而不是文件。反向的 NUL 也要挡，
+/// 免得 Rust 侧接受、Windows 侧在拼路径时截断出一个意料之外的文件。
+fn valid_script_name(raw: &str) -> bool {
+    let name = raw.trim();
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && !name.contains("..")
+}
+
+/// 在「默认脚本文件夹」里新建一个脚本文件，并把它登记进 `config.allowed_scripts`。
+///
+/// 两步必须都在、且顺序固定：**先写盘成功，再登记白名单** —— 反过来会在写失败时
+/// 留下一条指向不存在文件的白名单项，用户照着它排查「脚本为什么没跑」。
+/// 登记的是绝对路径：`resolve_script` 对绝对路径原样返回，`is_script_allowed` 按
+/// canonical 路径比对，两者对同一份文件 —— 这正是那条安全边界要求的同源。
+///
+/// `name` 只接受**纯文件名**：无路径分隔符、无 `..`、非空。目录由后端决定（默认脚本
+/// 文件夹），前端拼的路径一律不接受 —— 否则一次「新建脚本」就等于一次任意路径写入。
+#[tauri::command(async)]
+pub fn save_script(
+    state: State<'_, std::sync::Arc<AppState>>,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    let name = name.trim();
+    if !valid_script_name(name) {
+        return Err(i18n::t("editor.script_bad_name"));
+    }
+    let dir = {
+        let configured = state
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .script_dir
+            .clone();
+        configured
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| state.scripts_dir.clone())
+    };
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::tf("upd.script_write", &[("prefix", "folder"), ("error", &e.to_string())]))?;
+    let path = dir.join(name);
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| i18n::tf("upd.script_write", &[("prefix", "script"), ("error", &e.to_string())]))?;
+    // 可执行位：macOS / Linux 直接 exec 脚本，缺了这一位就是权限拒绝。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o111))
+            .map_err(|e| e.to_string())?;
+    }
+    let abs = path.canonicalize().unwrap_or(path).display().to_string();
+
+    // 白名单登记：整体替换语义，必须把 fallback / tunnel_names 一起带上（同 save_global）。
+    {
+        let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = cfg.clone();
+        if !next.allowed_scripts.iter().any(|p| p == &abs) {
+            next.allowed_scripts.push(abs.clone());
+        }
+        next.validate()?;
+        next.save(&state.config_path)?;
+        *cfg = next;
+        state.config_replaced();
+    }
+    state::post(&state, Msg::Wake);
+    Ok(abs)
 }
 
 /// 切换 UI 语言并写回软件配置（`language` 字段）。
@@ -2427,11 +2641,12 @@ fn is_newer(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_matches, install_verdict, installable_ext, is_plausible_ip, mark_mainland,
-        ordered_endpoints, parse_ipapi, parse_ipify, parse_ipip, parse_ipsb, parse_ipwho,
-        pick_asset_for, pick_install_asset, pick_install_asset_for, pick_verified_asset,
-        platform_of, token_anchored, IP_ENDPOINTS, Sums,
+        allowed_scripts_with, asset_matches, install_verdict, installable_ext, is_plausible_ip,
+        mark_mainland, ordered_endpoints, parse_ipapi, parse_ipify, parse_ipip, parse_ipsb,
+        parse_ipwho, pick_asset_for, pick_install_asset, pick_install_asset_for,
+        pick_verified_asset, platform_of, token_anchored, valid_script_name, IP_ENDPOINTS, Sums,
     };
+    use crate::config::Config;
     use serde_json::json;
 
     fn url(s: &str) -> Option<String> {
@@ -2953,5 +3168,46 @@ mod tests {
         for lang in ["", "  ", "EN"] {
             assert_eq!(ordered_endpoints(lang).len(), IP_ENDPOINTS.len());
         }
+    }
+
+    #[test]
+    fn a_new_script_name_cannot_escape_the_folder() {
+        // 普通文件名全部放行：脚本可以是无扩展名的可执行文件，也可以是各种后缀。
+        for name in ["on-connect.sh", "keepalive", "my script.py", ".hidden.ps1", "a-b_c.bat"] {
+            assert!(valid_script_name(name), "should be allowed: {name}");
+        }
+        // 任何能改变落盘位置的写法都要挡住 —— 这是「新建脚本」变任意写入的口子。
+        for name in [
+            "", "   ", ".", "..", "../escape.sh", "sub/dir.sh", "sub\\dir.sh",
+            "a..b", "..hidden", "x\0.sh",
+        ] {
+            assert!(!valid_script_name(name), "must be rejected: {name:?}");
+        }
+    }
+
+    #[test]
+    fn trusting_a_script_adds_it_once_and_leaves_the_rest_of_the_config_alone() {
+        // Registration only appends: confirming the same script twice must not pile up duplicates.
+        // 登记只追加一条：重复确认同一份脚本不能把白名单撑成一串重复项。
+        let mut cfg = Config {
+            allowed_scripts: vec!["/opt/ops/old.sh".into()],
+            ..Default::default()
+        };
+        cfg.tunnel_names.insert("home".into(), "Home".into());
+        assert_eq!(
+            allowed_scripts_with(&cfg, "/opt/ops/new.sh"),
+            vec!["/opt/ops/old.sh", "/opt/ops/new.sh"]
+        );
+        assert_eq!(
+            allowed_scripts_with(&cfg, "/opt/ops/old.sh"),
+            vec!["/opt/ops/old.sh"]
+        );
+        // Pure: the input config (fallback / tunnel names / allow-list) is untouched; the
+        // caller gets a fresh copy, which is what makes a whole-config swap under lock safe.
+        // 纯函数：入参里那份配置（兜底 / 隧道名 / 白名单）原样不动，
+        // 调用方拿到的是新副本，才敢在持锁时整体替换。
+        assert_eq!(cfg.allowed_scripts, vec!["/opt/ops/old.sh"]);
+        assert_eq!(cfg.tunnel_names.get("home").map(String::as_str), Some("Home"));
+        assert!(cfg.fallback.is_none());
     }
 }

@@ -4,6 +4,13 @@ NetSense のすべての重要な変更をここに記録する。形式は
 [Keep a Changelog](https://keepachangelog.com/) に基づき、本プロジェクトは
 [セマンティックバージョニング](https://semver.org/) に準拠する。
 
+## [2.1.0] - 2026-11-23
+
+### Added
+
+- **自動化エディターがスクリプトをスクリプトと呼ぶようになり、その場で選択・作成もできるようになりました。** 以前アクション行は Path と表示されていましたが、その欄には常にスクリプト ファイルだけが入っていました。現在は `editor.action_path` が Script と表示されます。入力欄の参照ボタンは `pick_script` でネイティブのファイル選択ダイアログを開き、新しい Script ボタンは編集画面を開いて `save_script` が内容を `get_script_folder` / `set_script_folder` で選んだフォルダーへ書き込みます。このフォルダーは `<config>/scripts` が既定で、ユーザーが選ぶまで `script_dir` は未設定のままです。新規保存したスクリプトの絶対パスは即座に `config.allowed_scripts` へ登録され、ホワイトリストをもう一度編集しなくても実行できます。（`frontend/editor.html`、`frontend/settings.html`、`src-tauri/src/ipc.rs`、`src-tauri/src/i18n/`）
+- **自動化エディターで実行できないスクリプトを選ぶと警告し、そのパスだけをその場で許可できるようになりました。** 以前はスクリプトを選んでもパスを入力欄に写すだけで、エンジンが実行時に拒否していたため、設定は保存されたように見えながらアクションが静かに動きませんでした。選択後にバックエンドへ `is_script_trusted` を問い合わせ、信頼されていないパスなら確認画面を開いて許可前は拒否されることを説明します。明示的に許可したときだけ `trust_script` を呼び、そのパスだけを `config.allowed_scripts` に登録して canonical パスをエディターへ書き戻します。キャンセルしても入力欄は変わりません。新しいコマンド 2 つと i18n キー 5 つを 5 言語すべてに追加し、辞書は 750 keys になりました。（`src-tauri/src/ipc.rs`、`frontend/editor.html`、`src-tauri/src/i18n/`）
+
 ## [2.0.2] - 2026-11-19
 
 ### Added

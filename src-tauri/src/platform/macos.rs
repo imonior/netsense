@@ -2747,6 +2747,40 @@ impl NetworkPlatform for MacPlatform {
         }
     }
 
+    fn pick_script(&self) -> Result<Option<String>, String> {
+        // `choose file` 不按扩展名过滤：脚本可以是无扩展名的可执行文件，也可以是
+        // .sh/.py/.ps1 —— 列死一份类型表只会把合法脚本挡在门外。用户自己看得懂文件。
+        let prompt = i18n::t("pal.pick_script_title")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let osa = format!(
+            "POSIX path of (choose file with prompt \"{prompt}\")"
+        );
+        match run("osascript", &["-e", &osa]) {
+            Ok(out) => {
+                let p = out.trim().trim_end_matches('/').to_string();
+                Ok((!p.is_empty()).then_some(p))
+            }
+            Err(e) if e.contains("(-128)") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn pick_script_folder(&self) -> Result<Option<String>, String> {
+        let prompt = i18n::t("pal.pick_script_folder")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let osa = format!("POSIX path of (choose folder with prompt \"{prompt}\")");
+        match run("osascript", &["-e", &osa]) {
+            Ok(out) => {
+                let p = out.trim().trim_end_matches('/').to_string();
+                Ok((!p.is_empty()).then_some(p))
+            }
+            Err(e) if e.contains("(-128)") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String> {
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         if elevated {

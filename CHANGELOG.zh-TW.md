@@ -4,6 +4,13 @@ NetSense 的所有重要變更都記錄於此。格式依據
 [Keep a Changelog](https://keepachangelog.com/)，本專案遵循
 [語意化版本](https://semver.org/)。
 
+## [2.1.0] - 2026-11-23
+
+### Added
+
+- **自動化編輯器把指令碼就叫指令碼，並支援就地瀏覽與新增。** 過去動作列標成 Path，其實那一格從來只放指令碼；現在 `editor.action_path` 顯示為 Script。輸入框後的瀏覽按鈕透過 `pick_script` 開啟系統檔案選擇器，新增的 Script 按鈕彈出編輯視窗，內容由 `save_script` 寫入 `get_script_folder` / `set_script_folder` 所選的目錄。該目錄預設為 `<config>/scripts`，使用者沒選之前 `script_dir` 保持未設定；新增成功後絕對路徑立即登錄進 `config.allowed_scripts`，無需再手改一次白名單就能執行。（`frontend/editor.html`、`frontend/settings.html`、`src-tauri/src/ipc.rs`、`src-tauri/src/i18n/`）
+- **自動化編輯器選到目前不能執行的指令碼時會先提醒，並可當場只放行這一條路徑。** 過去選擇指令碼只是把路徑抄進輸入框，引擎到執行時才拒絕，於是設定看似已儲存、動作卻一直沒有執行。現在選完先問後端 `is_script_trusted`；不授信就彈確認窗說明該指令碼在放行前會被拒絕，只有明確點允許才呼叫 `trust_script`，把這一條路徑登錄進 `config.allowed_scripts`，並把 canonical 路徑回填編輯器；取消則保持原值。新增兩條命令與五個 i18n key，五種語言齊備，字典達到 750 keys。（`src-tauri/src/ipc.rs`、`frontend/editor.html`、`src-tauri/src/i18n/`）
+
 ## [2.0.2] - 2026-11-19
 
 ### Added

@@ -4,6 +4,13 @@ All notable changes to NetSense are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-11-23
+
+### Added
+
+- **The automation editor now calls a script a script, and can browse or create one in place.** The action row formerly labelled Path now reads Script (`editor.action_path`): it only ever held a script file. The field's browse button calls `pick_script` to open the native file picker, and the new Script button opens an editor whose content is written by `save_script` into the folder chosen via `get_script_folder` / `set_script_folder`. That folder defaults to `<config>/scripts`; `script_dir` stays unset until the user picks one. Saving a new script registers its absolute path in `config.allowed_scripts` immediately, so the file just written can run without a second whitelist edit. (`frontend/editor.html`, `frontend/settings.html`, `src-tauri/src/ipc.rs`, `src-tauri/src/i18n/`)
+- **Choosing a script in the automation editor now warns when that script cannot run, and can grant just that one path on the spot.** Picking a script used to only copy its path into the field; the engine then refused it at evaluation time, so the configuration looked saved while the action silently never fired. The picker now asks the backend `is_script_trusted` before filling the field. An untrusted path opens a confirmation explaining that the script will be refused until allowed; only an explicit allow calls `trust_script`, which registers that single path in `config.allowed_scripts` and fills the canonical path back into the editor. Cancelling leaves the field unchanged. Two new commands and five new i18n keys ship in all five languages, bringing the table to 750 keys. (`src-tauri/src/ipc.rs`, `frontend/editor.html`, `src-tauri/src/i18n/`)
+
 ## [2.0.2] - 2026-11-19
 
 ### Added

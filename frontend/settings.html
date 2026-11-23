@@ -333,6 +333,16 @@
       <h3 id="sec-scripts" data-i18n="sett.section_scripts">Allowed scripts</h3>
       <div class="hint" id="hint-scripts" data-i18n="sett.scripts_hint">Two places are trusted: every script under the folder below, and every path listed here. Anything else is refused.</div>
       <div class="path" id="p-scripts-dir">—</div>
+      <!-- 新建脚本的默认存储位置：与「受信目录」分开显示，别让人误以为改这里就是改白名单。
+           在这里创建的脚本由 save_script 写盘后登记进下面那张表，执行权限仍归那条边界。 -->
+      <h4 class="sub" id="sec-script-folder" data-i18n="sett.script_folder">Default script folder</h4>
+      <div class="hint" id="hint-script-folder" data-i18n="sett.script_folder_hint">Where new scripts are saved. Scripts created here are added to the allow-list so they can run.</div>
+      <div class="path" id="p-script-folder">—</div>
+      <div class="row" style="margin-top:6px">
+        <span class="k"></span>
+        <button id="btn-script-folder-pick" data-i18n="sett.script_folder_pick">Choose folder</button>
+        <button id="btn-script-folder-reset" data-i18n="sett.script_folder_reset">Use default</button>
+      </div>
       <textarea id="in-scripts" rows="4" spellcheck="false" data-i18n-placeholder="sett.scripts_paths" placeholder="One absolute path per line"></textarea>
       <div class="hint" id="hint-scripts-when" data-i18n="sett.scripts_when">Checked by the backend each time a run_script action runs — when the engine fires it and when you apply it by hand. Without this rule, any config file you import could run anything on this machine.</div>
       <div class="row" style="margin-top:8px">
@@ -1344,6 +1354,29 @@
         el("in-scripts").value = (cfg.allowed_scripts || []).join("\n");
       } catch (e) { /* 浏览器直接打开时静默：没有后端可问 */ }
     }
+
+    // 默认脚本文件夹：只决定「新建脚本写到哪」，与上面的受信目录是两回事。
+    // 每次窗口获得焦点都会重读 get_app_settings，而那里面没有这个字段 —— 单发一条，
+    // 免得改了这边还要动那份已经很长的快照。
+    async function loadScriptFolder() {
+      try { el("p-script-folder").textContent = await invoke("get_script_folder") || "—"; }
+      catch (e) { /* 浏览器直接打开时静默 */ }
+    }
+    el("btn-script-folder-pick").onclick = async () => {
+      try {
+        const picked = await invoke("pick_script_folder");
+        if (!picked) return;                      // 取消什么都不做
+        el("p-script-folder").textContent = await invoke("set_script_folder", { path: picked });
+        toast(t("sett.saved", "Saved"));
+      } catch (e) { show("err-scripts", String(e)); }
+    };
+    el("btn-script-folder-reset").onclick = async () => {
+      try {
+        el("p-script-folder").textContent = await invoke("set_script_folder", { path: "" });
+        toast(t("sett.saved", "Saved"));
+      } catch (e) { show("err-scripts", String(e)); }
+    };
+    loadScriptFolder();
 
     el("in-scripts").oninput = () => { scriptsDirty = true; };
     el("btn-scripts").onclick = async () => {

@@ -1067,6 +1067,15 @@ pub trait NetworkPlatform: Send + Sync {
     /// 报错。选择器起不来（headless、没装对话框工具）才是 `Err`。
     fn pick_app(&self) -> Result<Option<String>, String>;
 
+    /// 系统文件选择器挑一个**脚本文件**（编辑器脚本路径那一行的「浏览」）。
+    /// 取消 → `Ok(None)`；起不来 → `Err`。与 `pick_app` 同一套约定：
+    /// 它只负责把路径填进输入框，能不能执行仍由 `AllowedScripts` 白名单判定。
+    fn pick_script(&self) -> Result<Option<String>, String>;
+
+    /// 系统**目录**选择器挑一个文件夹（设置里选「默认脚本文件夹」）。
+    /// 取消 → `Ok(None)`；起不来 → `Err`。
+    fn pick_script_folder(&self) -> Result<Option<String>, String>;
+
     /// 已保存的无线网络列表（编辑器下拉填充）。平台不支持时返回 `None`。
     fn list_known_ssids(&self) -> Option<Vec<String>>;
 

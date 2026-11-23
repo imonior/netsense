@@ -1292,6 +1292,39 @@ impl NetworkPlatform for LinuxPlatform {
         Err(i18n::t("pal.no_file_dialog"))
     }
 
+    fn pick_script(&self) -> Result<Option<String>, String> {
+        let title = i18n::t("pal.pick_script_title");
+        if in_path("zenity") {
+            let (ok, out) = run_dialog("zenity", &["--file-selection", &format!("--title={title}")])?;
+            let p = out.trim();
+            return Ok((ok && !p.is_empty()).then(|| p.to_string()));
+        }
+        if in_path("kdialog") {
+            let (ok, out) = run_dialog("kdialog", &["--getopenfilename", ".", &title])?;
+            let p = out.trim();
+            return Ok((ok && !p.is_empty()).then(|| p.to_string()));
+        }
+        Err(i18n::t("pal.no_file_dialog"))
+    }
+
+    fn pick_script_folder(&self) -> Result<Option<String>, String> {
+        let title = i18n::t("pal.pick_script_folder");
+        if in_path("zenity") {
+            let (ok, out) = run_dialog(
+                "zenity",
+                &["--file-selection", "--directory", &format!("--title={title}")],
+            )?;
+            let p = out.trim();
+            return Ok((ok && !p.is_empty()).then(|| p.to_string()));
+        }
+        if in_path("kdialog") {
+            let (ok, out) = run_dialog("kdialog", &["--getexistingdirectory", ".", &title])?;
+            let p = out.trim();
+            return Ok((ok && !p.is_empty()).then(|| p.to_string()));
+        }
+        Err(i18n::t("pal.no_file_dialog"))
+    }
+
     fn run_script(&self, path: &str, args: &[String], elevated: bool) -> Result<(), String> {
         if elevated {
             // 用户脚本提权：显式走授权框（sudo -n 失败则 pkexec），与网络配置操作区别对待。

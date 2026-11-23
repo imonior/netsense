@@ -4,6 +4,13 @@ NetSense 的所有重要变更记录于此。格式基于
 [Keep a Changelog](https://keepachangelog.com/)，本项目遵循
 [语义化版本](https://semver.org/)。
 
+## [2.1.0] - 2026-11-23
+
+### Added
+
+- **自动化编辑器把脚本就叫脚本，并支持就地浏览与新建。** 过去动作行标成 Path，其实那一格从来只放脚本；现在 `editor.action_path` 显示为 Script。输入框后的浏览按钮通过 `pick_script` 打开系统文件选择器，新增的 Script 按钮弹出编辑窗，内容由 `save_script` 写入 `get_script_folder` / `set_script_folder` 所选的目录。该目录缺省为 `<config>/scripts`，用户没选之前 `script_dir` 保持未设置；新建成功后绝对路径立即登记进 `config.allowed_scripts`，无需再手改一次白名单就能执行。（`frontend/editor.html`、`frontend/settings.html`、`src-tauri/src/ipc.rs`、`src-tauri/src/i18n/`）
+- **自动化编辑器选中当前不能运行的脚本时会先提醒，并可当场只放行这一条路径。** 过去选脚本只是把路径抄进输入框，引擎到执行时才拒绝，于是配置看着保存了、动作却一直没跑。现在选完先问后端 `is_script_trusted`；不授信就弹确认窗说明该脚本在放行前会被拒绝，只有明确点允许才调用 `trust_script`，把这一条路径登记进 `config.allowed_scripts`，并把 canonical 路径回填编辑器；取消则保持原值。新增两条命令与五个 i18n key，五种语言齐备，字典达到 750 keys。（`src-tauri/src/ipc.rs`、`frontend/editor.html`、`src-tauri/src/i18n/`）
+
 ## [2.0.2] - 2026-11-19
 
 ### Added

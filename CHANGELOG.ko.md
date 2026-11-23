@@ -4,6 +4,13 @@ NetSense의 모든 주요 변경 사항을 여기에 기록합니다. 형식은
 [Keep a Changelog](https://keepachangelog.com/)를 따르며, 이 프로젝트는
 [의미론적 버전](https://semver.org/)을 준수합니다。
 
+## [2.1.0] - 2026-11-23
+
+### Added
+
+- **자동화 편집기가 스크립트를 스크립트라고 부르며, 그 자리에서 선택하고 만들 수 있습니다.** 예전에는 액션 행이 Path로 표시되었지만 실제로는 스크립트 파일만 들어가는 칸이었습니다. 이제 `editor.action_path`가 Script로 표시됩니다. 입력란의 찾아보기 버튼은 `pick_script`로 네이티브 파일 선택 창을 열고, 새 Script 버튼은 편집 창을 열어 `save_script`가 내용을 `get_script_folder` / `set_script_folder`로 선택한 폴더에 씁니다. 이 폴더의 기본값은 `<config>/scripts`이며, 사용자가 선택하기 전에는 `script_dir`이 설정되지 않은 상태로 둡니다. 새로 저장한 스크립트의 절대 경로는 곧바로 `config.allowed_scripts`에 등록되므로 허용 목록을 다시 편집하지 않아도 실행할 수 있습니다. (`frontend/editor.html`, `frontend/settings.html`, `src-tauri/src/ipc.rs`, `src-tauri/src/i18n/`)
+- **자동화 편집기에서 실행할 수 없는 스크립트를 선택하면 경고하고, 그 경로 하나만 즉시 허용할 수 있습니다.** 이전에는 스크립트를 선택해도 경로를 입력란에 옮기기만 했고 엔진이 실행 시점에 거부했으므로, 설정은 저장된 것처럼 보이지만 액션은 조용히 실행되지 않았습니다. 이제 선택 직후 백엔드에 `is_script_trusted`를 물어보고, 신뢰되지 않은 경로라면 허용 전에는 거부된다는 확인 창을 엽니다. 명시적으로 허용할 때만 `trust_script`를 호출해 해당 경로 하나를 `config.allowed_scripts`에 등록하고 canonical 경로를 편집기로 되돌려 씁니다. 취소하면 입력란은 그대로입니다. 새 명령 2개와 i18n 키 5개를 5개 언어 모두에 추가해 사전이 750 keys가 되었습니다. (`src-tauri/src/ipc.rs`, `frontend/editor.html`, `src-tauri/src/i18n/`)
+
 ## [2.0.2] - 2026-11-19
 
 ### Added

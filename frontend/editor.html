@@ -128,6 +128,11 @@
     .app-row { display: flex; align-items: center; gap: 4px; position: relative; }
     .app-row .combo-box { flex: 1 1 auto; min-width: 0; }
     .app-row .mini-btn { flex: none; }
+    /* 脚本路径那一行：输入框 + 「浏览」+「新建」。窄列里两个按钮各自占死宽度，
+       输入框拿剩下的 —— 路径可以很长，但按钮不能被挤没（看不见的按钮等于没有）。 */
+    .script-row { display: flex; align-items: center; gap: 4px; }
+    .script-row input[type=text] { flex: 1 1 auto; min-width: 0; }
+    .script-row .mini-btn { flex: none; }
     input:focus, select:focus, textarea:focus { border-color: var(--btn-primary); }
     /* 这里从前写着 `outline: none`：它比 theme.css 的 `:focus-visible` 更具体，于是把键盘
        焦点环一起吃掉了 —— 同一件事在另外三扇窗口里是一圈描边，只有编辑器剩一条边框变色。 */
@@ -307,6 +312,16 @@
 </div>
 <div class="modal-mask" id="tun-mask" hidden>
   <div class="modal wide" id="tun-modal"></div>
+</div>
+<!-- 新建脚本：文件名 + 内容，写进「默认脚本文件夹」并登记进白名单。
+     归到 fixed 层之外的一层弹窗：它有自己的确定/取消，不与 apply/del 共用那个 mask。 -->
+<div class="modal-mask" id="script-mask" hidden>
+  <div class="modal wide" id="script-modal"></div>
+</div>
+<!-- 选中的脚本不在授信目录 / 白名单里：确认是否单独登记这条路径。
+     与新建脚本那层分开：这里是「已有文件，只加权限」，不写盘、不改内容。 -->
+<div class="modal-mask" id="trust-mask" hidden>
+  <div class="modal" id="trust-modal"></div>
 </div>
 
 <script>
@@ -880,8 +895,11 @@
   /// 认人靠 `data-combo-input`（值就是那条绑定路径），不靠拼 CSS 选择器 ——
   /// 路径里满是点，拼出来的选择器要么得转义要么直接选错。
   function pickIntoInput(path, value) {
+    // 先找组合框（app 那一格），再退到普通绑定输入框（脚本路径那一格没有下拉）。
     const inp = Array.from(document.querySelectorAll("[data-combo-input]"))
-      .find(el => el.dataset.comboInput === path);
+      .find(el => el.dataset.comboInput === path)
+      || Array.from(document.querySelectorAll("[data-bind]"))
+        .find(el => el.dataset.bind === path);
     if (!inp) return;
     inp.value = value;
     onField(inp);
@@ -908,6 +926,122 @@
       drop + `</span>` +
       `<button type="button" class="mini-btn" data-act="browse-app" data-path="${path}">` +
       `${esc(t("editor.browse"))}</button></div>`;
+  }
+
+  /// 脚本路径那格：手输 / 「浏览」挑现成脚本 / 「新建」写一段新脚本，三个入口写同一个字段。
+  /// 浏览只把路径抄进输入框，能不能跑仍由后端白名单说了算；新建则由 save_script 写盘后
+  /// 顺手把绝对路径登记进白名单，于是「刚建的脚本」立刻可用，不必再去设置里贴一遍。
+  function scriptField(path, value) {
+    return `<div class="full script-row">` +
+      `<input type="text" value="${esc(value ?? "")}" placeholder="scripts/my-script.sh" ` +
+      `data-bind="${path}">` +
+      `<button type="button" class="mini-btn" data-act="browse-script" data-path="${path}" ` +
+      `title="${esc(t("editor.script_browse"))}">${esc(t("editor.browse"))}</button>` +
+      `<button type="button" class="mini-btn" data-act="new-script" data-path="${path}">` +
+      `${esc(t("editor.script_new"))}</button></div>`;
+  }
+
+  /// 弹出「新建脚本」窗。按钮所在的那一格由 data-path 记住：保存成功后直接把返回的路径
+  /// 写回那一格（pickIntoInput 走的是通用字段回写，会一并触发 dirty 与下游刷新）。
+  function openScriptModal(path) {
+    const modal = $("script-modal");
+    modal.innerHTML =
+      `<h3>${esc(t("editor.script_new_title"))}</h3>` +
+      `<div class="mv" style="margin-bottom:8px">${esc(t("sett.script_folder_hint"))}</div>` +
+      `<div class="grid2" style="margin-bottom:8px">` +
+      `<div><label>${esc(t("editor.script_filename"))}</label>` +
+      `<input type="text" id="script-name" style="width:100%" ` +
+      `placeholder="${esc(t("editor.script_filename_ph"))}"></div></div>` +
+      `<div style="margin-bottom:8px"><label>${esc(t("editor.script_body"))}</label>` +
+      `<textarea id="script-body" rows="10" spellcheck="false" style="width:100%;resize:vertical" ` +
+      `placeholder="${esc(t("editor.script_body_ph"))}"></textarea></div>` +
+      `<div class="err" id="script-err" hidden></div>` +
+      `<div class="row" style="justify-content:flex-end;gap:8px">` +
+      `<button id="script-cancel">${esc(t("editor.confirm_cancel"))}</button>` +
+      `<button class="primary" id="script-create">${esc(t("editor.script_create"))}</button></div>`;
+    $("script-mask").hidden = false;
+    const close = () => { $("script-mask").hidden = true; };
+    $("script-cancel").onclick = close;
+    $("script-create").onclick = async () => {
+      const name = $("script-name").value.trim();
+      const content = $("script-body").value;
+      const err = $("script-err");
+      // 前端先拦一遍纯文件名：后端也会校验，这里省一次往返、且把错话留在用户手边。
+      if (!name || name === "." || name === ".." || /[\\/]/.test(name) || name.includes("..")) {
+        err.textContent = t("editor.script_bad_name"); err.hidden = false; return;
+      }
+      if (!content.trim()) {
+        err.textContent = t("editor.script_empty"); err.hidden = false; return;
+      }
+      err.hidden = true;
+      $("script-create").disabled = true;
+      try {
+        const p = await invoke("save_script", { name, content });
+        // 后端把新脚本的绝对路径登记进 config.allowed_scripts。这里同步两份内存副本：
+        // 创建脚本会置 dirty，广播的代际变化因此不会触发重读；若不同步，随后保存全局项
+        // （兜底 / 隧道名）会用旧名单整体覆盖，刚建的脚本就被悄悄踢出白名单。
+        for (const list of [cfg.allowed_scripts, globalDraft.allowed_scripts]) {
+          if (list && !list.includes(p)) list.push(p);
+        }
+        pickIntoInput(path, p);
+        close();
+        toast(t("editor.script_created", { path: p }));
+      } catch (e) {
+        err.textContent = String(e); err.hidden = false;
+      } finally {
+        $("script-create").disabled = false;
+      }
+    };
+    if ($("script-name") && $("script-name").focus) $("script-name").focus();
+  }
+
+  /// "This script cannot run yet" confirmation. The picker only chooses a path; the
+  /// backend decides trust. If it says no, ask before granting — never silently add.
+  /// 「选中的脚本暂时不能跑」确认窗。选择器只负责挑路径，授信由后端判；判不通过就先问，
+  /// 绝不静默加白名单。
+  function openScriptTrustModal(fieldPath, picked) {
+    const modal = $("trust-modal");
+    modal.innerHTML =
+      `<h3>${esc(t("editor.script_trust_title"))}</h3>` +
+      `<div class="mv" style="margin-bottom:10px;word-break:break-all">` +
+      `${esc(t("editor.script_trust_msg", { path: picked }))}</div>` +
+      `<div class="err" id="trust-err" hidden></div>` +
+      `<div class="row" style="justify-content:flex-end;gap:8px">` +
+      // 两颗按钮走全局 click 委托（和编辑器其余按钮同一条路）：data-v 把用户选的路径
+      // 带到允许分支，不在模块里留一份「现在确认的是谁」的临时状态。
+      // Both buttons go through the global click delegate, like every other editor button;
+      // data-v carries the picked path instead of keeping a mutable "pending" global.
+      `<button data-act="trust-cancel">${esc(t("editor.confirm_cancel"))}</button>` +
+      `<button class="primary" data-act="trust-allow" data-path="${esc(fieldPath)}" ` +
+      `data-v="${esc(picked)}">${esc(t("editor.script_trust_confirm"))}</button></div>`;
+    $("trust-mask").hidden = false;
+    const allow = Array.from(document.querySelectorAll('[data-act="trust-allow"]'))[0];
+    if (allow && allow.focus) allow.focus();
+  }
+
+  /// Grant the picked script and fill its canonical path back into the field.
+  /// 登记选中的脚本，并把后端返回的 canonical 路径回填。
+  async function grantTrustedScript(fieldPath, picked, btn) {
+    const err = $("trust-err");
+    btn.disabled = true;
+    err.hidden = true;
+    try {
+      // 后端登记的是 canonical 路径。回填它的返回值而不是用户选的拼写形式，
+      // 配置里的路径才和白名单里那条指向同一份文件。
+      // The backend registers the canonical path; write that exact value back so the
+      // config and the allow-list point at the same file.
+      const abs = await invoke("trust_script", { path: picked });
+      for (const list of [cfg.allowed_scripts, globalDraft.allowed_scripts]) {
+        if (list && !list.includes(abs)) list.push(abs);
+      }
+      pickIntoInput(fieldPath, abs);
+      $("trust-mask").hidden = true;
+      toast(t("editor.script_trusted", { path: abs }));
+    } catch (e) {
+      err.textContent = String(e); err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   /// 全部候选浮层。展开与否记在 class 上，而不是一个「现在开着哪一条」的变量里：
@@ -1192,7 +1326,7 @@
     const ty = act.type || "launch_app";
     let body = `<div>${sel_(`${p}.action.type`, ty, ONE_TYPES())}</div>`;
     if (ty === "run_script") {
-      body += `<div class="full">${txt(`${p}.action.path`, act.path, "scripts/on-connect.sh")}</div>` +
+      body += scriptField(`${p}.action.path`, act.path) +
         `<div class="full">${lst(`${p}.action.args`, act.args, "--flag")}</div>` +
         `<div class="full">${chk(`${p}.action.elevated`, !!act.elevated, "editor.action_elevated", "inline")}</div>`;
     } else if (ty === "set_default_printer") {
@@ -1241,7 +1375,7 @@
       body += `<div>${txt(`${p}.action.provider`, act.provider, t("editor.provider"))}</div>` +
         `<div>${txt(`${p}.action.profile`, act.profile, t("editor.vpn_profile"))}</div>`;
     } else {
-      body += `<div class="full">${txt(`${p}.action.path`, act.path, "scripts/keepalive.sh")}</div>` +
+      body += scriptField(`${p}.action.path`, act.path) +
         `<div class="full">${lst(`${p}.action.args`, act.args, "")}</div>`;
     }
     body += row2("editor.health_interval", int(`${p}.action.interval_secs`, act.interval_secs ?? 30, "30"));
@@ -1998,6 +2132,31 @@
           .catch(err => toast(String(err)));
         return;
       }
+      case "browse-script": {
+        // 与 browse-app 同一条路：系统文件选择器挑脚本，路径抄进同一格（由输入框写配置）。
+        // 多一步：先问后端这条路径现在能不能跑。不授信就弹确认窗，用户点允许才登记白名单
+        // 并回填；取消则保持原值 —— 不让「选了却不会跑」的配置静默落盘。
+        // Ask the backend first: picking a path does not grant permission. An untrusted
+        // pick opens a confirmation; only an explicit allow registers it and fills the field.
+        const path = el.dataset.path;
+        invoke("pick_script")
+          .then(async picked => {
+            if (!picked) return;
+            let trusted;
+            try {
+              trusted = await invoke("is_script_trusted", { path: picked });
+            } catch (err) {
+              toast(String(err)); return;
+            }
+            if (trusted === true) pickIntoInput(path, picked);
+            else openScriptTrustModal(path, picked);
+          })
+          .catch(err => toast(String(err)));
+        return;
+      }
+      case "trust-cancel": $("trust-mask").hidden = true; return;
+      case "trust-allow": grantTrustedScript(el.dataset.path, el.dataset.v, el); return;
+      case "new-script": openScriptModal(el.dataset.path); return;
       case "copy-net": copyNet(el.dataset.val); return;
       case "add-rule": (draft.rules ||= []).push({ id: uid("r"), enabled: true, conditions: [] }); dirty = true; renderAll(); return;
       case "del-rule": draft.rules.splice(Number(el.dataset.i), 1); dirty = true; renderAll(); return;

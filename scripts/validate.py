@@ -665,6 +665,10 @@ def _check_claims(docs: dict[str, str], n_keys: int, langs: int) -> None:
 
     只对齐这几类最容易烂掉的：i18n key 数、IPC 命令数、界面语言数、本脚本的检查项数。
     「实现进度」「迁移」两节是历史快照，按小节标题跳过 —— 否则每次加文案都要去改写半年前的记录。
+    CHANGELOG 里带版本号的 `## [x.y.z]` 小节同理：那是发版当天的事实，不该被后续加 key 改写；
+    只有 `## [Unreleased]` 与其余文档里的当前声明才跟最新来源对齐。
+    The same applies to numbered CHANGELOG sections: they are facts from release day and must not
+    be rewritten just because the current key count moved. Only [Unreleased] and live docs are checked.
     单元测试数不在其列：cfg-gated 的平台测试让它在各台上本来就不同，写死一个数反而是假精确。
     """
     rules = [
@@ -676,7 +680,15 @@ def _check_claims(docs: dict[str, str], n_keys: int, langs: int) -> None:
     ]
     stale = []
     for name, text in docs.items():
+        historical = False
         for ln in text.splitlines():
+            # 已发布小节里的旧数字是历史事实，不是待同步的当前声明。
+            # Old numbers in released sections are history, not stale live claims.
+            if name.startswith("CHANGELOG") and ln.startswith("## ["):
+                historical = not ln.startswith("## [Unreleased]")
+                continue
+            if historical:
+                continue
             for rx, label, guard, want in rules:
                 if not guard(ln):
                     continue
